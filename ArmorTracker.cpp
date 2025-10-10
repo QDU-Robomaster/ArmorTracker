@@ -5,6 +5,10 @@
 #include <cmath>
 #include <utility>
 
+#include "cycle_value.hpp"
+#include "message.hpp"
+#include "transform.hpp"
+
 ArmorTracker::ArmorTracker(LibXR::HardwareContainer& /*hw*/,
                            LibXR::ApplicationManager& /*app*/, Config cfg)
     : cfg_(std::move(cfg))
@@ -17,7 +21,7 @@ ArmorTracker::ArmorTracker(LibXR::HardwareContainer& /*hw*/,
 
   // 初值（和老逻辑一致）
   rt_.tracking_thres = cfg_.thresholds.tracking_thres;
-  io_.base_transform_static = cfg_.frames.base_transform_static;
+  io_.gimbal_to_camera_transform_static = cfg_.frames.base_transform_static;
 
   // ---------------- EKF 设置 ----------------
   // 状态 x = [xc, vxc, yc, vyc, za, vza, yaw, vyaw, r]
@@ -33,9 +37,9 @@ ArmorTracker::ArmorTracker(LibXR::HardwareContainer& /*hw*/,
   };
   auto j_f = [this](const Eigen::VectorXd&)
   {
-    Eigen::MatrixXd F(9, 9);
+    Eigen::MatrixXd f(9, 9);
     // clang-format off
-    F << 1, time_.dt, 0, 0, 0, 0, 0, 0, 0,
+    f << 1, time_.dt, 0, 0, 0, 0, 0, 0, 0,
          0, 1,        0, 0, 0, 0, 0, 0, 0,
          0, 0,        1, time_.dt, 0, 0, 0, 0, 0,
          0, 0,        0, 1,        0, 0, 0, 0, 0,
@@ -45,7 +49,7 @@ ArmorTracker::ArmorTracker(LibXR::HardwareContainer& /*hw*/,
          0, 0,        0, 0,        0, 0,        0, 1,        0,
          0, 0,        0, 0,        0, 0,        0, 0,        1;
     // clang-format on
-    return F;
+    return f;
   };
   auto h = [](const Eigen::VectorXd& x)
   {
@@ -59,18 +63,18 @@ ArmorTracker::ArmorTracker(LibXR::HardwareContainer& /*hw*/,
   };
   auto j_h = [](const Eigen::VectorXd& x)
   {
-    Eigen::MatrixXd H(4, 9);
+    Eigen::MatrixXd h(4, 9);
     double yaw = x(6), r = x(8);
     //                 xc vxc yc vyc za vza yaw               vyaw r
-    H << /*xa */ 1, 0, 0, 0, 0, 0, r * std::sin(yaw), 0, -std::cos(yaw),
+    h << /*xa */ 1, 0, 0, 0, 0, 0, r * std::sin(yaw), 0, -std::cos(yaw),
         /*ya */ 0, 0, 1, 0, 0, 0, -r * std::cos(yaw), 0, -std::sin(yaw),
         /*za */ 0, 0, 0, 0, 1, 0, 0, 0, 0,
         /*yaw*/ 0, 0, 0, 0, 0, 0, 1, 0, 0;
-    return H;
+    return h;
   };
   auto u_q = [this]()
   {
-    Eigen::MatrixXd Q(9, 9);
+    Eigen::MatrixXd q(9, 9);
     double t = time_.dt, x = cfg_.ekf.sigma2_q_xyz, y = cfg_.ekf.sigma2_q_yaw,
            r = cfg_.ekf.sigma2_q_r;
     double q_x_x = std::pow(t, 4) / 4 * x, q_x_vx = std::pow(t, 3) / 2 * x,
@@ -79,30 +83,31 @@ ArmorTracker::ArmorTracker(LibXR::HardwareContainer& /*hw*/,
            q_vy_vy = std::pow(t, 2) * y;
     double q_r = std::pow(t, 4) / 4 * r;
     // clang-format off
-    Q.setZero();
-    Q(0,0)=q_x_x;  Q(0,1)=q_x_vx; Q(1,0)=q_x_vx; Q(1,1)=q_vx_vx;
-    Q(2,2)=q_x_x;  Q(2,3)=q_x_vx; Q(3,2)=q_x_vx; Q(3,3)=q_vx_vx;
-    Q(4,4)=q_x_x;  Q(4,5)=q_x_vx; Q(5,4)=q_x_vx; Q(5,5)=q_vx_vx;
-    Q(6,6)=q_y_y;  Q(6,7)=q_y_vy; Q(7,6)=q_y_vy; Q(7,7)=q_vy_vy;
-    Q(8,8)=q_r;
+    q.setZero();
+    q(0,0)=q_x_x;  q(0,1)=q_x_vx; q(1,0)=q_x_vx; q(1,1)=q_vx_vx;
+    q(2,2)=q_x_x;  q(2,3)=q_x_vx; q(3,2)=q_x_vx; q(3,3)=q_vx_vx;
+    q(4,4)=q_x_x;  q(4,5)=q_x_vx; q(5,4)=q_x_vx; q(5,5)=q_vx_vx;
+    q(6,6)=q_y_y;  q(6,7)=q_y_vy; q(7,6)=q_y_vy; q(7,7)=q_vy_vy;
+    q(8,8)=q_r;
     // clang-format on
-    return Q;
+    return q;
   };
   auto u_r = [this](const Eigen::VectorXd& z)
   {
-    Eigen::DiagonalMatrix<double, 4> R;
+    Eigen::DiagonalMatrix<double, 4> r;
     double x = cfg_.noise.r_xyz_factor;
-    R.diagonal() << std::abs(x * z[0]), std::abs(x * z[1]), std::abs(x * z[2]),
+    r.diagonal() << std::abs(x * z[0]), std::abs(x * z[1]), std::abs(x * z[2]),
         cfg_.noise.r_yaw;
-    return R;
+    return r;
   };
-  Eigen::DiagonalMatrix<double, 9> P0;
-  P0.setIdentity();
-  ekf_.ekf = ExtendedKalmanFilter{f, h, j_f, j_h, u_q, u_r, P0};
+  Eigen::DiagonalMatrix<double, 9> p0;
+  p0.setIdentity();
+  ekf_.ekf = ExtendedKalmanFilter{f, h, j_f, j_h, u_q, u_r, p0};
 
   // ---------------- Topics & 回调 ----------------
-  // 装甲板订阅
-  LibXR::Topic armors_topic = LibXR::Topic::Find("/detector/armors");
+  // 装甲板识别结果订阅
+  LibXR::Topic::Domain armor_detector_domain = LibXR::Topic::Domain("armor_detector");
+  LibXR::Topic armors_topic = LibXR::Topic::Find("armors_result", &armor_detector_domain);
   auto armors_cb = LibXR::Topic::Callback::Create(
       [](bool, ArmorTracker* self, LibXR::RawData& data)
       {
@@ -112,9 +117,10 @@ ArmorTracker::ArmorTracker(LibXR::HardwareContainer& /*hw*/,
       this);
   armors_topic.RegisterCallback(armors_cb);
 
-  // 速度订阅（用于弹道解算初始化）
-  LibXR::Topic velocity_topic = LibXR::Topic::FindOrCreate<double>(
-      "/current_velocity", nullptr, false, false, false);
+  // 弹丸速度订阅（用于弹道解算初始化）
+  LibXR::Topic::Domain referee_domain = LibXR::Topic::Domain("referee");
+  LibXR::Topic bullet_speed_tp =
+      LibXR::Topic::FindOrCreate<float>("bullet_speed", &referee_domain);
   auto velocity_cb = LibXR::Topic::Callback::Create(
       [](bool, ArmorTracker* self, LibXR::RawData& data)
       {
@@ -122,27 +128,38 @@ ArmorTracker::ArmorTracker(LibXR::HardwareContainer& /*hw*/,
         self->VelocityCallback(*velocity_msg);
       },
       this);
-  velocity_topic.RegisterCallback(velocity_cb);
+  bullet_speed_tp.RegisterCallback(velocity_cb);
 
-  // 机体基座旋转订阅（坐标变换）
-  LibXR::Topic base_rotation_topic =
-      LibXR::Topic::FindOrCreate<LibXR::Quaternion<double>>("/base_rotation");
+  // 云台姿态订阅
+  LibXR::Topic::Domain gimbal_domain = LibXR::Topic::Domain("gimbal");
+  LibXR::Topic gimbal_rotation_topic =
+      LibXR::Topic::FindOrCreate<LibXR::Quaternion<float>>("rotation", &gimbal_domain);
   auto base_rotation_cb = LibXR::Topic::Callback::Create(
       [](bool, ArmorTracker* self, LibXR::RawData& data)
       {
-        LibXR::Mutex::LockGuard lock(self->io_.base_rotation_lock);
+        LibXR::Mutex::LockGuard lock(self->io_.gimbal_rotation_lock);
         auto base_rotation_msg = reinterpret_cast<LibXR::Quaternion<double>*>(data.addr_);
-        self->io_.base_rotation = *base_rotation_msg;
+        self->io_.gimbal_rotation = *base_rotation_msg;
       },
       this);
-  base_rotation_topic.RegisterCallback(base_rotation_cb);
+  gimbal_rotation_topic.RegisterCallback(base_rotation_cb);
+
+  io_.solver->SetFireCallback(
+      [&](bool is_fire)
+      {
+        uint8_t fire_notify = is_fire ? 1 : 0;
+        io_.fire_notify_topic.Publish(fire_notify);
+      });
 }
 
 void ArmorTracker::OnMonitor() {}
 
 void ArmorTracker::Init(const ArmorDetectorResults& armors_msg)
 {
-  if (armors_msg.empty()) return;
+  if (armors_msg.empty())
+  {
+    return;
+  }
 
   double min_distance = DBL_MAX;
   rt_.tracked_armor = armors_msg[0];
@@ -291,14 +308,14 @@ void ArmorTracker::ArmorsCallback(ArmorDetectorResults& armors_msg)
   XR_LOG_DEBUG("Got %d armors", static_cast<int>(armors_msg.size()));
 
   // 图像坐标 -> 世界坐标
-  io_.base_rotation_lock.Lock();
+  io_.gimbal_rotation_lock.Lock();
   for (auto& armor : armors_msg)
   {
     LibXR::Transform<double> tf = armor.pose;
-    armor.pose = LibXR::Transform<double>(io_.base_rotation, {0.0, 0.0, 0.0}) +
-                 io_.base_transform_static + tf;
+    armor.pose = LibXR::Transform<double>(io_.gimbal_rotation, {0.0, 0.0, 0.0}) +
+                 io_.gimbal_to_camera_transform_static + tf;
   }
-  io_.base_rotation_lock.Unlock();
+  io_.gimbal_rotation_lock.Unlock();
 
   // 过滤异常装甲
   armors_msg.erase(std::remove_if(armors_msg.begin(), armors_msg.end(),
@@ -315,7 +332,7 @@ void ArmorTracker::ArmorsCallback(ArmorDetectorResults& armors_msg)
   // 构造消息
   TrackerInfo info_msg{};
   SolveTrajectory::Target target_msg{};
-  Send send_msg{};
+  LibXR::EulerAngle<float> target_eulr;
   target_msg.id = ArmorNumber::INVALID;
 
   auto time = LibXR::Timebase::GetMicroseconds();
@@ -330,9 +347,15 @@ void ArmorTracker::ArmorsCallback(ArmorDetectorResults& armors_msg)
   {
     // dt
     time_.dt = (time - time_.last_time).ToSecond();
-    if (time_.dt <= 0) time_.dt = 1.0 / 100.0;
+    if (time_.dt <= 0)
+    {
+      time_.dt = 1.0 / 100.0;
+    }
     rt_.lost_thres = static_cast<int>(cfg_.thresholds.lost_time_thres / time_.dt);
-    if (rt_.lost_thres < 1) rt_.lost_thres = 1;
+    if (rt_.lost_thres < 1)
+    {
+      rt_.lost_thres = 1;
+    }
 
     Update(armors_msg);
 
@@ -370,19 +393,14 @@ void ArmorTracker::ArmorsCallback(ArmorDetectorResults& armors_msg)
       float pitch = 0, yaw = 0, aim_x = 0, aim_y = 0, aim_z = 0;
       io_.solver->AutoSolveTrajectory(pitch, yaw, aim_x, aim_y, aim_z, &target_msg);
 
-      io_.solver->SetFireCallback([&](bool is_fire) { send_msg.is_fire = is_fire; });
-      send_msg.position.x() = aim_x;
-      send_msg.position.y() = aim_y;
-      send_msg.position.z() = aim_z;
-      send_msg.v_yaw = target_msg.v_yaw;
-      send_msg.pitch = pitch;
-      send_msg.yaw = yaw;
+      target_eulr.Pitch() = pitch;
+      target_eulr.Yaw() = yaw;
     }
   }
 
   time_.last_time = time;
 
-  io_.send_topic.Publish(send_msg);
+  io_.target_eulr_topic.Publish(target_eulr);
   io_.target_topic.Publish(target_msg);
 }
 
@@ -409,9 +427,13 @@ void ArmorTracker::InitEKF(const ArmorDetectorResult& a)
 void ArmorTracker::UpdateArmorsNum(const ArmorDetectorResult&)
 {
   if (rt_.tracked_id == ArmorNumber::OUTPOST)
+  {
     rt_.tracked_armors_num = ArmorsNum::OUTPOST_3;
+  }
   else
+  {
     rt_.tracked_armors_num = ArmorsNum::NORMAL_4;
+  }
 }
 
 void ArmorTracker::HandleArmorJump(const ArmorDetectorResult& current_armor)

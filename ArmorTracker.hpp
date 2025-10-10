@@ -42,19 +42,16 @@ depends:
 // clang-format on
 
 #include <Eigen/Eigen>
+#include <cstdint>
 #include <memory>
-#include <utility>
-#include <vector>
 
 // 框架与外部依赖头
 #include "SolveTrajectory.hpp"
 #include "app_framework.hpp"
 #include "armor.hpp"
-#include "cycle_value.hpp"
 #include "extended_kalman_filter.hpp"
 #include "libxr.hpp"
 #include "libxr_time.hpp"
-#include "logger.hpp"
 #include "message.hpp"
 #include "mutex.hpp"
 #include "timebase.hpp"
@@ -140,17 +137,6 @@ class ArmorTracker : public LibXR::Application
     double yaw{};
   };
 
-  struct Send
-  {
-    bool is_fire{};
-    LibXR::Position<double> position{};
-    double v_yaw{};
-    double pitch{};
-    double yaw{};
-    Eigen::Matrix<double, 3, 1> cmd_vel_linear = Eigen::Matrix<double, 3, 1>::Zero();
-    Eigen::Matrix<double, 3, 1> cmd_vel_angular = Eigen::Matrix<double, 3, 1>::Zero();
-  };
-
  public:
   // ====================== 构造与监控 ======================
   explicit ArmorTracker(LibXR::HardwareContainer& hw, LibXR::ApplicationManager& app,
@@ -212,16 +198,19 @@ class ArmorTracker : public LibXR::Application
   struct IOBlock
   {
     // 坐标变换
-    LibXR::Transform<double> base_transform_static{};
-    LibXR::Quaternion<double> base_rotation{};
-    LibXR::Mutex base_rotation_lock;
-    LibXR::Topic tf_topic = LibXR::Topic("/tf", sizeof(LibXR::Quaternion<double>));
+    LibXR::Transform<double> gimbal_to_camera_transform_static{};
+    LibXR::Quaternion<double> gimbal_rotation{};
+    LibXR::Mutex gimbal_rotation_lock;
 
     // 发布者
-    LibXR::Topic info_topic = LibXR::Topic("/tracker/info", sizeof(TrackerInfo));
+    LibXR::Topic::Domain tracker_domain = LibXR::Topic::Domain("tracker");
+    LibXR::Topic info_topic = LibXR::Topic("info", sizeof(TrackerInfo), &tracker_domain);
     LibXR::Topic target_topic =
-        LibXR::Topic("/tracker/target", sizeof(SolveTrajectory::Target));
-    LibXR::Topic send_topic = LibXR::Topic("/tracker/send", sizeof(Send));
+        LibXR::Topic("target", sizeof(SolveTrajectory::Target), &tracker_domain);
+    LibXR::Topic target_eulr_topic =
+        LibXR::Topic("target_eulr", sizeof(LibXR::EulerAngle<float>), &tracker_domain);
+    LibXR::Topic fire_notify_topic =
+        LibXR::Topic("fire_notify", sizeof(uint8_t), &tracker_domain);
 
     // 轨迹解算
     std::unique_ptr<SolveTrajectory> solver;
