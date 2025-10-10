@@ -139,7 +139,9 @@ ArmorTracker::ArmorTracker(LibXR::HardwareContainer& /*hw*/,
       {
         LibXR::Mutex::LockGuard lock(self->io_.gimbal_rotation_lock);
         auto base_rotation_msg = reinterpret_cast<LibXR::Quaternion<double>*>(data.addr_);
-        self->io_.gimbal_rotation = *base_rotation_msg;
+        self->io_.gimbal_rotation =
+            LibXR::Quaternion<double>(base_rotation_msg->w(), base_rotation_msg->x(),
+                                      base_rotation_msg->y(), base_rotation_msg->z());
       },
       this);
   gimbal_rotation_topic.RegisterCallback(base_rotation_cb);
