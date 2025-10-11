@@ -7,6 +7,7 @@ constructor_args:
   cfg:
     limits:
       max_armor_distance: 10.0
+      max_z_position: 1.0
 
     match:
       max_match_distance: 0.15
@@ -46,6 +47,7 @@ depends:
 #include <memory>
 
 // 框架与外部依赖头
+#include "CameraBase.hpp"
 #include "SolveTrajectory.hpp"
 #include "app_framework.hpp"
 #include "armor.hpp"
@@ -66,6 +68,7 @@ class ArmorTracker : public LibXR::Application
     struct Limits
     {
       double max_armor_distance = 10.0;  // 过滤距离阈值（XOY）
+      double max_z_position = 1.0;
     } limits;
 
     struct Match
@@ -135,6 +138,14 @@ class ArmorTracker : public LibXR::Application
     double yaw_diff{};
     LibXR::Position<double> position{};
     double yaw{};
+  };
+
+  struct EkfPointsMsg
+  {
+    uint8_t count;                          // 实际装甲块数量（3或4）
+    LibXR::Position<double> center_cam;     // 相机←中心 3D
+    LibXR::Position<double> armors_cam[4];  // 相机←装甲 3D（最多4块）
+    bool valid[5];
   };
 
  public:
@@ -218,4 +229,7 @@ class ArmorTracker : public LibXR::Application
 
   // 保存配置（类内聚合）
   Config cfg_;
+
+  EkfPointsMsg ekf_msg_;
+  std::shared_ptr<CameraBase::CameraInfo> cam_info_{};  ///< 相机内参/畸变
 };

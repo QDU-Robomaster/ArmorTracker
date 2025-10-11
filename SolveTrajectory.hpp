@@ -202,9 +202,9 @@ class SolveTrajectory
                            float& aim_z, Target* msg);
 
  private:
-  float k_;            ///< 空气阻力系数
-  float current_v_{};  ///< 当前弹速 [m/s]
-  double fly_time_{};  ///< 最近一次模型计算得到的飞行时间 [s]
+  float k_;                 ///< 空气阻力系数
+  float current_v_ = 16.0;  ///< 当前弹速 [m/s]
+  double fly_time_{};       ///< 最近一次模型计算得到的飞行时间 [s]
 
   int bias_time_;  ///< 系统时延 [ms]
   float s_bias_;   ///< 枪口前推 [m]

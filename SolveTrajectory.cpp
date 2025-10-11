@@ -33,9 +33,16 @@ float SolveTrajectory::MonoDirectionalAirResistanceModel(float s, float v, float
   // 飞行时间 t = (e^{k s} - 1) / (k v cos(angle))
   fly_time_ = (std::exp(k_ * s) - 1.0) / (k_ * v * std::cos(angle));
 
+  if (std::isnan(fly_time_))
+  {
+    XR_LOG_ERROR("Fly time is nan!");
+    fly_time_ = 0.0;
+    return 0.0f;
+  }
+
   if (fly_time_ < 0.0)
   {
-    std::printf("[WARN]: Exceeding the maximum range!\n");
+    XR_LOG_ERROR("Fly time is negative!");
     fly_time_ = 0.0;
     return 0.0f;
   }
@@ -61,6 +68,12 @@ float SolveTrajectory::PitchTrajectoryCompensation(float s, float z, float v)
   // 经验：20~27 次迭代通常足够收敛
   for (int i = 0; i < 22; ++i)
   {
+    if (std::isnan(z_temp))
+    {
+      XR_LOG_ERROR("z_temp is nan!");
+      return 0.0f;
+    }
+
     angle_pitch = std::atan2(z_temp, s);
 
     const float Z_ACTUAL = MonoDirectionalAirResistanceModel(s, v, angle_pitch);
