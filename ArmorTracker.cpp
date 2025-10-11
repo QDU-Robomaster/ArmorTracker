@@ -387,7 +387,7 @@ void ArmorTracker::Update(const ArmorDetectorResults& armors_msg)
     }
     else
     {
-      XR_LOG_WARN("No matched armor found!");
+      XR_LOG_INFO("No matched armor found!");
     }
   }
 

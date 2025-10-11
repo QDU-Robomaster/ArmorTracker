@@ -245,7 +245,7 @@ void SolveTrajectory::FireLogicIsTop(float& pitch, float& yaw, float& aim_x, flo
     }
   }
 
-  std::cout << "selected idx: " << idx << std::endl;
+  XR_LOG_DEBUG("FireLogicIsTop idx: %d", idx);
 
   const auto [p, y] =
       CalculatePitchAndYaw(idx, msg, TIME_DELAY, s_bias_, z_bias_, current_v_,
