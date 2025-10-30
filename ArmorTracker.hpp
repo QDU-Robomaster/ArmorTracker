@@ -59,134 +59,129 @@ depends:
 #include "timebase.hpp"
 #include "transform.hpp"
 
-class ArmorTracker : public LibXR::Application
-{
- public:
+class ArmorTracker : public LibXR::Application {
+public:
   // ====================== 配置参数（构造入参聚合） ======================
-  struct Config
-  {
-    struct Limits
-    {
-      double max_armor_distance = 10.0;  // 过滤距离阈值（XOY）
+  struct Config {
+    struct Limits {
+      double max_armor_distance = 10.0; // 过滤距离阈值（XOY）
       double max_z_position = 1.0;
     } limits;
 
-    struct Match
-    {
-      double max_match_distance = 0.15;  // 匹配位置阈值（m）
-      double max_match_yaw_diff = 1.0;   // 匹配 yaw 阈值（rad）
+    struct Match {
+      double max_match_distance = 0.15; // 匹配位置阈值（m）
+      double max_match_yaw_diff = 1.0;  // 匹配 yaw 阈值（rad）
     } match;
 
-    struct Thresholds
-    {
-      int tracking_thres = 5;        // 进入 TRACKING 需要的连续匹配帧数
-      double lost_time_thres = 0.3;  // 进入 LOST 的时间阈值（秒）
+    struct Thresholds {
+      int tracking_thres = 5;       // 进入 TRACKING 需要的连续匹配帧数
+      double lost_time_thres = 0.3; // 进入 LOST 的时间阈值（秒）
     } thresholds;
 
-    struct Solver
-    {
-      double k = 0.092;  // 弹道解算参数
+    struct Solver {
+      double k = 0.092; // 弹道解算参数
       int bias_time = 100;
       double s_bias = 0.19133;
       double z_bias = 0.21265;
     } solver;
 
-    struct Ekf
-    {
-      double sigma2_q_xyz = 20.0;   // 过程噪声（位置/速度）
-      double sigma2_q_yaw = 100.0;  // 过程噪声（yaw/wyaw）
-      double sigma2_q_r = 800;      // 过程噪声（半径）
+    struct Ekf {
+      double sigma2_q_xyz = 20.0;  // 过程噪声（位置/速度）
+      double sigma2_q_yaw = 100.0; // 过程噪声（yaw/wyaw）
+      double sigma2_q_r = 800;     // 过程噪声（半径）
     } ekf;
 
-    struct Noise
-    {
-      double r_xyz_factor = 0.05;  // 观测噪声（随距离缩放）
-      double r_yaw = 0.02;         // 观测噪声（yaw）
+    struct Noise {
+      double r_xyz_factor = 0.05; // 观测噪声（随距离缩放）
+      double r_yaw = 0.02;        // 观测噪声（yaw）
     } noise;
 
-    struct Frames
-    {
+    struct Frames {
       LibXR::Transform<double> base_transform_static = {};
       Frames(std::array<double, 4> rotation, std::array<double, 3> translation)
           : base_transform_static{
                 LibXR::Quaternion<double>(rotation[0], rotation[1], rotation[2],
                                           rotation[3]),
-                LibXR::Position<double>(translation[0], translation[1], translation[2])}
-      {
-      }
+                LibXR::Position<double>(translation[0], translation[1],
+                                        translation[2])} {}
     } frames;
   };
 
   // ====================== 公共类型 ======================
-  enum class ArmorsNum
-  {
-    NORMAL_4 = 4,
-    OUTPOST_3 = 3
-  };
+  enum class ArmorsNum { NORMAL_4 = 4, OUTPOST_3 = 3 };
 
-  enum State
-  {
+  enum State {
     LOST,
     DETECTING,
     TRACKING,
     TEMP_LOST,
   };
 
-  struct TrackerInfo
-  {
+  struct TrackerInfo {
     double position_diff{};
     double yaw_diff{};
     LibXR::Position<double> position{};
     double yaw{};
   };
 
-  struct EkfPointsMsg
-  {
-    uint8_t count;                          // 实际装甲块数量（3或4）
-    LibXR::Position<double> center_cam;     // 相机←中心 3D
-    LibXR::Position<double> armors_cam[4];  // 相机←装甲 3D（最多4块）
+  struct Send {
+    bool is_fire{};
+    LibXR::Position<double> position{};
+    double v_yaw{};
+    double pitch{};
+    double yaw{};
+    Eigen::Matrix<double, 3, 1> cmd_vel_linear =
+        Eigen::Matrix<double, 3, 1>::Zero();
+    Eigen::Matrix<double, 3, 1> cmd_vel_angular =
+        Eigen::Matrix<double, 3, 1>::Zero();
+  };
+
+  struct EkfPointsMsg {
+    uint8_t count;                         // 实际装甲块数量（3或4）
+    LibXR::Position<double> center_cam;    // 相机←中心 3D
+    LibXR::Position<double> armors_cam[4]; // 相机←装甲 3D（最多4块）
     bool valid[5];
   };
 
- public:
+public:
   // ====================== 构造与监控 ======================
-  explicit ArmorTracker(LibXR::HardwareContainer& hw, LibXR::ApplicationManager& app,
-                        Config cfg);
+  explicit ArmorTracker(LibXR::HardwareContainer &hw,
+                        LibXR::ApplicationManager &app, Config cfg);
 
   void OnMonitor() override;
 
- private:
-  // ====================== 内部算法接口（原 Tracker 逻辑） ======================
-  void Init(const ArmorDetectorResults& armors_msg);
-  void Update(const ArmorDetectorResults& armors_msg);
+private:
+  // ====================== 内部算法接口（原 Tracker 逻辑）
+  // ======================
+  void Init(const ArmorDetectorResults &armors_msg);
+  void Update(const ArmorDetectorResults &armors_msg);
 
   // ====================== IO 与回调（原 Node 逻辑） ======================
   void VelocityCallback(double velocity_msg);
-  void ArmorsCallback(ArmorDetectorResults& armors_msg);
+  void ArmorsCallback(ArmorDetectorResults &armors_msg);
 
   // ====================== 辅助函数 ======================
-  void InitEKF(const ArmorDetectorResult& a);
-  void UpdateArmorsNum(const ArmorDetectorResult&);
-  void HandleArmorJump(const ArmorDetectorResult& current_armor);
-  double OrientationToYaw(const LibXR::Quaternion<double>& q);
-  Eigen::Vector3d GetArmorPositionFromState(const Eigen::VectorXd& x);
+  void InitEKF(const ArmorDetectorResult &a);
+  void UpdateArmorsNum(const ArmorDetectorResult &);
+  void HandleArmorJump(const ArmorDetectorResult &current_armor);
+  double OrientationToYaw(const LibXR::Quaternion<double> &q);
+  Eigen::Vector3d GetArmorPositionFromState(const Eigen::VectorXd &x);
 
   // ====================== 内部聚合成员（类内聚合） ======================
-  struct EKFBlock
-  {
+  struct EKFBlock {
     ExtendedKalmanFilter ekf;
-    Eigen::VectorXd measurement = Eigen::VectorXd::Zero(4);  // z = [xa,ya,za,yaw]
+    Eigen::VectorXd measurement =
+        Eigen::VectorXd::Zero(4); // z = [xa,ya,za,yaw]
     Eigen::VectorXd state =
-        Eigen::VectorXd::Zero(9);  // x = [xc,vxc,yc,vyc,za,vza,yaw,vyaw,r]
+        Eigen::VectorXd::Zero(9); // x = [xc,vxc,yc,vyc,za,vza,yaw,vyaw,r]
   } ekf_;
 
-  struct TrackRuntime
-  {
+  struct TrackRuntime {
     State state = LOST;
     int detect_count = 0;
     int lost_count = 0;
     int tracking_thres = 5;
-    int lost_thres = 0;  // 帧数阈值（由时间阈值换算）
+    int lost_thres = 0; // 帧数阈值（由时间阈值换算）
     double last_yaw = 0.0;
     double info_position_diff = 0.0;
     double info_yaw_diff = 0.0;
@@ -200,14 +195,12 @@ class ArmorTracker : public LibXR::Application
     double another_r = 0.0;
   } rt_;
 
-  struct TimeBlock
-  {
+  struct TimeBlock {
     LibXR::MicrosecondTimestamp last_time = LibXR::Timebase::GetMicroseconds();
-    double dt = 1.0 / 100.0;  // 初始假定 100Hz
+    double dt = 1.0 / 100.0; // 初始假定 100Hz
   } time_;
 
-  struct IOBlock
-  {
+  struct IOBlock {
     // 坐标变换
     LibXR::Transform<double> gimbal_to_camera_transform_static{};
     LibXR::Quaternion<double> gimbal_rotation{};
@@ -215,13 +208,16 @@ class ArmorTracker : public LibXR::Application
 
     // 发布者
     LibXR::Topic::Domain tracker_domain = LibXR::Topic::Domain("tracker");
-    LibXR::Topic info_topic = LibXR::Topic("info", sizeof(TrackerInfo), &tracker_domain);
-    LibXR::Topic target_topic =
-        LibXR::Topic("target", sizeof(SolveTrajectory::Target), &tracker_domain);
-    LibXR::Topic target_eulr_topic =
-        LibXR::Topic("target_eulr", sizeof(LibXR::EulerAngle<float>), &tracker_domain);
+    LibXR::Topic info_topic =
+        LibXR::Topic("info", sizeof(TrackerInfo), &tracker_domain);
+    LibXR::Topic target_topic = LibXR::Topic(
+        "target", sizeof(SolveTrajectory::Target), &tracker_domain);
+    LibXR::Topic target_eulr_topic = LibXR::Topic(
+        "target_eulr", sizeof(LibXR::EulerAngle<float>), &tracker_domain);
     LibXR::Topic fire_notify_topic =
         LibXR::Topic("fire_notify", sizeof(uint8_t), &tracker_domain);
+    LibXR::Topic send_topic =
+        LibXR::Topic("send", sizeof(Send), &tracker_domain);
 
     // 轨迹解算
     std::unique_ptr<SolveTrajectory> solver;
@@ -231,5 +227,5 @@ class ArmorTracker : public LibXR::Application
   Config cfg_;
 
   EkfPointsMsg ekf_msg_;
-  std::shared_ptr<CameraBase::CameraInfo> cam_info_{};  ///< 相机内参/畸变
+  std::shared_ptr<CameraBase::CameraInfo> cam_info_{}; ///< 相机内参/畸变
 };
