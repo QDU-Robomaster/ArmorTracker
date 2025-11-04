@@ -83,6 +83,7 @@ public:
       int bias_time = 100;
       double s_bias = 0.19133;
       double z_bias = 0.21265;
+      SolveTrajectory::CalculateMode calculate_mode = SolveTrajectory::NORMAL;
     } solver;
 
     struct Ekf {

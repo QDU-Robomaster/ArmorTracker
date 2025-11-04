@@ -7,6 +7,18 @@
 class ExtendedKalmanFilter
 {
  public:
+  enum XVectorIndex : std::uint8_t
+  {
+    X_CENTER = 0,
+    V_X_CENTER = 1,
+    Y_CENTER = 2,
+    V_Y_CENTER = 3,
+    Z_ARMOR = 4,
+    V_Z_ARMOR = 5,
+    YAW = 6,
+    V_YAW = 7,
+    ROBOT_R = 8
+  };
   ExtendedKalmanFilter() = default;
 
   using VecVecFunc = std::function<Eigen::VectorXd(const Eigen::VectorXd&)>;

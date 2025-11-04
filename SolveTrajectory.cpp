@@ -1,4 +1,3 @@
-
 #include "SolveTrajectory.hpp"
 
 #include <algorithm>
@@ -11,8 +10,13 @@
 #include "logger.hpp"
 
 SolveTrajectory::SolveTrajectory(const float& k_, const int& bias_time_,
-                                 const float& s_bias_, const float& z_bias_)
-    : k_(k_), bias_time_(bias_time_), s_bias_(s_bias_), z_bias_(z_bias_)
+                                 const float& s_bias_, const float& z_bias_,
+                                 CalculateMode calculate_mode)
+    : k_(k_),
+      bias_time_(bias_time_),
+      s_bias_(s_bias_),
+      z_bias_(z_bias_),
+      calculate_mode_(calculate_mode)
 {
 }
 
@@ -24,7 +28,7 @@ void SolveTrajectory::Init(double velocity)
   }
   else
   {
-    current_v_ = 18.0f;  // 默认弹速
+    current_v_ = 12.0f;  // 默认弹速
   }
 }
 
@@ -62,31 +66,42 @@ float SolveTrajectory::CompleteAirResistanceModel(float /*s*/, float /*v*/,
 
 float SolveTrajectory::PitchTrajectoryCompensation(float s, float z, float v)
 {
-  float z_temp = z;
-  float angle_pitch = 0.0f;
-
-  // 经验：20~27 次迭代通常足够收敛
-  for (int i = 0; i < 22; ++i)
+  if (calculate_mode_ == CalculateMode::NORMAL)
   {
-    if (std::isnan(z_temp))
+    float z_temp = z;
+    float angle_pitch = 0.0f;
+
+    // 经验：20~27 次迭代通常足够收敛
+    for (int i = 0; i < 22; ++i)
     {
-      XR_LOG_ERROR("z_temp is nan!");
-      return 0.0f;
+      if (std::isnan(z_temp))
+      {
+        XR_LOG_ERROR("z_temp is nan!");
+        return 0.0f;
+      }
+
+      angle_pitch = std::atan2(z_temp, s);
+
+      const float Z_ACTUAL = MonoDirectionalAirResistanceModel(s, v, angle_pitch);
+      const float DZ = 0.3f * (z - Z_ACTUAL);
+      z_temp += DZ;
+
+      if (std::fabs(DZ) < 1e-5f)
+      {
+        break;
+      }
     }
 
-    angle_pitch = std::atan2(z_temp, s);
-
-    const float Z_ACTUAL = MonoDirectionalAirResistanceModel(s, v, angle_pitch);
-    const float DZ = 0.3f * (z - Z_ACTUAL);
-    z_temp += DZ;
-
-    if (std::fabs(DZ) < 1e-5f)
-    {
-      break;
-    }
+    return angle_pitch;
+  }
+  else if (calculate_mode_ == CalculateMode::TABLE_LOOKUP)
+  {
+    auto res = table_.Check(s, z);
+    fly_time_ = res.t / 1000.0;
+    return res.pitch;
   }
 
-  return angle_pitch;
+  return 0.0f;
 }
 
 bool SolveTrajectory::ShouldFire(float tmp_yaw, float v_yaw, float timeDelay)

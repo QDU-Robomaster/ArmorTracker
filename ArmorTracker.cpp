@@ -23,7 +23,7 @@ ArmorTracker::ArmorTracker(LibXR::HardwareContainer &,
   // 轨迹解算器
   io_.solver =
       std::make_unique<SolveTrajectory>(cfg_.solver.k, cfg_.solver.bias_time,
-                                        cfg_.solver.s_bias, cfg_.solver.z_bias);
+                                        cfg_.solver.s_bias, cfg_.solver.z_bias, cfg_.solver.calculate_mode);
 
   // 初值（和老逻辑一致）
   rt_.tracking_thres = cfg_.thresholds.tracking_thres;
@@ -34,10 +34,10 @@ ArmorTracker::ArmorTracker(LibXR::HardwareContainer &,
   // 观测 z = [xa, ya, za, yaw]
   auto f = [this](const Eigen::VectorXd &x) {
     Eigen::VectorXd x_new = x;
-    x_new(0) += x(1) * time_.dt;
-    x_new(2) += x(3) * time_.dt;
-    x_new(4) += x(5) * time_.dt;
-    x_new(6) += x(7) * time_.dt;
+    x_new(ExtendedKalmanFilter::X_CENTER) += x(ExtendedKalmanFilter::V_X_CENTER) * time_.dt;
+    x_new(ExtendedKalmanFilter::Y_CENTER) += x(ExtendedKalmanFilter::V_Y_CENTER) * time_.dt;
+    x_new(ExtendedKalmanFilter::Z_ARMOR) += x(ExtendedKalmanFilter::V_Z_ARMOR) * time_.dt;
+    x_new(ExtendedKalmanFilter::YAW) += x(ExtendedKalmanFilter::V_YAW) * time_.dt;
     return x_new;
   };
   auto j_f = [this](const Eigen::VectorXd &) {
