@@ -11,12 +11,14 @@
 
 SolveTrajectory::SolveTrajectory(const float& k_, const int& bias_time_,
                                  const float& s_bias_, const float& z_bias_,
-                                 CalculateMode calculate_mode)
+                                 CalculateMode calculate_mode,
+                                 const TrajectoryTable::TableConfig& table_config)
     : k_(k_),
       bias_time_(bias_time_),
       s_bias_(s_bias_),
       z_bias_(z_bias_),
-      calculate_mode_(calculate_mode)
+      calculate_mode_(calculate_mode),
+      table_(table_config)
 {
 }
 
@@ -70,7 +72,6 @@ float SolveTrajectory::PitchTrajectoryCompensation(float s, float z, float v)
   {
     float z_temp = z;
     float angle_pitch = 0.0f;
-
     // 经验：20~27 次迭代通常足够收敛
     for (int i = 0; i < 22; ++i)
     {
@@ -98,7 +99,7 @@ float SolveTrajectory::PitchTrajectoryCompensation(float s, float z, float v)
   {
     auto res = table_.Check(s, z);
     fly_time_ = res.t / 1000.0;
-    return res.pitch;
+    return static_cast<float>(res.pitch);
   }
 
   return 0.0f;
@@ -284,7 +285,7 @@ void SolveTrajectory::FireLogicDefault(float& pitch, float& yaw, float& aim_x,
   CalculateArmorPosition(msg, /*use_1=*/false, /*use_average_radius=*/false);
   const int IDX = SelectArmor(msg, /*select_by_min_yaw=*/false);
 
-  std::cout << "selected idx: " << IDX << std::endl;
+  std::cout << "selected idx: " << IDX << '\n';
 
   const auto [p, y] =
       CalculatePitchAndYaw(IDX, msg, TIME_DELAY, s_bias_, z_bias_, current_v_,

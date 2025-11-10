@@ -1,5 +1,6 @@
 #include <cmath>
 #include <cstddef>
+#include <fstream>
 #include <future>
 #include <iostream>
 #include <queue>
@@ -10,12 +11,12 @@ constexpr double MIN_PITCH = -0.6;  // 限位
 constexpr double MAX_PITCH = 1.2;
 constexpr double MAX_X = 13.0;  // 解算距离范围
 constexpr double MIN_X = 0.0;
-constexpr double MAX_Y = 1.0;       // 解算高度范围
-constexpr double MIN_Y = -1;        // 中心为车的pitch轴电机
-constexpr double JINGDU = 0.01;     // 精度，m
-constexpr double MAX_ERROR = 0.05;  // 允许误差，m
-constexpr int ERROR_LEVEL = 4;      // 误差等级
-constexpr double GUN = 0.30;        // 枪口到pitch轴电机的距离，m
+constexpr double MAX_Y = 1.0;        // 解算高度范围
+constexpr double MIN_Y = -1;         // 中心为车的pitch轴电机
+constexpr double RESOLUTION = 0.01;  // 精度，m
+constexpr double MAX_ERROR = 0.05;   // 允许误差，m
+constexpr int ERROR_LEVEL = 4;       // 误差等级
+constexpr double GUN = 0.30;         // 枪口到pitch轴电机的距离，m
 
 constexpr double G = 9.8;        // 重力加速度，m/s^2
 constexpr double STEP = 0.0001;  // RK4步长 (s)
@@ -162,21 +163,23 @@ class SolveTrajectory
   static void BuildTable() { build_table(); }
 };
 
-// 解算多行
-static std::vector<std::vector<std::vector<double>>> SolveRows(double s, size_t xc)
+using TableData = std::vector<std::vector<std::vector<double>>>;
+
+// 解算多行 (现在 num_rows 基本总是 1)
+static TableData solve_rows(double start_x, size_t num_rows)
 {
   double pitch0 = MIN_PITCH;
-  double x = s;
-  double y = NAN;
-  size_t yc = std::round((MAX_Y - MIN_Y) / JINGDU) + 1;
-  std::vector<std::vector<std::vector<double>>> table;
-  table.reserve(xc);
-  for (size_t i = 0; i < xc; i++, x += JINGDU)
+  double x = start_x;
+  size_t y_dim = std::round((MAX_Y - MIN_Y) / RESOLUTION + 1);
+  TableData table;
+  table.reserve(num_rows);
+
+  for (size_t i = 0; i < num_rows; i++, x += RESOLUTION)
   {
-    y = MIN_Y;
+    double y = MIN_Y;
     std::vector<std::vector<double>> row;
-    row.reserve(yc);
-    for (size_t j = 0; j < yc; j++, y += JINGDU)
+    row.reserve(y_dim);
+    for (size_t j = 0; j < y_dim; j++, y += RESOLUTION)
     {
       SolveTrajectory solve = SolveTrajectory(11.8, 0, x, y);
       std::vector<double> ge = solve.SolvePitchLevel(ERROR_LEVEL, pitch0);
@@ -188,64 +191,10 @@ static std::vector<std::vector<std::vector<double>>> SolveRows(double s, size_t 
     }
     pitch0 = MIN_PITCH;
     table.push_back(std::move(row));
-    std::cerr << '[' << x << '/' << s + (xc - 1) * JINGDU << ']' << std::endl;
   }
-  // std::cout << "right------------" << i << std::endl;
   return table;
 }
 
-// 输出得到的表，按array的格式来
-template <typename T>
-static std::ostream& operator<<(std::ostream& os, const std::vector<T>& v)
-{
-  if (v.empty() || std::isnan(v[0]))
-  {
-    os << "{NAN, NAN, NAN}";
-  }
-  else
-  {
-    os << '{' << v[0] << "f, " << v[1] << "f, " << v[2] << "f}";
-  }
-  return os;
-}
-
-template <typename T>
-static std::ostream& operator<<(std::ostream& os, const std::vector<std::vector<T>>& v)
-{
-  os << "  {";
-  for (size_t i = 0; i < v.size(); ++i)
-  {
-    if (i > 0)
-    {
-      os << ", ";
-    }
-    if (i > 0 && i % 10 == 0)
-    {
-      os << "\n   ";
-    }
-    os << v[i];
-  }
-  os << "}";
-  return os;
-}
-
-static std::ostream& operator<<(std::ostream& os,
-                                const std::vector<std::vector<std::vector<double>>>& v)
-{
-  os << "{\n";  // 整个数组的起始大括号
-  for (size_t i = 0; i < v.size(); ++i)
-  {
-    if (i > 0)
-    {
-      os << ",\n";
-    }
-    os << v[i];  // 调用上面的重载输出一整行
-  }
-  os << "\n}";  // 整个数组的结束大括号
-  return os;
-}
-
-// 输出表格解的情况，检查是否有无解的情况
 template <typename T>
 static std::ostream& operator<<=(std::ostream& os, const std::vector<T>& v)
 {
@@ -260,47 +209,106 @@ static std::ostream& operator<<=(std::ostream& os, const std::vector<T>& v)
 template <>
 std::ostream& operator<<=(std::ostream& os, const std::vector<double>& v)
 {
-  return os << (std::isnan(v[0]) ? ' ' : '.');
+  return os << (v.empty() || std::isnan(v[0]) ? ' ' : '.');
 }
 
-// 多线程提高效率
 static void build_table()
 {
-  std::vector<std::vector<std::vector<double>>> table;
-  std::ios::sync_with_stdio(false);
-  std::queue<std::future<std::vector<std::vector<std::vector<double>>>>> futures;
+  TableData table;
+  std::ios_base::sync_with_stdio(false);
+  std::queue<std::future<TableData>> futures;
   size_t threads = std::thread::hardware_concurrency();
-  if (!threads)
+  if (threads == 0)
   {
     threads = 16;
   }
-  size_t total = std::round((MAX_X - MIN_X) / JINGDU) + 1, count = total / threads,
-         remaining = total % threads;
-  if (!count)
-  {
-    threads = remaining;
-  }
-  std::cerr << "Threads: " << threads << " Count: " << count << " ... " << remaining
+
+  size_t total_rows = std::round((MAX_X - MIN_X) / RESOLUTION + 1);
+  table.reserve(total_rows);
+
+  std::cerr << "采用新的多线程逻辑 (批处理, 每任务1行), 使用 " << threads << " 个线程..."
             << '\n';
-  double x = MIN_X;
-  for (size_t i = 0; i < threads; i++)
+  std::cerr << "总行数: " << total_rows << '\n';
+
+  double current_x = MIN_X;
+  size_t rows_processed = 0;
+
+  while (rows_processed < total_rows)
   {
-    futures.push(std::async(SolveRows, x, count + !!remaining));
-    if (remaining > 0)
+    // 确定当前批次的大小：不超过线程数，也不超过剩余行数
+    size_t batch_size = std::min(threads, total_rows - rows_processed);
+
+    // 提交当前批次的所有任务，每个任务计算 1 行
+    for (size_t i = 0; i < batch_size; ++i)
     {
-      x += JINGDU * (count + !!remaining);
-      remaining--;
+      futures.push(std::async(std::launch::async, solve_rows, current_x, 1));
+      current_x += RESOLUTION;
+    }
+
+    // 等待并收集当前批次的所有结果
+    while (!futures.empty())
+    {
+      TableData single_row_table = futures.front().get();
+      futures.pop();
+      // 将获取到的一行数据移动到主 table 中
+      table.insert(table.end(), std::make_move_iterator(single_row_table.begin()),
+                   std::make_move_iterator(single_row_table.end()));
+    }
+
+    rows_processed += batch_size;
+    std::cerr << "进度: " << rows_processed << " / " << total_rows << " 行已完成" << '\n';
+  }
+
+  std::cerr << "计算完成。" << '\n';
+  (std::cerr <<= table) << '\n';
+
+  // ----- 二进制文件写入 -----
+  const char* output_filename = "table.bin";
+  std::ofstream file_out(output_filename, std::ios::out | std::ios::binary);
+  if (!file_out)
+  {
+    std::cerr << "错误: 无法打开文件进行写入: " << output_filename << '\n';
+    return;
+  }
+
+  struct CellToSolve
+  {
+    double pitch;
+    double t;
+    double v;
+  };
+
+  struct Cell
+  {
+    float pitch;
+    float t;
+    float v;
+  };
+
+  for (const auto& row : table)
+  {
+    for (const auto& ge : row)
+    {
+      Cell cell_to_write;
+      if (ge.empty() || std::isnan(ge[0]))
+      {
+        cell_to_write = {NAN, NAN, NAN};
+      }
+      else
+      {
+        cell_to_write = {static_cast<float>(ge[0]), static_cast<float>(ge[1]),
+                         static_cast<float>(ge[2])};
+      }
+      file_out.write(reinterpret_cast<const char*>(&cell_to_write), sizeof(Cell));
     }
   }
-  table.reserve(count);
-  while (futures.size())
-  {
-    std::vector<std::vector<std::vector<double>>> rows = futures.front().get();
-    futures.pop();
-    std::move(rows.begin(), rows.end(), std::back_inserter(table));
-  }
-  std::cerr << "行数x:" << table.size() << '\n';
-  std::cerr << "列数y:" << table[0].size() << '\n';
-  (std::cerr <<= table) << '\n';
-  (std::cout << table) << '\n';
+
+  file_out.close();
+  std::cerr << "二进制查找表已成功生成到 " << output_filename << '\n';
 }
+
+// int main()
+// {
+//   build_table();
+//   return 0;
+// }

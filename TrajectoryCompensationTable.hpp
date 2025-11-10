@@ -2,25 +2,74 @@
 
 #include <cmath>
 #include <cstddef>
+#include <fstream>
 #include <iostream>
+#include <string>
+#include <utility>
 #include <vector>
 
-class Table
+#include "logger.hpp"
+
+class TrajectoryTable
 {
  public:
-  Table() {};
-  ~Table() {};
-  static constexpr double MAX_X = 13.0;
-  static constexpr double MIN_X = 0.0;
-  static constexpr double MAX_Y = 1.0;
-  static constexpr double MIN_Y = -1.0;
-  static constexpr double JINGDU = 0.01;
+  struct TableConfig
+  {
+    double max_x, min_x, max_y, min_y, precision;
+    size_t x_dim, y_dim;
+    std::string filename;
+    TableConfig(double max_x, double min_x, double max_y, double min_y, double precision,
+                std::string filename)
+        : max_x(max_x),
+          min_x(min_x),
+          max_y(max_y),
+          min_y(min_y),
+          precision(precision),
+          x_dim(static_cast<size_t>((max_x - min_x) / precision) + 1),
+          y_dim(static_cast<size_t>((max_y - min_y) / precision) + 1),
+          filename(std::move(filename))
+    {
+    }
+  };
+  TrajectoryTable(const TableConfig& config)
+      : MAX_X(config.max_x),
+        MIN_X(config.min_x),
+        MAX_Y(config.max_y),
+        MIN_Y(config.min_y),
+        RESOLUTION(config.precision),
+        X_DIM(config.x_dim),
+        Y_DIM(config.y_dim),
+        filename_(config.filename)
+  {
+    table_.resize(X_DIM * Y_DIM);
+
+    std::ifstream file_in(filename_, std::ios::in | std::ios::binary);
+
+    if (!file_in)
+    {
+      XR_LOG_ERROR("错误: 无法打开文件");
+      return;
+    }
+
+    const std::size_t BYTES_TO_READ = X_DIM * Y_DIM * sizeof(Cell);
+
+    file_in.read(reinterpret_cast<char*>(table_.data()),
+                 static_cast<std::streamsize>(BYTES_TO_READ));
+
+    if (!file_in || file_in.gcount() != static_cast<std::streamsize>(BYTES_TO_READ))
+    {
+      XR_LOG_ERROR("错误: 读取数据失败或文件大小不匹配");
+    }
+
+    file_in.close();
+  };
+  ~TrajectoryTable() {};
 
   struct Cell
   {
-    double pitch;
-    double t;
-    double v;
+    float pitch;
+    float t;
+    float v;
   };
 
   struct State
@@ -29,24 +78,30 @@ class Table
     State(double x, double y, double vx, double vy) : x(x), y(y), vx(vx), vy(vy) {}
   };
 
-  static Cell Check(float x, float y, float x_bias = 0, float y_bias = 0,
-                    float pitch_bias = 0.02, float t_bias = 0)
+  Cell Check(float x, float y, float x_bias = 0, float y_bias = 0,
+             float pitch_bias = 0.02, float t_bias = 0)
   {
-    size_t xc =
-        static_cast<size_t>(std::round((x + x_bias - MIN_X) * 100 / JINGDU) / 100);
-    size_t yc =
-        static_cast<size_t>(std::round((y + y_bias - MIN_Y) * 100 / JINGDU) / 100);
+    size_t xc = static_cast<size_t>(std::round((x + x_bias - MIN_X) / RESOLUTION));
+    size_t yc = static_cast<size_t>(std::round((y + y_bias - MIN_Y) / RESOLUTION));
     xc = std::min(xc, X_DIM - 1);
     yc = std::min(yc, Y_DIM - 1);
 
-    Cell ge = TABLE[xc][yc];
+    Cell ge = table_[xc * Y_DIM + yc];
 
-    std::cout << xc << yc << '\n';
     return {ge.pitch + pitch_bias, ge.t + t_bias, ge.v};
   }
 
  private:
-  static constexpr size_t X_DIM = static_cast<size_t>((MAX_X - MIN_X) / JINGDU) + 1;
-  static constexpr size_t Y_DIM = static_cast<size_t>((MAX_Y - MIN_Y) / JINGDU) + 1;
-  static constexpr Cell TABLE[X_DIM][Y_DIM] = {};
+  const double MAX_X;
+  const double MIN_X;
+  const double MAX_Y;
+  const double MIN_Y;
+  const double RESOLUTION;
+
+  const size_t X_DIM;
+  const size_t Y_DIM;
+
+  std::string filename_{};
+
+  std::vector<Cell> table_;
 };

@@ -9,7 +9,6 @@
 
 #include "TrajectoryCompensationTable.hpp"
 #include "armor.hpp"
-#include "libxr.hpp"
 
 /**
  * @brief Solve projectile pitch/yaw aiming for rotating multi-armor targets.
@@ -92,7 +91,8 @@ class SolveTrajectory
    * @param z_bias yaw轴电机到枪口水平面的垂直偏置 [m]
    */
   SolveTrajectory(const float& k, const int& bias_time, const float& s_bias,
-                  const float& z_bias, CalculateMode calculate_mode);
+                  const float& z_bias, CalculateMode calculate_mode,
+                  const TrajectoryTable::TableConfig& table_config);
 
   /**
    * @brief 初始化弹速
@@ -223,7 +223,7 @@ class SolveTrajectory
   std::vector<float> tmp_yaws_;      ///< 对应各装甲板的 yaw（一个周期内）
 
   CalculateMode calculate_mode_ = NORMAL;  ///< 弹道计算模式
-  Table table_;  ///< 弹道补偿表
+  TrajectoryTable table_;                  ///< 弹道补偿表
 
   float min_yaw_in_cycle_{std::numeric_limits<float>::max()};
   float max_yaw_in_cycle_{std::numeric_limits<float>::lowest()};
