@@ -22,7 +22,7 @@ constructor_args:
       bias_time: 100
       s_bias: 0.19133
       z_bias: 0.21265
-      calculate_mode: NORMAL
+      calculate_mode: SolveTrajectory::CalculateMode::NORMAL
       table_config:
         max_x: 13.0
         min_x: 0.0
