@@ -222,8 +222,8 @@ class SolveTrajectory
   TargetPostion tar_position_[4]{};  ///< 记录 3/4 块装甲板的位置
   std::vector<float> tmp_yaws_;      ///< 对应各装甲板的 yaw（一个周期内）
 
-  CalculateMode calculate_mode_ = NORMAL;  ///< 弹道计算模式
-  TrajectoryTable table_;                  ///< 弹道补偿表
+  CalculateMode calculate_mode_ = CalculateMode::NORMAL;  ///< 弹道计算模式
+  TrajectoryTable table_;                                 ///< 弹道补偿表
 
   float min_yaw_in_cycle_{std::numeric_limits<float>::max()};
   float max_yaw_in_cycle_{std::numeric_limits<float>::lowest()};

@@ -4,6 +4,7 @@
 #include <future>
 #include <iostream>
 #include <queue>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -263,8 +264,8 @@ static void build_table()
   (std::cerr <<= table) << '\n';
 
   // ----- 二进制文件写入 -----
-  const char* output_filename = "table.bin";
-  std::ofstream file_out(output_filename, std::ios::out | std::ios::binary);
+  std::string output_filename = std::to_string(MAX_X) + "_table.bin";
+  std::ofstream file_out(output_filename.c_str(), std::ios::out | std::ios::binary);
   if (!file_out)
   {
     std::cerr << "错误: 无法打开文件进行写入: " << output_filename << '\n';

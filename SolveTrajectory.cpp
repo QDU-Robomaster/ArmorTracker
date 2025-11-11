@@ -20,6 +20,10 @@ SolveTrajectory::SolveTrajectory(const float& k_, const int& bias_time_,
       calculate_mode_(calculate_mode),
       table_(table_config)
 {
+  if (calculate_mode_ == CalculateMode::TABLE_LOOKUP)
+  {
+    table_.Init();
+  }
 }
 
 void SolveTrajectory::Init(double velocity)
@@ -68,7 +72,7 @@ float SolveTrajectory::CompleteAirResistanceModel(float /*s*/, float /*v*/,
 
 float SolveTrajectory::PitchTrajectoryCompensation(float s, float z, float v)
 {
-  if (calculate_mode_ == CalculateMode::NORMAL)
+  if (calculate_mode_ == CalculateMode::NORMAL || !table_.IsInit())
   {
     float z_temp = z;
     float angle_pitch = 0.0f;
@@ -95,7 +99,7 @@ float SolveTrajectory::PitchTrajectoryCompensation(float s, float z, float v)
 
     return angle_pitch;
   }
-  else if (calculate_mode_ == CalculateMode::TABLE_LOOKUP)
+  else if (calculate_mode_ == CalculateMode::TABLE_LOOKUP && table_.IsInit())
   {
     auto res = table_.Check(s, z);
     fly_time_ = res.t / 1000.0;

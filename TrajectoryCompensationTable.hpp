@@ -39,30 +39,7 @@ class TrajectoryTable
         RESOLUTION(config.precision),
         X_DIM(config.x_dim),
         Y_DIM(config.y_dim),
-        filename_(config.filename)
-  {
-    table_.resize(X_DIM * Y_DIM);
-
-    std::ifstream file_in(filename_, std::ios::in | std::ios::binary);
-
-    if (!file_in)
-    {
-      XR_LOG_ERROR("错误: 无法打开文件");
-      return;
-    }
-
-    const std::size_t BYTES_TO_READ = X_DIM * Y_DIM * sizeof(Cell);
-
-    file_in.read(reinterpret_cast<char*>(table_.data()),
-                 static_cast<std::streamsize>(BYTES_TO_READ));
-
-    if (!file_in || file_in.gcount() != static_cast<std::streamsize>(BYTES_TO_READ))
-    {
-      XR_LOG_ERROR("错误: 读取数据失败或文件大小不匹配");
-    }
-
-    file_in.close();
-  };
+        filename_(config.filename) {};
   ~TrajectoryTable() {};
 
   struct Cell
@@ -91,6 +68,37 @@ class TrajectoryTable
     return {ge.pitch + pitch_bias, ge.t + t_bias, ge.v};
   }
 
+  void Init()
+  {
+    table_.resize(X_DIM * Y_DIM);
+
+    std::ifstream file_in(filename_, std::ios::in | std::ios::binary);
+
+    if (!file_in)
+    {
+      XR_LOG_ERROR("错误: 无法打开文件，使用默认弹道解算");
+      init = false;
+      return;
+    }
+
+    const std::size_t BYTES_TO_READ = X_DIM * Y_DIM * sizeof(Cell);
+
+    file_in.read(reinterpret_cast<char*>(table_.data()),
+                 static_cast<std::streamsize>(BYTES_TO_READ));
+
+    if (!file_in || file_in.gcount() != static_cast<std::streamsize>(BYTES_TO_READ))
+    {
+      XR_LOG_ERROR("错误: 读取数据失败或文件大小不匹配，使用默认弹道解算");
+      init = false;
+      return;
+    }
+
+    file_in.close();
+    init = true;
+  }
+
+  bool IsInit() const { return init; }
+
  private:
   const double MAX_X;
   const double MIN_X;
@@ -100,6 +108,8 @@ class TrajectoryTable
 
   const size_t X_DIM;
   const size_t Y_DIM;
+
+  bool init = false;
 
   std::string filename_{};
 
