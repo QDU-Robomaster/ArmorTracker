@@ -15,18 +15,18 @@ class TrajectoryTable
  public:
   struct TableConfig
   {
-    double max_x, min_x, max_y, min_y, precision;
+    double max_x, min_x, max_y, min_y, resolution;
     size_t x_dim, y_dim;
     std::string filename;
-    TableConfig(double max_x, double min_x, double max_y, double min_y, double precision,
+    TableConfig(double max_x, double min_x, double max_y, double min_y, double resolution,
                 std::string filename)
         : max_x(max_x),
           min_x(min_x),
           max_y(max_y),
           min_y(min_y),
-          precision(precision),
-          x_dim(static_cast<size_t>((max_x - min_x) / precision) + 1),
-          y_dim(static_cast<size_t>((max_y - min_y) / precision) + 1),
+          resolution(resolution),
+          x_dim(static_cast<size_t>((max_x - min_x) / resolution) + 1),
+          y_dim(static_cast<size_t>((max_y - min_y) / resolution) + 1),
           filename(std::move(filename))
     {
     }
@@ -36,7 +36,7 @@ class TrajectoryTable
         MIN_X(config.min_x),
         MAX_Y(config.max_y),
         MIN_Y(config.min_y),
-        RESOLUTION(config.precision),
+        RESOLUTION(config.resolution),
         X_DIM(config.x_dim),
         Y_DIM(config.y_dim),
         filename_(config.filename) {};
