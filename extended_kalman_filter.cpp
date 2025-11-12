@@ -50,7 +50,8 @@ Eigen::MatrixXd ExtendedKalmanFilter::Update(const Eigen::VectorXd& z)
   m_k_ = p_pri_ * m_h_.transpose() *
          (m_h_ * p_pri_ * m_h_.transpose() + m_r_).inverse();  // inverse计算逆矩阵
   x_post_ = x_pri_ + m_k_ * (z - h_(x_pri_));
-  p_post_ = (i_ - m_k_ * m_h_) * p_pri_;
-
+  p_post_ = (i_ - m_k_ * m_h_) * p_pri_ * (i_ - m_k_ * m_h_).transpose() +
+            m_k_ * m_r_ * m_k_.transpose();  // Joseph
+  p_post_ = 0.5 * (p_post_ + p_post_.transpose());
   return x_post_;
 }
