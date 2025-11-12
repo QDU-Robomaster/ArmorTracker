@@ -31,33 +31,51 @@ ArmorTracker::ArmorTracker(LibXR::HardwareContainer&, LibXR::ApplicationManager&
   io_.gimbal_to_camera_transform_static = cfg_.frames.base_transform_static;
 
   // ---------------- EKF 设置 ----------------
-  // 状态 x = [xc, vxc, yc, vyc, za, vza, yaw, vyaw, r]
-  // 观测 z = [xa, ya, za, yaw]
+  // 状态 x = [xc, vxc, axc, yc, vyc, ayc, za, vza, aza, yaw, vyaw, ayaw, r] (13维)
+  // 观测 z = [xa, ya, za, yaw] (4维)
   auto f = [this](const Eigen::VectorXd& x)
   {
     Eigen::VectorXd x_new = x;
+    double t = time_.dt;
     x_new(ExtendedKalmanFilter::X_CENTER) +=
-        x(ExtendedKalmanFilter::V_X_CENTER) * time_.dt;
+        x(ExtendedKalmanFilter::V_X_CENTER) * t +
+        0.5 * x(ExtendedKalmanFilter::A_X_CENTER) * t * t;
     x_new(ExtendedKalmanFilter::Y_CENTER) +=
-        x(ExtendedKalmanFilter::V_Y_CENTER) * time_.dt;
-    x_new(ExtendedKalmanFilter::Z_ARMOR) += x(ExtendedKalmanFilter::V_Z_ARMOR) * time_.dt;
-    x_new(ExtendedKalmanFilter::YAW) += x(ExtendedKalmanFilter::V_YAW) * time_.dt;
+        x(ExtendedKalmanFilter::V_Y_CENTER) * t +
+        0.5 * x(ExtendedKalmanFilter::A_Y_CENTER) * t * t;
+    x_new(ExtendedKalmanFilter::Z_ARMOR) +=
+        x(ExtendedKalmanFilter::V_Z_ARMOR) * t +
+        0.5 * x(ExtendedKalmanFilter::A_Z_ARMOR) * t * t;
+    x_new(ExtendedKalmanFilter::YAW) +=
+        x(ExtendedKalmanFilter::V_YAW) * t + 0.5 * x(ExtendedKalmanFilter::A_YAW) * t * t;
+
+    x_new(ExtendedKalmanFilter::V_X_CENTER) += x(ExtendedKalmanFilter::A_X_CENTER) * t;
+    x_new(ExtendedKalmanFilter::V_Y_CENTER) += x(ExtendedKalmanFilter::A_Y_CENTER) * t;
+    x_new(ExtendedKalmanFilter::V_Z_ARMOR) += x(ExtendedKalmanFilter::A_Z_ARMOR) * t;
+    x_new(ExtendedKalmanFilter::V_YAW) += x(ExtendedKalmanFilter::A_YAW) * t;
     return x_new;
   };
   auto j_f = [this](const Eigen::VectorXd&)
   {
-    Eigen::MatrixXd f(9, 9);
-    double d = time_.dt;
+    Eigen::MatrixXd f(13, 13);
+    f.setIdentity();
+    double t = time_.dt;
     // clang-format off
-    f << 1, d, 0, 0, 0, 0, 0, 0, 0,
-         0, 1, 0, 0, 0, 0, 0, 0, 0,
-         0, 0, 1, d, 0, 0, 0, 0, 0,
-         0, 0, 0, 1, 0, 0, 0, 0, 0,
-         0, 0, 0, 0, 1, d, 0, 0, 0,
-         0, 0, 0, 0, 0, 1, 0, 0, 0,
-         0, 0, 0, 0, 0, 0, 1, d, 0,
-         0, 0, 0, 0, 0, 0, 0, 1, 0,
-         0, 0, 0, 0, 0, 0, 0, 0, 1;
+    // f << 1, d, 0, 0, 0, 0, 0, 0, 0,
+    //      0, 1, 0, 0, 0, 0, 0, 0, 0,
+    //      0, 0, 1, d, 0, 0, 0, 0, 0,
+    //      0, 0, 0, 1, 0, 0, 0, 0, 0,
+    //      0, 0, 0, 0, 1, d, 0, 0, 0,
+    //      0, 0, 0, 0, 0, 1, 0, 0, 0,
+    //      0, 0, 0, 0, 0, 0, 1, d, 0,
+    //      0, 0, 0, 0, 0, 0, 0, 1, 0,
+    //      0, 0, 0, 0, 0, 0, 0, 0, 1;
+
+    for (int i = 0; i < 4; ++i) {
+      f(i * 3 + 0, i * 3 + 1) = t;
+      f(i * 3 + 0, i * 3 + 2) = 0.5 * t * t;
+      f(i * 3 + 1, i * 3 + 2) = t;
+    }
     // clang-format on
     return f;
   };
@@ -74,44 +92,91 @@ ArmorTracker::ArmorTracker(LibXR::HardwareContainer&, LibXR::ApplicationManager&
   };
   auto j_h = [](const Eigen::VectorXd& x)
   {
-    Eigen::MatrixXd h(4, 9);
-    double yaw = x(6), r = x(8);
+    Eigen::MatrixXd h(4, 13);
+    double yaw = x(ExtendedKalmanFilter::YAW), r = x(ExtendedKalmanFilter::ROBOT_R);
+
+    // h(0, 0) = 1; h(0, 9) = r * std::sin(yaw);  h(0, 12) = -std::cos(yaw);
+    // h(1, 3) = 1; h(1, 9) = -r * std::cos(yaw); h(1, 12) = -std::sin(yaw);
+    // h(2, 6) = 1;
+    // h(3, 9) = 1;
     //                 xc vxc yc vyc za vza yaw               vyaw r
-    h << /*xa*/ 1, 0, 0, 0, 0, 0, r * std::sin(yaw), 0, -std::cos(yaw),
-        /*ya */ 0, 0, 1, 0, 0, 0, -r * std::cos(yaw), 0, -std::sin(yaw),
-        /*za */ 0, 0, 0, 0, 1, 0, 0, 0, 0,
-        /*yaw*/ 0, 0, 0, 0, 0, 0, 1, 0, 0;
+    h << /*xa*/ 1, 0, 0, 0, 0, 0, 0, 0, 0, r * std::sin(yaw), 0, 0, -std::cos(yaw),
+        /*ya */ 0, 0, 0, 1, 0, 0, 0, 0, 0, -r * std::cos(yaw), 0, 0, -std::sin(yaw),
+        /*za */ 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0,
+        /*yaw*/ 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0;
     return h;
   };
   auto u_q = [this]()
   {
-    Eigen::MatrixXd q(9, 9);
+    Eigen::MatrixXd q(13, 13);
     double t = time_.dt, x = cfg_.ekf.sigma2_q_xyz, y = cfg_.ekf.sigma2_q_yaw,
            r = cfg_.ekf.sigma2_q_r;
-    double q_x_x = std::pow(t, 4) / 4 * x, q_x_vx = std::pow(t, 3) / 2 * x,
-           q_vx_vx = std::pow(t, 2) * x;
-    double q_y_y = std::pow(t, 4) / 4 * y, q_y_vy = std::pow(t, 3) / 2 * y,
-           q_vy_vy = std::pow(t, 2) * y;
-    double q_r = std::pow(t, 4) / 4 * r;
+
+    double t2 = t * t, t3 = t2 * t, t4 = t3 * t, t5 = t4 * t, t6 = t5 * t;
+    // XYZ 块的元素 (p-位置, v-速度, a-加速度)
+    double q_p_p_xyz = t6 / 36.0 * x;
+    double q_p_v_xyz = t5 / 12.0 * x;
+    double q_p_a_xyz = t4 / 6.0 * x;
+    double q_v_v_xyz = t4 / 4.0 * x;
+    double q_v_a_xyz = t3 / 2.0 * x;
+    double q_a_a_xyz = t2 * x;
+
+    // Yaw 块的元素
+    double q_p_p_yaw = t6 / 36.0 * y;
+    double q_p_v_yaw = t5 / 12.0 * y;
+    double q_p_a_yaw = t4 / 6.0 * y;
+    double q_v_v_yaw = t4 / 4.0 * y;
+    double q_v_a_yaw = t3 / 2.0 * y;
+    double q_a_a_yaw = t2 * y;
+
+    double q_r = t2 * r;
     // clang-format off
     q.setZero();
-    q(0,0)=q_x_x;  q(0,1)=q_x_vx; q(1,0)=q_x_vx; q(1,1)=q_vx_vx;
-    q(2,2)=q_x_x;  q(2,3)=q_x_vx; q(3,2)=q_x_vx; q(3,3)=q_vx_vx;
-    q(4,4)=q_x_x;  q(4,5)=q_x_vx; q(5,4)=q_x_vx; q(5,5)=q_vx_vx;
-    q(6,6)=q_y_y;  q(6,7)=q_y_vy; q(7,6)=q_y_vy; q(7,7)=q_vy_vy;
-    q(8,8)=q_r;
+    // [xc, vxc, axc]
+    q(0,0)=q_p_p_xyz; q(0,1)=q_p_v_xyz; q(0,2)=q_p_a_xyz;
+    q(1,0)=q_p_v_xyz; q(1,1)=q_v_v_xyz; q(1,2)=q_v_a_xyz;
+    q(2,0)=q_p_a_xyz; q(2,1)=q_v_a_xyz; q(2,2)=q_a_a_xyz;
+
+    // [yc, vyc, ayc]
+    q(3,3)=q_p_p_xyz; q(3,4)=q_p_v_xyz; q(3,5)=q_p_a_xyz;
+    q(4,3)=q_p_v_xyz; q(4,4)=q_v_v_xyz; q(4,5)=q_v_a_xyz;
+    q(5,3)=q_p_a_xyz; q(5,4)=q_v_a_xyz; q(5,5)=q_a_a_xyz;
+
+    // [za, vza, aza]
+    q(6,6)=q_p_p_xyz; q(6,7)=q_p_v_xyz; q(6,8)=q_p_a_xyz;
+    q(7,6)=q_p_v_xyz; q(7,7)=q_v_v_xyz; q(7,8)=q_v_a_xyz;
+    q(8,6)=q_p_a_xyz; q(8,7)=q_v_a_xyz; q(8,8)=q_a_a_xyz;
+
+    // [yaw, vyaw, ayaw]
+    q(9,9)  =q_p_p_yaw; q(9,10) =q_p_v_yaw; q(9,11) =q_p_a_yaw;
+    q(10,9) =q_p_v_yaw; q(10,10)=q_v_v_yaw; q(10,11)=q_v_a_yaw;
+    q(11,9) =q_p_a_yaw; q(11,10)=q_v_a_yaw; q(11,11)=q_a_a_yaw;
+
+    // R
+    q(12,12) = q_r;
     // clang-format on
     return q;
   };
+  // auto u_r = [this](const Eigen::VectorXd& z)
+  // {
+  //   Eigen::DiagonalMatrix<double, 4> r;
+  //   double x = cfg_.noise.r_xyz_factor;
+  //   r.diagonal() << std::abs(x * z[0]), std::abs(x * z[1]), std::abs(x * z[2]),
+  //       cfg_.noise.r_yaw;
+  //   return r;
+  // };
+
   auto u_r = [this](const Eigen::VectorXd& z)
   {
     Eigen::DiagonalMatrix<double, 4> r;
-    double x = cfg_.noise.r_xyz_factor;
-    r.diagonal() << std::abs(x * z[0]), std::abs(x * z[1]), std::abs(x * z[2]),
-        cfg_.noise.r_yaw;
+    double dist = z.head<3>().norm();
+    double std_dev_xyz = cfg_.noise.r_xyz_factor * dist; // 标准差
+    r.diagonal() << std_dev_xyz * std_dev_xyz, std_dev_xyz * std_dev_xyz,
+        std_dev_xyz * std_dev_xyz, cfg_.noise.r_yaw;
     return r;
   };
-  Eigen::DiagonalMatrix<double, 9> p0;
+
+  Eigen::DiagonalMatrix<double, 13> p0;
   p0.setIdentity();
   ekf_.ekf = ExtendedKalmanFilter{f, h, j_f, j_h, u_q, u_r, p0};
 
@@ -368,7 +433,8 @@ void ArmorTracker::Update(const ArmorDetectorResults& armors_msg)
         if (position_diff < min_position_diff)
         {
           min_position_diff = position_diff;
-          yaw_diff = std::abs(OrientationToYaw(armor.pose.rotation) - ekf_prediction(6));
+          yaw_diff = std::abs(OrientationToYaw(armor.pose.rotation) -
+                              ekf_prediction(ExtendedKalmanFilter::YAW));
           rt_.tracked_armor = armor;
         }
       }
@@ -400,14 +466,14 @@ void ArmorTracker::Update(const ArmorDetectorResults& armors_msg)
   }
 
   // 防止半径发散
-  if (ekf_.state(8) < 0.12)
+  if (ekf_.state(ExtendedKalmanFilter::ROBOT_R) < 0.12)
   {
-    ekf_.state(8) = 0.12;
+    ekf_.state(ExtendedKalmanFilter::ROBOT_R) = 0.12;
     ekf_.ekf.SetState(ekf_.state);
   }
-  else if (ekf_.state(8) > 0.4)
+  else if (ekf_.state(ExtendedKalmanFilter::ROBOT_R) > 0.4)
   {
-    ekf_.state(8) = 0.4;
+    ekf_.state(ExtendedKalmanFilter::ROBOT_R) = 0.4;
     ekf_.ekf.SetState(ekf_.state);
   }
 
@@ -543,15 +609,15 @@ void ArmorTracker::ArmorsCallback(ArmorDetectorResults& armors_msg)
       const auto& state = ekf_.state;
       target_msg.id = rt_.tracked_id;
       target_msg.armors_num = static_cast<int>(rt_.tracked_armors_num);
-      target_msg.position.x() = state(0);
-      target_msg.velocity.x() = state(1);
-      target_msg.position.y() = state(2);
-      target_msg.velocity.y() = state(3);
-      target_msg.position.z() = state(4);
-      target_msg.velocity.z() = state(5);
-      target_msg.yaw = state(6);
-      target_msg.v_yaw = state(7);
-      target_msg.radius_1 = state(8);
+      target_msg.position.x() = state(ExtendedKalmanFilter::X_CENTER);
+      target_msg.velocity.x() = state(ExtendedKalmanFilter::V_X_CENTER);
+      target_msg.position.y() = state(ExtendedKalmanFilter::Y_CENTER);
+      target_msg.velocity.y() = state(ExtendedKalmanFilter::V_Y_CENTER);
+      target_msg.position.z() = state(ExtendedKalmanFilter::Z_ARMOR);
+      target_msg.velocity.z() = state(ExtendedKalmanFilter::V_Z_ARMOR);
+      target_msg.yaw = state(ExtendedKalmanFilter::YAW);
+      target_msg.v_yaw = state(ExtendedKalmanFilter::V_YAW);
+      target_msg.radius_1 = state(ExtendedKalmanFilter::ROBOT_R);
       target_msg.radius_2 = rt_.another_r;
       target_msg.dz = rt_.dz;
 
@@ -580,9 +646,11 @@ void ArmorTracker::ArmorsCallback(ArmorDetectorResults& armors_msg)
       Eigen::Vector3d pw_center, pw_armors[4];
       {
         const auto& st = ekf_.state;  // [xc,vxc,yc,vyc,za,vza,yaw,vyaw,r1]
-        const double XC = st(0), YC = st(2), ZA = st(4);
-        const double YAW = st(6);
-        const double R1 = st(8);
+        const double XC = st(ExtendedKalmanFilter::X_CENTER),
+                     YC = st(ExtendedKalmanFilter::Y_CENTER),
+                     ZA = st(ExtendedKalmanFilter::Z_ARMOR);
+        const double YAW = st(ExtendedKalmanFilter::YAW);
+        const double R1 = st(ExtendedKalmanFilter::ROBOT_R);
         const double R2 = rt_.another_r;  // 另一半径（交替用）
         const int N = static_cast<int>(rt_.tracked_armors_num);
 
@@ -650,13 +718,17 @@ void ArmorTracker::InitEKF(const ArmorDetectorResult& a)
   double yaw = OrientationToYaw(a.pose.rotation);
 
   // 初始在目标后方 r=0.26 m
-  ekf_.state = Eigen::VectorXd::Zero(9);
+  ekf_.state = Eigen::VectorXd::Zero(13);
   double r = 0.26;
   double xc = xa + r * std::cos(yaw);
   double yc = ya + r * std::sin(yaw);
   rt_.dz = 0;
   rt_.another_r = r;
-  ekf_.state << xc, 0, yc, 0, za, 0, yaw, 0, r;
+  ekf_.state(ExtendedKalmanFilter::X_CENTER) = xc;
+  ekf_.state(ExtendedKalmanFilter::Y_CENTER) = yc;
+  ekf_.state(ExtendedKalmanFilter::Z_ARMOR) = za;
+  ekf_.state(ExtendedKalmanFilter::YAW) = yaw;
+  ekf_.state(ExtendedKalmanFilter::ROBOT_R) = r;
 
   ekf_.ekf.SetState(ekf_.state);
 }
@@ -676,14 +748,14 @@ void ArmorTracker::UpdateArmorsNum(const ArmorDetectorResult&)
 void ArmorTracker::HandleArmorJump(const ArmorDetectorResult& current_armor)
 {
   double yaw = OrientationToYaw(current_armor.pose.rotation);
-  ekf_.state(6) = yaw;
+  ekf_.state(ExtendedKalmanFilter::YAW) = yaw;
   UpdateArmorsNum(current_armor);
-
   if (rt_.tracked_armors_num == ArmorsNum::NORMAL_4)
   {
-    rt_.dz = ekf_.state(4) - current_armor.pose.translation.z();
-    ekf_.state(4) = current_armor.pose.translation.z();
-    std::swap(ekf_.state(8), rt_.another_r);
+    rt_.dz =
+        ekf_.state(ExtendedKalmanFilter::Z_ARMOR) - current_armor.pose.translation.z();
+    ekf_.state(ExtendedKalmanFilter::Z_ARMOR) = current_armor.pose.translation.z();
+    std::swap(ekf_.state(ExtendedKalmanFilter::ROBOT_R), rt_.another_r);
   }
   XR_LOG_WARN("Armor jump!");
 
@@ -693,13 +765,16 @@ void ArmorTracker::HandleArmorJump(const ArmorDetectorResult& current_armor)
   Eigen::Vector3d infer_p = GetArmorPositionFromState(ekf_.state);
   if ((current_p - infer_p).norm() > cfg_.match.max_match_distance)
   {
-    double r = ekf_.state(8);
-    ekf_.state(0) = p.x() + r * std::cos(yaw);  // xc
-    ekf_.state(1) = 0;
-    ekf_.state(2) = p.y() + r * std::sin(yaw);  // yc
-    ekf_.state(3) = 0;
-    ekf_.state(4) = p.z();  // za
-    ekf_.state(5) = 0;
+    double r = ekf_.state(ExtendedKalmanFilter::ROBOT_R);
+    ekf_.state(ExtendedKalmanFilter::X_CENTER) = p.x() + r * std::cos(yaw);  // xc
+    ekf_.state(ExtendedKalmanFilter::V_X_CENTER) = 0;
+    ekf_.state(ExtendedKalmanFilter::A_X_CENTER) = 0;
+    ekf_.state(ExtendedKalmanFilter::Y_CENTER) = p.y() + r * std::sin(yaw);  // yc
+    ekf_.state(ExtendedKalmanFilter::V_Y_CENTER) = 0;
+    ekf_.state(ExtendedKalmanFilter::A_Y_CENTER) = 0;
+    ekf_.state(ExtendedKalmanFilter::Z_ARMOR) = p.z();  // za
+    ekf_.state(ExtendedKalmanFilter::V_Z_ARMOR) = 0;
+    ekf_.state(ExtendedKalmanFilter::A_Z_ARMOR) = 0;
     XR_LOG_ERROR("Reset State!");
   }
 
@@ -720,8 +795,9 @@ double ArmorTracker::OrientationToYaw(const LibXR::Quaternion<double>& q)
 
 Eigen::Vector3d ArmorTracker::GetArmorPositionFromState(const Eigen::VectorXd& x)
 {
-  double xc = x(0), yc = x(2), za = x(4);
-  double yaw = x(6), r = x(8);
+  double xc = x(ExtendedKalmanFilter::X_CENTER), yc = x(ExtendedKalmanFilter::Y_CENTER),
+         za = x(ExtendedKalmanFilter::Z_ARMOR);
+  double yaw = x(ExtendedKalmanFilter::YAW), r = x(ExtendedKalmanFilter::ROBOT_R);
   double xa = xc - r * std::cos(yaw);
   double ya = yc - r * std::sin(yaw);
   return Eigen::Vector3d(xa, ya, za);

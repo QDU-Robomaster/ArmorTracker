@@ -2,23 +2,43 @@
 #define ARMOR_PROCESSOR__KALMAN_FILTER_HPP_
 
 #include <Eigen/Dense>
+#include <cstdint>
 #include <functional>
 
 class ExtendedKalmanFilter
 {
  public:
+  // enum XVectorIndex : std::uint8_t
+  // {
+  //   X_CENTER = 0,
+  //   V_X_CENTER = 1,
+  //   Y_CENTER = 2,
+  //   V_Y_CENTER = 3,
+  //   Z_ARMOR = 4,
+  //   V_Z_ARMOR = 5,
+  //   YAW = 6,
+  //   V_YAW = 7,
+  //   ROBOT_R = 8
+  // };
+
   enum XVectorIndex : std::uint8_t
   {
     X_CENTER = 0,
     V_X_CENTER = 1,
-    Y_CENTER = 2,
-    V_Y_CENTER = 3,
-    Z_ARMOR = 4,
-    V_Z_ARMOR = 5,
-    YAW = 6,
-    V_YAW = 7,
-    ROBOT_R = 8
+    A_X_CENTER = 2,
+    Y_CENTER = 3,
+    V_Y_CENTER = 4,
+    A_Y_CENTER = 5,
+    Z_ARMOR = 6,
+    V_Z_ARMOR = 7,
+    A_Z_ARMOR = 8,
+    YAW = 9,
+    V_YAW = 10,
+    A_YAW = 11,
+    ROBOT_R = 12,
   };
+
+
   ExtendedKalmanFilter() = default;
 
   using VecVecFunc = std::function<Eigen::VectorXd(const Eigen::VectorXd&)>;
