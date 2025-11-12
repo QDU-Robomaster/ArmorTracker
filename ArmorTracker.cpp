@@ -47,27 +47,29 @@ ArmorTracker::ArmorTracker(LibXR::HardwareContainer&, LibXR::ApplicationManager&
   auto j_f = [this](const Eigen::VectorXd&)
   {
     Eigen::MatrixXd f(9, 9);
+    double d = time_.dt;
     // clang-format off
-    f << 1, time_.dt, 0, 0, 0, 0, 0, 0, 0,
-         0, 1,        0, 0, 0, 0, 0, 0, 0,
-         0, 0,        1, time_.dt, 0, 0, 0, 0, 0,
-         0, 0,        0, 1,        0, 0, 0, 0, 0,
-         0, 0,        0, 0,        1, time_.dt, 0, 0, 0,
-         0, 0,        0, 0,        0, 1,        0, 0, 0,
-         0, 0,        0, 0,        0, 0,        1, time_.dt, 0,
-         0, 0,        0, 0,        0, 0,        0, 1,        0,
-         0, 0,        0, 0,        0, 0,        0, 0,        1;
+    f << 1, d, 0, 0, 0, 0, 0, 0, 0,
+         0, 1, 0, 0, 0, 0, 0, 0, 0,
+         0, 0, 1, d, 0, 0, 0, 0, 0,
+         0, 0, 0, 1, 0, 0, 0, 0, 0,
+         0, 0, 0, 0, 1, d, 0, 0, 0,
+         0, 0, 0, 0, 0, 1, 0, 0, 0,
+         0, 0, 0, 0, 0, 0, 1, d, 0,
+         0, 0, 0, 0, 0, 0, 0, 1, 0,
+         0, 0, 0, 0, 0, 0, 0, 0, 1;
     // clang-format on
     return f;
   };
   auto h = [](const Eigen::VectorXd& x)
   {
     Eigen::VectorXd z(4);
-    double xc = x(0), yc = x(2), yaw = x(6), r = x(8);
-    z(0) = xc - r * std::cos(yaw);  // xa
-    z(1) = yc - r * std::sin(yaw);  // ya
-    z(2) = x(4);                    // za
-    z(3) = x(6);                    // yaw
+    double xc = x(ExtendedKalmanFilter::X_CENTER), yc = x(ExtendedKalmanFilter::Y_CENTER),
+           yaw = x(ExtendedKalmanFilter::YAW), r = x(ExtendedKalmanFilter::ROBOT_R);
+    z(0) = xc - r * std::cos(yaw);            // xa
+    z(1) = yc - r * std::sin(yaw);            // ya
+    z(2) = x(ExtendedKalmanFilter::Z_ARMOR);  // za
+    z(3) = x(ExtendedKalmanFilter::YAW);      // yaw
     return z;
   };
   auto j_h = [](const Eigen::VectorXd& x)
@@ -75,7 +77,7 @@ ArmorTracker::ArmorTracker(LibXR::HardwareContainer&, LibXR::ApplicationManager&
     Eigen::MatrixXd h(4, 9);
     double yaw = x(6), r = x(8);
     //                 xc vxc yc vyc za vza yaw               vyaw r
-    h << /*xa */ 1, 0, 0, 0, 0, 0, r * std::sin(yaw), 0, -std::cos(yaw),
+    h << /*xa*/ 1, 0, 0, 0, 0, 0, r * std::sin(yaw), 0, -std::cos(yaw),
         /*ya */ 0, 0, 1, 0, 0, 0, -r * std::cos(yaw), 0, -std::sin(yaw),
         /*za */ 0, 0, 0, 0, 1, 0, 0, 0, 0,
         /*yaw*/ 0, 0, 0, 0, 0, 0, 1, 0, 0;
@@ -88,7 +90,7 @@ ArmorTracker::ArmorTracker(LibXR::HardwareContainer&, LibXR::ApplicationManager&
            r = cfg_.ekf.sigma2_q_r;
     double q_x_x = std::pow(t, 4) / 4 * x, q_x_vx = std::pow(t, 3) / 2 * x,
            q_vx_vx = std::pow(t, 2) * x;
-    double q_y_y = std::pow(t, 4) / 4 * y, q_y_vy = std::pow(t, 3) / 2 * x,
+    double q_y_y = std::pow(t, 4) / 4 * y, q_y_vy = std::pow(t, 3) / 2 * y,
            q_vy_vy = std::pow(t, 2) * y;
     double q_r = std::pow(t, 4) / 4 * r;
     // clang-format off
