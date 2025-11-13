@@ -9,49 +9,37 @@
 
 #include "logger.hpp"
 
-SolveTrajectory::SolveTrajectory(const float& k_, const int& bias_time_,
-                                 const float& s_bias_, const float& z_bias_,
-                                 CalculateMode calculate_mode,
-                                 const TrajectoryTable::TableConfig& table_config)
-    : k_(k_),
-      bias_time_(bias_time_),
-      s_bias_(s_bias_),
-      z_bias_(z_bias_),
-      calculate_mode_(calculate_mode),
-      table_(table_config)
-{
-  if (calculate_mode_ == CalculateMode::TABLE_LOOKUP)
-  {
+SolveTrajectory::SolveTrajectory(
+    const float &k_, const int &bias_time_, const float &s_bias_,
+    const float &z_bias_, CalculateMode calculate_mode,
+    const TrajectoryTable::TableConfig &table_config)
+    : k_(k_), bias_time_(bias_time_), s_bias_(s_bias_), z_bias_(z_bias_),
+      calculate_mode_(calculate_mode), table_(table_config) {
+  if (calculate_mode_ == CalculateMode::TABLE_LOOKUP) {
     table_.Init();
   }
 }
 
-void SolveTrajectory::Init(double velocity)
-{
-  if (!std::isnan(velocity))
-  {
+void SolveTrajectory::Init(double velocity) {
+  if (!std::isnan(velocity)) {
     current_v_ = static_cast<float>(velocity);
-  }
-  else
-  {
-    current_v_ = 12.0f;  // 默认弹速
+  } else {
+    current_v_ = 12.0f; // 默认弹速
   }
 }
 
-float SolveTrajectory::MonoDirectionalAirResistanceModel(float s, float v, float angle)
-{
+float SolveTrajectory::MonoDirectionalAirResistanceModel(float s, float v,
+                                                         float angle) {
   // 飞行时间 t = (e^{k s} - 1) / (k v cos(angle))
   fly_time_ = (std::exp(k_ * s) - 1.0) / (k_ * v * std::cos(angle));
 
-  if (std::isnan(fly_time_))
-  {
+  if (std::isnan(fly_time_)) {
     XR_LOG_ERROR("Fly time is nan!");
     fly_time_ = 0.0;
     return 0.0f;
   }
 
-  if (fly_time_ < 0.0)
-  {
+  if (fly_time_ < 0.0) {
     XR_LOG_ERROR("Fly time is negative!");
     fly_time_ = 0.0;
     return 0.0f;
@@ -64,66 +52,57 @@ float SolveTrajectory::MonoDirectionalAirResistanceModel(float s, float v, float
 }
 
 float SolveTrajectory::CompleteAirResistanceModel(float /*s*/, float /*v*/,
-                                                  float /*angle*/)
-{
+                                                  float /*angle*/) {
   // TODO: Implement complete air resistance model
   return 0.0f;
 }
 
-float SolveTrajectory::PitchTrajectoryCompensation(float s, float z, float v)
-{
-  if (calculate_mode_ == CalculateMode::NORMAL || !table_.IsInit())
-  {
+float SolveTrajectory::PitchTrajectoryCompensation(float s, float z, float v) {
+  if (calculate_mode_ == CalculateMode::NORMAL || !table_.IsInit()) {
     float z_temp = z;
     float angle_pitch = 0.0f;
     // 经验：20~27 次迭代通常足够收敛
-    for (int i = 0; i < 22; ++i)
-    {
-      if (std::isnan(z_temp))
-      {
+    for (int i = 0; i < 22; ++i) {
+      if (std::isnan(z_temp)) {
         XR_LOG_ERROR("z_temp is nan!");
         return 0.0f;
       }
 
       angle_pitch = std::atan2(z_temp, s);
 
-      const float Z_ACTUAL = MonoDirectionalAirResistanceModel(s, v, angle_pitch);
+      const float Z_ACTUAL =
+          MonoDirectionalAirResistanceModel(s, v, angle_pitch);
       const float DZ = 0.3f * (z - Z_ACTUAL);
       z_temp += DZ;
 
-      if (std::fabs(DZ) < 1e-5f)
-      {
+      if (std::fabs(DZ) < 1e-5f) {
         break;
       }
     }
 
     return angle_pitch;
-  }
-  else if (calculate_mode_ == CalculateMode::TABLE_LOOKUP && table_.IsInit())
-  {
+  } else if (calculate_mode_ == CalculateMode::TABLE_LOOKUP &&
+             table_.IsInit()) {
     auto res = table_.Check(s, z);
-    fly_time_ = res.t / 1000.0;
+    fly_time_ = res.t;
     return static_cast<float>(res.pitch);
   }
 
   return 0.0f;
 }
 
-bool SolveTrajectory::ShouldFire(float tmp_yaw, float v_yaw, float timeDelay)
-{
+bool SolveTrajectory::ShouldFire(float tmp_yaw, float v_yaw, float timeDelay) {
   // 线性预测：若预测 yaw 接近整圈（2π），则认为到达最佳击发窗口
   return std::fabs((tmp_yaw + v_yaw * timeDelay) - 2.0f * PI) < 0.001f;
 }
 
-void SolveTrajectory::CalculateArmorPosition(Target* msg, bool use_1,
-                                             bool use_average_radius)
-{
+void SolveTrajectory::CalculateArmorPosition(Target *msg, bool use_1,
+                                             bool use_average_radius) {
   tmp_yaws_.clear();
   min_yaw_in_cycle_ = std::numeric_limits<float>::max();
   max_yaw_in_cycle_ = std::numeric_limits<float>::lowest();
 
-  for (int i = 0; i < msg->armors_num; ++i)
-  {
+  for (int i = 0; i < msg->armors_num; ++i) {
     // 以目标 yaw 为基准，按数量等间隔分布
     const float TMP_YAW = tar_yaw_ + static_cast<float>(i) * 2.0f * PI /
                                          static_cast<float>(msg->armors_num);
@@ -133,32 +112,33 @@ void SolveTrajectory::CalculateArmorPosition(Target* msg, bool use_1,
 
     // 半径选择
     float r = 0.0f;
-    if (use_average_radius)
-    {
+    if (use_average_radius) {
       r = static_cast<float>((msg->radius_1 + msg->radius_2) / 2.0);
-    }
-    else
-    {
+    } else {
       r = static_cast<float>(use_1 ? msg->radius_1 : msg->radius_2);
     }
 
     // 世界坐标推算（简单平面圆周 + 保持 z 不变）
-    tar_position_[i].x = static_cast<float>(msg->position.x()) - r * std::cos(TMP_YAW);
-    tar_position_[i].y = static_cast<float>(msg->position.y()) - r * std::sin(TMP_YAW);
+    tar_position_[i].x =
+        static_cast<float>(msg->position.x()) - r * std::cos(TMP_YAW);
+    tar_position_[i].y =
+        static_cast<float>(msg->position.y()) - r * std::sin(TMP_YAW);
     tar_position_[i].z = static_cast<float>(msg->position.z());
     tar_position_[i].yaw = TMP_YAW;
 
-    use_1 = !use_1;  // 交替使用 r1/r2
+    use_1 = !use_1; // 交替使用 r1/r2
   }
 }
 
 std::pair<float, float> SolveTrajectory::CalculatePitchAndYaw(
-    int idx, Target* msg, float timeDelay, float s_bias_, float z_bias_, float current_v_,
-    bool use_target_center_for_yaw, float& aim_x, float& aim_y, float& aim_z)
-{
+    int idx, Target *msg, float timeDelay, float s_bias_, float z_bias_,
+    float current_v_, bool use_target_center_for_yaw, float &aim_x,
+    float &aim_y, float &aim_z) {
   // 线性预测装甲板落点（x,y），z 保持
-  aim_x = tar_position_[idx].x + static_cast<float>(msg->velocity.x()) * timeDelay;
-  aim_y = tar_position_[idx].y + static_cast<float>(msg->velocity.y()) * timeDelay;
+  aim_x =
+      tar_position_[idx].x + static_cast<float>(msg->velocity.x()) * timeDelay;
+  aim_y =
+      tar_position_[idx].y + static_cast<float>(msg->velocity.y()) * timeDelay;
   aim_z = tar_position_[idx].z;
 
   // yaw 使用目标中心 or 预测装甲板点
@@ -177,34 +157,28 @@ std::pair<float, float> SolveTrajectory::CalculatePitchAndYaw(
   return {PITCH, YAW};
 }
 
-int SolveTrajectory::SelectArmor(Target* msg, bool select_by_min_yaw)
-{
+int SolveTrajectory::SelectArmor(Target *msg, bool select_by_min_yaw) {
   int selected_armor_idx = 0;
 
-  if (select_by_min_yaw)
-  {
-    float min_yaw_diff = std::fabs(static_cast<float>(msg->yaw) - tar_position_[0].yaw);
-    for (int i = 1; i < msg->armors_num; ++i)
-    {
-      const float D = std::fabs(static_cast<float>(msg->yaw) - tar_position_[i].yaw);
-      if (D < min_yaw_diff)
-      {
+  if (select_by_min_yaw) {
+    float min_yaw_diff =
+        std::fabs(static_cast<float>(msg->yaw) - tar_position_[0].yaw);
+    for (int i = 1; i < msg->armors_num; ++i) {
+      const float D =
+          std::fabs(static_cast<float>(msg->yaw) - tar_position_[i].yaw);
+      if (D < min_yaw_diff) {
         min_yaw_diff = D;
         selected_armor_idx = i;
       }
     }
-  }
-  else
-  {
+  } else {
     float min_distance = std::numeric_limits<float>::max();
-    for (int i = 0; i < msg->armors_num; ++i)
-    {
+    for (int i = 0; i < msg->armors_num; ++i) {
       const float DX = tar_position_[i].x;
       const float DY = tar_position_[i].y;
       const float DZ = tar_position_[i].z;
       const float DIST = std::sqrt(DX * DX + DY * DY + DZ * DZ);
-      if (DIST < min_distance)
-      {
+      if (DIST < min_distance) {
         min_distance = DIST;
         selected_armor_idx = i;
       }
@@ -214,9 +188,8 @@ int SolveTrajectory::SelectArmor(Target* msg, bool select_by_min_yaw)
   return selected_armor_idx;
 }
 
-void SolveTrajectory::FireLogicIsTop(float& pitch, float& yaw, float& aim_x, float& aim_y,
-                                     float& aim_z, Target* msg)
-{
+void SolveTrajectory::FireLogicIsTop(float &pitch, float &yaw, float &aim_x,
+                                     float &aim_y, float &aim_z, Target *msg) {
   tar_yaw_ = static_cast<float>(msg->yaw);
 
   // 通信延迟（ms->s） + 由上一次弹道模型计算得到的飞行时间
@@ -226,38 +199,29 @@ void SolveTrajectory::FireLogicIsTop(float& pitch, float& yaw, float& aim_x, flo
   int idx = 0;
   bool is_fire = false;
 
-  if (msg->armors_num == ARMOR_NUM_OUTPOST)
-  {
+  if (msg->armors_num == ARMOR_NUM_OUTPOST) {
     CalculateArmorPosition(msg, /*use_1=*/false, /*use_average_radius=*/true);
 
-    for (size_t i = 0; i < tmp_yaws_.size(); ++i)
-    {
+    for (size_t i = 0; i < tmp_yaws_.size(); ++i) {
       const float TY = tmp_yaws_[i];
-      if (ShouldFire(TY, static_cast<float>(msg->v_yaw), TIME_DELAY))
-      {
+      if (ShouldFire(TY, static_cast<float>(msg->v_yaw), TIME_DELAY)) {
         is_fire = true;
         idx = static_cast<int>(i);
-        if (fire_callback_)
-        {
+        if (fire_callback_) {
           fire_callback_(is_fire);
         }
         break;
       }
     }
-  }
-  else
-  {
+  } else {
     CalculateArmorPosition(msg, /*use_1=*/false, /*use_average_radius=*/false);
 
-    for (size_t i = 0; i < tmp_yaws_.size(); ++i)
-    {
+    for (size_t i = 0; i < tmp_yaws_.size(); ++i) {
       const float TY = tmp_yaws_[i];
-      if (ShouldFire(TY, static_cast<float>(msg->v_yaw), TIME_DELAY))
-      {
+      if (ShouldFire(TY, static_cast<float>(msg->v_yaw), TIME_DELAY)) {
         is_fire = true;
         idx = static_cast<int>(i);
-        if (fire_callback_)
-        {
+        if (fire_callback_) {
           fire_callback_(is_fire);
         }
         break;
@@ -267,18 +231,18 @@ void SolveTrajectory::FireLogicIsTop(float& pitch, float& yaw, float& aim_x, flo
 
   XR_LOG_DEBUG("FireLogicIsTop idx: %d", idx);
 
-  const auto [p, y] =
-      CalculatePitchAndYaw(idx, msg, TIME_DELAY, s_bias_, z_bias_, current_v_,
-                           /*use_target_center_for_yaw=*/false, aim_x, aim_y, aim_z);
+  const auto [p, y] = CalculatePitchAndYaw(
+      idx, msg, TIME_DELAY, s_bias_, z_bias_, current_v_,
+      /*use_target_center_for_yaw=*/false, aim_x, aim_y, aim_z);
   pitch = p;
   yaw = y;
 
   XR_LOG_DEBUG("SolveTrajectory pitch: %f, yaw: %f", pitch, yaw);
 }
 
-void SolveTrajectory::FireLogicDefault(float& pitch, float& yaw, float& aim_x,
-                                       float& aim_y, float& aim_z, Target* msg)
-{
+void SolveTrajectory::FireLogicDefault(float &pitch, float &yaw, float &aim_x,
+                                       float &aim_y, float &aim_z,
+                                       Target *msg) {
   // 时延
   const float TIME_DELAY =
       static_cast<float>(bias_time_) / 1000.0f + static_cast<float>(fly_time_);
@@ -291,16 +255,16 @@ void SolveTrajectory::FireLogicDefault(float& pitch, float& yaw, float& aim_x,
 
   std::cout << "selected idx: " << IDX << '\n';
 
-  const auto [p, y] =
-      CalculatePitchAndYaw(IDX, msg, TIME_DELAY, s_bias_, z_bias_, current_v_,
-                           /*use_target_center_for_yaw=*/false, aim_x, aim_y, aim_z);
+  const auto [p, y] = CalculatePitchAndYaw(
+      IDX, msg, TIME_DELAY, s_bias_, z_bias_, current_v_,
+      /*use_target_center_for_yaw=*/false, aim_x, aim_y, aim_z);
   pitch = p;
   yaw = y;
 }
 
-void SolveTrajectory::AutoSolveTrajectory(float& pitch, float& yaw, float& aim_x,
-                                          float& aim_y, float& aim_z, Target* msg)
-{
+void SolveTrajectory::AutoSolveTrajectory(float &pitch, float &yaw,
+                                          float &aim_x, float &aim_y,
+                                          float &aim_z, Target *msg) {
   // 当前策略：优先使用“顶部优先”逻辑
   FireLogicIsTop(pitch, yaw, aim_x, aim_y, aim_z, msg);
 }
