@@ -498,6 +498,11 @@ void ArmorTracker::Update(const ArmorDetectorResults& armors_msg)
     }
   }
 
+  if(!matched){
+    ekf_.ekf.PriToPost();
+    ekf_.state = ekf_.ekf.GetState();
+  }
+
   // 防止半径发散
   if (ekf_.state(ExtendedKalmanFilter::ROBOT_R) < 0.12)
   {
@@ -737,7 +742,7 @@ void ArmorTracker::ArmorsCallback(ArmorDetectorResults& armors_msg)
   }
 
   time_.last_time = time;
-
+  ekf_.ekf.PrintCovariance();
   io_.target_eulr_topic.Publish(target_eulr);
   io_.target_topic.Publish(target_msg);
 }
@@ -798,6 +803,18 @@ void ArmorTracker::HandleArmorJump(const ArmorDetectorResult& current_armor)
   Eigen::Vector3d infer_p = GetArmorPositionFromState(ekf_.state);
   if ((current_p - infer_p).norm() > cfg_.match.max_match_distance)
   {
+    Eigen::VectorXd diag_p = ekf_.ekf.GetCovariance().diagonal();
+
+    diag_p(ExtendedKalmanFilter::V_X_CENTER) *= 10.0;
+    diag_p(ExtendedKalmanFilter::A_X_CENTER) *= 10.0;
+    diag_p(ExtendedKalmanFilter::V_Y_CENTER) *= 10.0;
+    diag_p(ExtendedKalmanFilter::A_Y_CENTER) *= 10.0;
+    diag_p(ExtendedKalmanFilter::V_Z_ARMOR) *= 10.0;
+    diag_p(ExtendedKalmanFilter::A_Z_ARMOR) *= 10.0;
+    diag_p(ExtendedKalmanFilter::YAW) *= 5.0;
+    diag_p(ExtendedKalmanFilter::V_YAW) *= 10.0;
+    diag_p(ExtendedKalmanFilter::A_YAW) *= 10.0;
+
     double r = ekf_.state(ExtendedKalmanFilter::ROBOT_R);
     ekf_.state(ExtendedKalmanFilter::X_CENTER) = p.x() + r * std::cos(yaw);  // xc
     ekf_.state(ExtendedKalmanFilter::V_X_CENTER) = 0;
@@ -808,6 +825,9 @@ void ArmorTracker::HandleArmorJump(const ArmorDetectorResult& current_armor)
     ekf_.state(ExtendedKalmanFilter::Z_ARMOR) = p.z();  // za
     ekf_.state(ExtendedKalmanFilter::V_Z_ARMOR) = 0;
     ekf_.state(ExtendedKalmanFilter::A_Z_ARMOR) = 0;
+
+    ekf_.ekf.SetStateWithUncertainty(ekf_.state, diag_p);
+
     XR_LOG_ERROR("Reset State!");
   }
 
