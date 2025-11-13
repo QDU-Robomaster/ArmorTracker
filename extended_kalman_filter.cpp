@@ -20,7 +20,7 @@ ExtendedKalmanFilter::ExtendedKalmanFilter(const VecVecFunc& f, const VecVecFunc
       update_q_(u_q),
       update_r_(u_r),
       p_post_(P0),
-      n_(P0.rows()),
+      n_(static_cast<int>(P0.rows())),
       i_(Eigen::MatrixXd::Identity(n_, n_)),
       x_pri_(n_),
       x_post_(n_)
@@ -28,6 +28,16 @@ ExtendedKalmanFilter::ExtendedKalmanFilter(const VecVecFunc& f, const VecVecFunc
 }
 
 void ExtendedKalmanFilter::SetState(const Eigen::VectorXd& x0) { x_post_ = x0; }
+
+Eigen::MatrixXd ExtendedKalmanFilter::GetCovariance() const { return p_post_; }
+
+void ExtendedKalmanFilter::SetCovariance(const Eigen::MatrixXd& p) { p_post_ = p; }
+
+ExtendedKalmanFilter::VecVecFunc ExtendedKalmanFilter::Observation() const { return h_; }
+ExtendedKalmanFilter::VecVecFunc ExtendedKalmanFilter::StateTransition() const
+{
+  return f_;
+}
 
 Eigen::MatrixXd ExtendedKalmanFilter::Predict()
 {

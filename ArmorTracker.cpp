@@ -94,12 +94,7 @@ ArmorTracker::ArmorTracker(LibXR::HardwareContainer&, LibXR::ApplicationManager&
   {
     Eigen::MatrixXd h(4, 13);
     double yaw = x(ExtendedKalmanFilter::YAW), r = x(ExtendedKalmanFilter::ROBOT_R);
-
-    // h(0, 0) = 1; h(0, 9) = r * std::sin(yaw);  h(0, 12) = -std::cos(yaw);
-    // h(1, 3) = 1; h(1, 9) = -r * std::cos(yaw); h(1, 12) = -std::sin(yaw);
-    // h(2, 6) = 1;
-    // h(3, 9) = 1;
-    //                 xc vxc yc vyc za vza yaw               vyaw r
+    // xc vxc axc yc vyc ayc za vza aza yaw vyaw ayaw r
     h << /*xa*/ 1, 0, 0, 0, 0, 0, 0, 0, 0, r * std::sin(yaw), 0, 0, -std::cos(yaw),
         /*ya */ 0, 0, 0, 1, 0, 0, 0, 0, 0, -r * std::cos(yaw), 0, 0, -std::sin(yaw),
         /*za */ 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0,
@@ -133,24 +128,48 @@ ArmorTracker::ArmorTracker(LibXR::HardwareContainer&, LibXR::ApplicationManager&
     // clang-format off
     q.setZero();
     // [xc, vxc, axc]
-    q(0,0)=q_p_p_xyz; q(0,1)=q_p_v_xyz; q(0,2)=q_p_a_xyz;
-    q(1,0)=q_p_v_xyz; q(1,1)=q_v_v_xyz; q(1,2)=q_v_a_xyz;
-    q(2,0)=q_p_a_xyz; q(2,1)=q_v_a_xyz; q(2,2)=q_a_a_xyz;
+    q(ExtendedKalmanFilter::X_CENTER, ExtendedKalmanFilter::X_CENTER)=q_p_p_xyz;
+    q(ExtendedKalmanFilter::X_CENTER, ExtendedKalmanFilter::V_X_CENTER)=q_p_v_xyz; 
+    q(ExtendedKalmanFilter::X_CENTER, ExtendedKalmanFilter::A_X_CENTER)=q_p_a_xyz;
+    q(ExtendedKalmanFilter::V_X_CENTER,ExtendedKalmanFilter::X_CENTER)=q_p_v_xyz; 
+    q(ExtendedKalmanFilter::V_X_CENTER, ExtendedKalmanFilter::V_X_CENTER)=q_v_v_xyz; 
+    q(ExtendedKalmanFilter::V_X_CENTER, ExtendedKalmanFilter::A_X_CENTER)=q_v_a_xyz;
+    q(ExtendedKalmanFilter::A_X_CENTER, ExtendedKalmanFilter::X_CENTER)=q_p_a_xyz; 
+    q(ExtendedKalmanFilter::A_X_CENTER, ExtendedKalmanFilter::V_X_CENTER)=q_v_a_xyz; 
+    q(ExtendedKalmanFilter::A_X_CENTER, ExtendedKalmanFilter::A_X_CENTER)=q_a_a_xyz;
 
     // [yc, vyc, ayc]
-    q(3,3)=q_p_p_xyz; q(3,4)=q_p_v_xyz; q(3,5)=q_p_a_xyz;
-    q(4,3)=q_p_v_xyz; q(4,4)=q_v_v_xyz; q(4,5)=q_v_a_xyz;
-    q(5,3)=q_p_a_xyz; q(5,4)=q_v_a_xyz; q(5,5)=q_a_a_xyz;
+    q(ExtendedKalmanFilter::Y_CENTER, ExtendedKalmanFilter::Y_CENTER)=q_p_p_xyz; 
+    q(ExtendedKalmanFilter::Y_CENTER, ExtendedKalmanFilter::V_Y_CENTER)=q_p_v_xyz; 
+    q(ExtendedKalmanFilter::Y_CENTER, ExtendedKalmanFilter::A_Y_CENTER)=q_p_a_xyz;
+    q(ExtendedKalmanFilter::V_Y_CENTER, ExtendedKalmanFilter::Y_CENTER)=q_p_v_xyz; 
+    q(ExtendedKalmanFilter::V_Y_CENTER, ExtendedKalmanFilter::V_Y_CENTER)=q_v_v_xyz; 
+    q(ExtendedKalmanFilter::V_Y_CENTER, ExtendedKalmanFilter::A_Y_CENTER)=q_v_a_xyz;
+    q(ExtendedKalmanFilter::A_Y_CENTER, ExtendedKalmanFilter::Y_CENTER)=q_p_a_xyz; 
+    q(ExtendedKalmanFilter::A_Y_CENTER, ExtendedKalmanFilter::V_Y_CENTER)=q_v_a_xyz; 
+    q(ExtendedKalmanFilter::A_Y_CENTER, ExtendedKalmanFilter::A_Y_CENTER)=q_a_a_xyz;
 
     // [za, vza, aza]
-    q(6,6)=q_p_p_xyz; q(6,7)=q_p_v_xyz; q(6,8)=q_p_a_xyz;
-    q(7,6)=q_p_v_xyz; q(7,7)=q_v_v_xyz; q(7,8)=q_v_a_xyz;
-    q(8,6)=q_p_a_xyz; q(8,7)=q_v_a_xyz; q(8,8)=q_a_a_xyz;
+    q(ExtendedKalmanFilter::Z_ARMOR, ExtendedKalmanFilter::Z_ARMOR)=q_p_p_xyz; 
+    q(ExtendedKalmanFilter::Z_ARMOR, ExtendedKalmanFilter::V_Z_ARMOR)=q_p_v_xyz; 
+    q(ExtendedKalmanFilter::Z_ARMOR, ExtendedKalmanFilter::A_Z_ARMOR)=q_p_a_xyz;
+    q(ExtendedKalmanFilter::V_Z_ARMOR, ExtendedKalmanFilter::Z_ARMOR)=q_p_v_xyz; 
+    q(ExtendedKalmanFilter::V_Z_ARMOR, ExtendedKalmanFilter::V_Z_ARMOR)=q_v_v_xyz; 
+    q(ExtendedKalmanFilter::V_Z_ARMOR, ExtendedKalmanFilter::A_Z_ARMOR)=q_v_a_xyz;
+    q(ExtendedKalmanFilter::A_Z_ARMOR, ExtendedKalmanFilter::Z_ARMOR)=q_p_a_xyz; 
+    q(ExtendedKalmanFilter::A_Z_ARMOR, ExtendedKalmanFilter::V_Z_ARMOR)=q_v_a_xyz; 
+    q(ExtendedKalmanFilter::A_Z_ARMOR, ExtendedKalmanFilter::A_Z_ARMOR)=q_a_a_xyz;
 
     // [yaw, vyaw, ayaw]
-    q(9,9)  =q_p_p_yaw; q(9,10) =q_p_v_yaw; q(9,11) =q_p_a_yaw;
-    q(10,9) =q_p_v_yaw; q(10,10)=q_v_v_yaw; q(10,11)=q_v_a_yaw;
-    q(11,9) =q_p_a_yaw; q(11,10)=q_v_a_yaw; q(11,11)=q_a_a_yaw;
+    q(ExtendedKalmanFilter::YAW, ExtendedKalmanFilter::YAW)=q_p_p_yaw; 
+    q(ExtendedKalmanFilter::YAW, ExtendedKalmanFilter::V_YAW)=q_p_v_yaw; 
+    q(ExtendedKalmanFilter::YAW, ExtendedKalmanFilter::A_YAW)=q_p_a_yaw;
+    q(ExtendedKalmanFilter::V_YAW, ExtendedKalmanFilter::YAW)=q_p_v_yaw; 
+    q(ExtendedKalmanFilter::V_YAW, ExtendedKalmanFilter::V_YAW)=q_v_v_yaw; 
+    q(ExtendedKalmanFilter::V_YAW, ExtendedKalmanFilter::A_YAW)=q_v_a_yaw;
+    q(ExtendedKalmanFilter::A_YAW, ExtendedKalmanFilter::YAW)=q_p_a_yaw; 
+    q(ExtendedKalmanFilter::A_YAW, ExtendedKalmanFilter::V_YAW)=q_v_a_yaw; 
+    q(ExtendedKalmanFilter::A_YAW, ExtendedKalmanFilter::A_YAW)=q_a_a_yaw;
 
     // R
     q(12,12) = q_r;
@@ -170,7 +189,7 @@ ArmorTracker::ArmorTracker(LibXR::HardwareContainer&, LibXR::ApplicationManager&
   {
     Eigen::DiagonalMatrix<double, 4> r;
     double dist = z.head<3>().norm();
-    double std_dev_xyz = cfg_.noise.r_xyz_factor * dist; // 标准差
+    double std_dev_xyz = cfg_.noise.r_xyz_factor * dist;  // 标准差
     r.diagonal() << std_dev_xyz * std_dev_xyz, std_dev_xyz * std_dev_xyz,
         std_dev_xyz * std_dev_xyz, cfg_.noise.r_yaw;
     return r;
@@ -438,6 +457,20 @@ void ArmorTracker::Update(const ArmorDetectorResults& armors_msg)
           rt_.tracked_armor = armor;
         }
       }
+
+      // if (armor.number == rt_.tracked_id)
+      // {
+      //   same_id_armor = armor;
+      //   same_id_armors_count++;
+      //   // 构造当前观测向量 z
+      //   auto p = armor.pose.translation;
+      //   double measured_yaw = OrientationToYaw(armor.pose.rotation);
+      //   Eigen::VectorXd z = Eigen::Vector4d(p.x(), p.y(), p.z(), measured_yaw);
+
+      //   // 计算创新 y = z - h(x_pri)
+      //   Eigen::VectorXd predicted_z = h_(ekf_prediction);  // h 是EKF里的观测函数
+      //   Eigen::VectorXd innovation = z - predicted_z;
+      // }
     }
 
     // 存储信息

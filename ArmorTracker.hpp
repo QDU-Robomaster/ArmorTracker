@@ -197,8 +197,8 @@ class ArmorTracker : public LibXR::Application
   {
     ExtendedKalmanFilter ekf;
     Eigen::VectorXd measurement = Eigen::VectorXd::Zero(4);  // z = [xa,ya,za,yaw]
-    Eigen::VectorXd state =
-        Eigen::VectorXd::Zero(9);  // x = [xc,vxc,yc,vyc,za,vza,yaw,vyaw,r]
+    Eigen::VectorXd state = Eigen::VectorXd::Zero(
+        13);  // x = [xc,vxc,axc,yc,vyc,ayc,za,vza,ayz,yaw,vyaw,ayaw,r]
   } ekf_;
 
   struct TrackRuntime

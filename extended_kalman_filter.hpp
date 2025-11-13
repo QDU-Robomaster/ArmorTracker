@@ -53,6 +53,13 @@ class ExtendedKalmanFilter
   // Set the initial state
   void SetState(const Eigen::VectorXd& x0);
 
+  Eigen::MatrixXd GetCovariance() const;
+
+  void SetCovariance(const Eigen::MatrixXd& p);
+
+  VecVecFunc Observation() const;
+  VecVecFunc StateTransition() const;
+
   // Compute a predicted state
   Eigen::MatrixXd Predict();
 
