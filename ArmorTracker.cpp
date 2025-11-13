@@ -481,12 +481,23 @@ void ArmorTracker::Update(const ArmorDetectorResults& armors_msg)
     if (min_position_diff < cfg_.match.max_match_distance &&
         yaw_diff < cfg_.match.max_match_yaw_diff)
     {
-      matched = true;
       auto p = rt_.tracked_armor.pose.translation;
       double measured_yaw = OrientationToYaw(rt_.tracked_armor.pose.rotation);
-      ekf_.measurement = Eigen::Vector4d(p.x(), p.y(), p.z(), measured_yaw);
-      ekf_.state = ekf_.ekf.Update(ekf_.measurement);
-      XR_LOG_DEBUG("EKF update");
+      Eigen::Vector4d z(p.x(), p.y(), p.z(), measured_yaw);
+
+      double gate_threshold = 9.5;  // 4 维观测，95% 卡方阈值约 9.49
+      double d2 = 0.0;
+      if (ekf_.ekf.GateMeasurement(z, gate_threshold, &d2))
+      {
+        matched = true;
+        ekf_.measurement = z;
+        ekf_.state = ekf_.ekf.Update(ekf_.measurement);
+        XR_LOG_DEBUG("EKF update, Mahalanobis d2=%.3f", d2);
+      }
+      else
+      {
+        XR_LOG_INFO("Gate reject, d2=%.3f", d2);
+      }
     }
     else if (same_id_armors_count == 1 && yaw_diff > cfg_.match.max_match_yaw_diff)
     {
@@ -498,7 +509,8 @@ void ArmorTracker::Update(const ArmorDetectorResults& armors_msg)
     }
   }
 
-  if(!matched){
+  if (!matched)
+  {
     ekf_.ekf.PriToPost();
     ekf_.state = ekf_.ekf.GetState();
   }
