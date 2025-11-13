@@ -355,10 +355,10 @@ static void build_table() {
   std::cerr << "二进制查找表已成功生成到 " << output_filename << '\n';
 }
 
-int main() {
-  build_table();
-  return 0;
-}
+// int main() {
+//   build_table();
+//   return 0;
+// }
 
 // int main() {
 //   SolveTrajectory test(11.8, 0, 13, -1);
