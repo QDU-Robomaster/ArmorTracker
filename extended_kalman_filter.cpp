@@ -1,5 +1,7 @@
 #include "extended_kalman_filter.hpp"
 
+#include "Eigen/Core"
+
 /*
 f:过程函数
 h:观测函数
@@ -27,16 +29,45 @@ ExtendedKalmanFilter::ExtendedKalmanFilter(const VecVecFunc& f, const VecVecFunc
 {
 }
 
+void ExtendedKalmanFilter::PrintCovariance() const
+{
+  printf("P_post:\n");
+  for (int i = 0; i < n_; i++)
+  {
+    for (int j = 0; j < n_; j++)
+    {
+      printf("%.4f ", p_post_(i, j));
+    }
+    printf("\n");
+  }
+}
+
 void ExtendedKalmanFilter::SetState(const Eigen::VectorXd& x0) { x_post_ = x0; }
+Eigen::VectorXd ExtendedKalmanFilter::GetState() const { return x_post_; }
+void ExtendedKalmanFilter::SetStateWithUncertainty(const Eigen::VectorXd& x0,
+                                                   const Eigen::VectorXd& diagP)
+{
+  x_post_ = x0;
+  for (int i = 0; i < diagP.size(); ++i)
+  {
+    p_post_(i, i) = diagP(i);
+  }
+}
 
-Eigen::MatrixXd ExtendedKalmanFilter::GetCovariance() const { return p_post_; }
-
+const Eigen::MatrixXd ExtendedKalmanFilter::GetCovariance() const { return p_post_; }
+Eigen::MatrixXd ExtendedKalmanFilter::GetCovariance() { return p_post_; }
 void ExtendedKalmanFilter::SetCovariance(const Eigen::MatrixXd& p) { p_post_ = p; }
 
 ExtendedKalmanFilter::VecVecFunc ExtendedKalmanFilter::Observation() const { return h_; }
 ExtendedKalmanFilter::VecVecFunc ExtendedKalmanFilter::StateTransition() const
 {
   return f_;
+}
+
+void ExtendedKalmanFilter::PriToPost()
+{
+  x_post_ = x_pri_;
+  p_post_ = p_pri_;
 }
 
 Eigen::MatrixXd ExtendedKalmanFilter::Predict()
@@ -47,21 +78,35 @@ Eigen::MatrixXd ExtendedKalmanFilter::Predict()
   p_pri_ = m_f_ * p_post_ * m_f_.transpose() + m_q_;
 
   // handle the case when there will be no measurement before the next predict
-  x_post_ = x_pri_;
-  p_post_ = p_pri_;
+  // x_post_ = x_pri_;
+  // p_post_ = p_pri_;
 
   return x_pri_;
 }
 
 Eigen::MatrixXd ExtendedKalmanFilter::Update(const Eigen::VectorXd& z)
 {
-  m_h_ = jacobian_h_(x_pri_), m_r_ = update_r_(z);
+  m_h_ = jacobian_h_(x_pri_);
+  m_r_ = update_r_(z);
 
-  m_k_ = p_pri_ * m_h_.transpose() *
-         (m_h_ * p_pri_ * m_h_.transpose() + m_r_).inverse();  // inverse计算逆矩阵
+  Eigen::MatrixXd s = m_h_ * p_pri_ * m_h_.transpose() + m_r_;  // 创新协方差
+  Eigen::LLT<Eigen::MatrixXd> llt(s);
+
+  if (llt.info() != Eigen::Success)
+  {
+    // printf("LLT decomposition failed!\n");
+    return x_post_;
+  }
+
+  Eigen::MatrixXd ph_t = p_pri_ * m_h_.transpose();
+  Eigen::MatrixXd k = llt.solve(ph_t.transpose()).transpose();
+
+  m_k_ = k;
   x_post_ = x_pri_ + m_k_ * (z - h_(x_pri_));
-  p_post_ = (i_ - m_k_ * m_h_) * p_pri_ * (i_ - m_k_ * m_h_).transpose() +
-            m_k_ * m_r_ * m_k_.transpose();  // Joseph
-  p_post_ = 0.5 * (p_post_ + p_post_.transpose());
+
+  Eigen::MatrixXd i_kh = i_ - m_k_ * m_h_;
+  p_post_ = i_kh * p_pri_ * i_kh.transpose() + m_k_ * m_r_ * m_k_.transpose();
+  p_post_ = 0.5 * (p_post_ + p_post_.transpose());  // 对称化
+
   return x_post_;
 }

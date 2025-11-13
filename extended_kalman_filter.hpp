@@ -38,7 +38,6 @@ class ExtendedKalmanFilter
     ROBOT_R = 12,
   };
 
-
   ExtendedKalmanFilter() = default;
 
   using VecVecFunc = std::function<Eigen::VectorXd(const Eigen::VectorXd&)>;
@@ -52,13 +51,20 @@ class ExtendedKalmanFilter
 
   // Set the initial state
   void SetState(const Eigen::VectorXd& x0);
+  Eigen::VectorXd GetState() const;
+  void SetStateWithUncertainty(const Eigen::VectorXd& x0, const Eigen::VectorXd& diagP);
 
-  Eigen::MatrixXd GetCovariance() const;
+  const Eigen::MatrixXd GetCovariance() const;
+  Eigen::MatrixXd GetCovariance();
 
   void SetCovariance(const Eigen::MatrixXd& p);
 
+  void PrintCovariance() const;
+
   VecVecFunc Observation() const;
   VecVecFunc StateTransition() const;
+
+  void PriToPost();
 
   // Compute a predicted state
   Eigen::MatrixXd Predict();
