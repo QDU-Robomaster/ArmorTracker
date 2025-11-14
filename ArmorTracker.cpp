@@ -509,8 +509,32 @@ void ArmorTracker::Update(const ArmorDetectorResults& armors_msg)
     }
   }
 
+  if (matched)
+  {
+    rt_.unmatched_count = 0;
+  }
+  else
+  {
+    rt_.unmatched_count++;
+    rt_.unmatched_count = std::min(rt_.unmatched_count, 50);
+  }
+
   if (!matched)
   {
+    double k = 1.0 + 0.2 * rt_.unmatched_count;  // 每帧 +20%
+    k = std::min(k, 10.0);
+
+    auto P = ekf_.ekf.GetCovariance();
+    P *= k;
+    ekf_.ekf.SetCovariance(P);
+
+    // 轻微衰减加速度
+    ekf_.state(ExtendedKalmanFilter::A_X_CENTER) *= 0.95;
+    ekf_.state(ExtendedKalmanFilter::A_Y_CENTER) *= 0.95;
+    ekf_.state(ExtendedKalmanFilter::A_Z_ARMOR) *= 0.95;
+    ekf_.state(ExtendedKalmanFilter::A_YAW) *= 0.95;
+    ekf_.ekf.SetState(ekf_.state);
+
     ekf_.ekf.PriToPost();
     ekf_.state = ekf_.ekf.GetState();
   }
@@ -626,17 +650,30 @@ void ArmorTracker::ArmorsCallback(ArmorDetectorResults& armors_msg)
   }
   else
   {
-    // dt
-    time_.dt = (time - time_.last_time).ToSecond();
-    if (time_.dt <= 0)
-    {
-      time_.dt = 1.0 / 100.0;
+    // dt 滤波，避免帧率跳变影响预测
+    double raw_dt = (time - time_.last_time).ToSecond();
+    if (raw_dt <= 0.0 || raw_dt > 0.05)
+    {  // >50ms 认为是异常
+      raw_dt = 0.01;
     }
+
+    static bool dt_inited = false;
+    static double dt_ema = 1.0 / 100.0;
+    const double ALPHA = 0.9;  // EMA 系数
+
+    if (!dt_inited)
+    {
+      dt_ema = raw_dt;
+      dt_inited = true;
+    }
+    else
+    {
+      dt_ema = ALPHA * dt_ema + (1.0 - ALPHA) * raw_dt;
+    }
+
+    time_.dt = dt_ema;
     rt_.lost_thres = static_cast<int>(cfg_.thresholds.lost_time_thres / time_.dt);
-    if (rt_.lost_thres < 1)
-    {
-      rt_.lost_thres = 1;
-    }
+    rt_.lost_thres = std::max(rt_.lost_thres, 1);
 
     Update(armors_msg);
 

@@ -208,6 +208,7 @@ class ArmorTracker : public LibXR::Application
     int lost_count = 0;
     int tracking_thres = 5;
     int lost_thres = 0;  // 帧数阈值（由时间阈值换算）
+    int unmatched_count = 0;
     double last_yaw = 0.0;
     double info_position_diff = 0.0;
     double info_yaw_diff = 0.0;
