@@ -60,6 +60,7 @@ depends:
 #include "app_framework.hpp"
 #include "armor.hpp"
 #include "extended_kalman_filter.hpp"
+#include "libxr_rw.hpp"
 #include "libxr_time.hpp"
 #include "message.hpp"
 #include "mutex.hpp"
@@ -184,6 +185,7 @@ class ArmorTracker : public LibXR::Application
   // ====================== IO 与回调（原 Node 逻辑） ======================
   void VelocityCallback(double velocity_msg);
   void ArmorsCallback(ArmorDetectorResults& armors_msg);
+  static int CommandFun(ArmorTracker* self, int argc, char** argv);
 
   // ====================== 辅助函数 ======================
   void InitEKF(const ArmorDetectorResult& a);
@@ -191,7 +193,8 @@ class ArmorTracker : public LibXR::Application
   void HandleArmorJump(const ArmorDetectorResult& current_armor);
   double OrientationToYaw(const LibXR::Quaternion<double>& q);
   Eigen::Vector3d GetArmorPositionFromState(const Eigen::VectorXd& x);
-
+  const Config& GetConfig() const { return cfg_; }
+  void SetConfig(const Config& cfg);
   // ====================== 内部聚合成员（类内聚合） ======================
   struct EKFBlock
   {
@@ -208,7 +211,6 @@ class ArmorTracker : public LibXR::Application
     int lost_count = 0;
     int tracking_thres = 5;
     int lost_thres = 0;  // 帧数阈值（由时间阈值换算）
-    int unmatched_count = 0;
     double last_yaw = 0.0;
     double info_position_diff = 0.0;
     double info_yaw_diff = 0.0;
@@ -252,6 +254,11 @@ class ArmorTracker : public LibXR::Application
 
   // 保存配置（类内聚合）
   Config cfg_;
+  Config::Solver solver_cfg_;
+
+  const char* name_ = "armor_tracker";
+  LibXR::RamFS::File cmd_file_;
+  std::atomic<bool> params_is_changed_{false};
 
   EkfPointsMsg ekf_msg_;
   std::shared_ptr<CameraBase::CameraInfo> cam_info_{};  ///< 相机内参/畸变

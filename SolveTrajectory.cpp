@@ -102,7 +102,7 @@ float SolveTrajectory::PitchTrajectoryCompensation(float s, float z, float v)
   else if (calculate_mode_ == CalculateMode::TABLE_LOOKUP && table_.IsInit())
   {
     auto res = table_.Check(s, z);
-    fly_time_ = res.t / 1000.0;
+    fly_time_ = res.t;
     return static_cast<float>(res.pitch);
   }
 

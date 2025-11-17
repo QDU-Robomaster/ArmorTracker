@@ -66,9 +66,6 @@ class ExtendedKalmanFilter
 
   void PriToPost();
 
-  bool GateMeasurement(const Eigen::VectorXd& z, double gate_threshold,
-                       double* out_d2 = nullptr) const;
-
   // Compute a predicted state
   Eigen::MatrixXd Predict();
 

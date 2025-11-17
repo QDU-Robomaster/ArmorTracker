@@ -1,5 +1,6 @@
 #include "extended_kalman_filter.hpp"
 
+#include "ArmorTracker.hpp"
 #include "Eigen/Core"
 
 /*
@@ -70,32 +71,6 @@ void ExtendedKalmanFilter::PriToPost()
   p_post_ = p_pri_;
 }
 
-bool ExtendedKalmanFilter::GateMeasurement(const Eigen::VectorXd& z,
-                                           double gate_threshold, double* out_d2) const
-{
-  Eigen::MatrixXd h = jacobian_h_(x_pri_);
-  Eigen::MatrixXd r = update_r_(z);
-  Eigen::MatrixXd s = h * p_pri_ * h.transpose() + r;
-
-  Eigen::LLT<Eigen::MatrixXd> llt(s);
-  if (llt.info() != Eigen::Success)
-  {
-    return false;
-  }
-
-  Eigen::VectorXd innov = z - h_(x_pri_);
-  // w = S^{-1} * innov
-  Eigen::VectorXd w = llt.solve(innov);
-  double d2 = innov.dot(w);
-
-  if (out_d2)
-  {
-    *out_d2 = d2;
-  }
-
-  return d2 < gate_threshold;
-}
-
 Eigen::MatrixXd ExtendedKalmanFilter::Predict()
 {
   m_f_ = jacobian_f_(x_post_), m_q_ = update_q_();
@@ -104,8 +79,8 @@ Eigen::MatrixXd ExtendedKalmanFilter::Predict()
   p_pri_ = m_f_ * p_post_ * m_f_.transpose() + m_q_;
 
   // handle the case when there will be no measurement before the next predict
-  // x_post_ = x_pri_;
-  // p_post_ = p_pri_;
+  x_post_ = x_pri_;
+  p_post_ = p_pri_;
 
   return x_pri_;
 }

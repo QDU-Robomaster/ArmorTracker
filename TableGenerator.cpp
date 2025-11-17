@@ -10,13 +10,13 @@
 
 constexpr double MIN_PITCH = -0.6;  // 限位
 constexpr double MAX_PITCH = 1.2;
-constexpr double MAX_X = 13.0;  // 解算距离范围
+constexpr double MAX_X = 6.0;  // 解算距离范围
 constexpr double MIN_X = 0.0;
-constexpr double MAX_Y = 1.0;        // 解算高度范围
+constexpr double MAX_Y = 2;          // 解算高度范围
 constexpr double MIN_Y = -1;         // 中心为车的pitch轴电机
 constexpr double RESOLUTION = 0.01;  // 精度，m
-constexpr double MAX_ERROR = 0.05;   // 允许误差，m
-constexpr int ERROR_LEVEL = 4;       // 误差等级
+constexpr double MAX_ERROR = 0.005;  // 允许误差，m
+constexpr int ERROR_LEVEL = 5;       // 误差等级
 constexpr double GUN = 0.30;         // 枪口到pitch轴电机的距离，m
 
 constexpr double G = 9.8;        // 重力加速度，m/s^2
@@ -91,28 +91,27 @@ class SolveTrajectory
   }
 
   // 单次目标弹道解算，实际解算从枪口计算，这里考虑枪管长度做补偿
-  std::vector<double> SolvePitch(double pitch = MIN_PITCH,
-                                 double error = MAX_ERROR / ERROR_LEVEL)
+  std::vector<double> SolvePitch(double pitch, double error)
   {
-    double count = 0;
     double t_b = GUN / v0_;
     while (pitch < MAX_PITCH)
     {
-      count = 0;
+      double count = 0;
       double x_b = -GUN * std::cos(pitch);
       double y_b = -GUN * std::sin(pitch);
-      double x_xiangdui = target_x_ + x_b;
-      double y_xiangdui = target_y_ + y_b;
+      double x_to_gun = target_x_ + x_b;
+      double y_to_gun = target_y_ + y_b;
       State state(0, 0, v0_ * std::cos(pitch), v0_ * std::sin(pitch));
-      while (state.x < x_xiangdui + error)
+      while (state.x < x_to_gun + error)
       {
         state = RK4Step(state, dt_);
         count++;
-
-        if (std::fabs(state.x - x_xiangdui) <= error &&
-            std::fabs(state.y - y_xiangdui) <= error)
+        if (pow(state.x - x_to_gun, 2) + pow(state.y - y_to_gun, 2) <= pow(error, 2))
+        // if (std::fabs(state.x - x_to_gun) <= error &&
+        //     std::fabs(state.y - y_to_gun) <= error)
         {
-          return {pitch, count * STEP / 0.001 + t_b,
+          std::cout << pitch << std::endl;
+          return {pitch, count * STEP + t_b,
                   std::sqrt(state.vx * state.vx + state.vy * state.vy)};
         }
       }
@@ -121,17 +120,69 @@ class SolveTrajectory
     return {NAN, NAN, NAN};
   }
 
-  // 对solvePitch的优化，考虑多级误差以保证精确和有解
-  std::vector<double> SolvePitchLevel(int error_level, double pitch0 = MIN_PITCH)
+  // 重载SolvePitch，当不提供pitch时默认使用二分法搜索
+  std::vector<double> SolvePitch(double error)
   {
-    auto ge = SolvePitch(pitch0, MAX_ERROR / error_level * error_level);
+    double t_b = GUN / v0_;
+    double pitch_top = MAX_PITCH;
+    double pitch_low = MIN_PITCH;
+    while ((pitch_top - pitch_low) > 0.001)
+    {
+      double count = 0;
+      double pitch_binary = (pitch_top + pitch_low) / 2;
+      double x_b = -GUN * std::cos(pitch_binary);
+      double y_b = -GUN * std::sin(pitch_binary);
+      double x_to_gun = target_x_ + x_b;
+      double y_to_gun = target_y_ + y_b;
+      State state(0, 0, v0_ * std::cos(pitch_binary), v0_ * std::sin(pitch_binary));
+
+      // 这里用MIN_Y-1就能运行，MIN_Y就不行，不要问为什么
+      while (state.y >= MIN_Y - 1)
+      {
+        state = RK4Step(state, dt_);
+        count++;
+        if (pow(state.x - x_to_gun, 2) + pow(state.y - y_to_gun, 2) <= pow(error, 2))
+        {
+          return {pitch_binary, count * dt_ + t_b,
+                  std::sqrt(state.vx * state.vx + state.vy * state.vy)};
+        }
+
+        if (state.x >= x_to_gun)
+        {
+          if (state.y > y_to_gun)
+            pitch_top = pitch_binary;
+          else
+            pitch_low = pitch_binary;
+          break;
+        }
+        else if (state.y < MIN_Y - 1 && state.x < x_to_gun)
+        {
+          // if (pitch_binary > 0.5) {
+          //   pitch_top = pitch_binary;
+          // } else {
+          //   pitch_low = pitch_binary;
+          // }
+          pitch_low = pitch_binary;
+          break;
+        }
+        // std::cerr << pitch_top << "和" << pitch_low << std::endl;
+      }
+    }
+    // std::cerr << "nan" << std::endl;
+    return {NAN, NAN, NAN};
+  }
+
+  // 对solvePitch的优化，考虑多级误差以保证精确和有解
+  std::vector<double> SolvePitchLevel(int error_level, double pitch0)
+  {
+    auto ge = SolvePitch(MAX_ERROR);
     if (std::isnan(ge[0]))
     {
       return {NAN, NAN, NAN};
     }
     for (int i = 1; i <= error_level; i++)
     {
-      ge = SolvePitch(pitch0, MAX_ERROR / error_level * i);
+      ge = SolvePitch(MAX_ERROR / error_level * i);
       if (!std::isnan(ge[0]))
       {
         return ge;
@@ -184,10 +235,9 @@ static TableData solve_rows(double start_x, size_t num_rows)
     {
       SolveTrajectory solve = SolveTrajectory(11.8, 0, x, y);
       std::vector<double> ge = solve.SolvePitchLevel(ERROR_LEVEL, pitch0);
-      if (!std::isnan(ge[0]))
-      {
-        pitch0 = ge[0];
-      }
+      // if (!std::isnan(ge[0])) {
+      //   pitch0 = ge[0];
+      // }
       row.push_back(ge);
     }
     pitch0 = MIN_PITCH;
@@ -196,13 +246,47 @@ static TableData solve_rows(double start_x, size_t num_rows)
   return table;
 }
 
+// 输出得到的表，按array的格式来,检查是否异常解的情况
 template <typename T>
-static std::ostream& operator<<=(std::ostream& os, const std::vector<T>& v)
+std::ostream& operator<<(std::ostream& os, const std::vector<T>& v)
 {
-  for (const T& x : v)
+  os << '{';
+  for (size_t i = 0; i < v.size(); ++i)
   {
-    os <<= x;
+    if (i > 0) os << ',';
+    os << v[i];
   }
+  return os << '}';
+}
+
+template <typename T>
+std::ostream& operator<<(std::ostream& os, const std::vector<std::vector<T>>& v)
+{
+  os << "{{";
+  for (size_t i = 0; i < v.size(); ++i)
+  {
+    if (i > 0) os << ',';
+    os << v[i];
+  }
+  return os << "}}";
+}
+
+std::ostream& operator<<(std::ostream& os, const TableData& v)
+{
+  os << "{{\n";
+  for (size_t i = 0; i < v.size(); ++i)
+  {
+    if (i > 0) os << ",\n";
+    os << "  " << v[i];
+  }
+  return os << "\n}}";
+}
+
+// 输出表格解的情况，检查是否有无解的情况
+template <typename T>
+std::ostream& operator<<=(std::ostream& os, const std::vector<T>& v)
+{
+  for (T x : v) os <<= x;
   os << "\n";
   return os;
 }
@@ -210,9 +294,8 @@ static std::ostream& operator<<=(std::ostream& os, const std::vector<T>& v)
 template <>
 std::ostream& operator<<=(std::ostream& os, const std::vector<double>& v)
 {
-  return os << (v.empty() || std::isnan(v[0]) ? ' ' : '.');
+  return os << (std::isnan(v[0]) ? ' ' : '.');
 }
-
 static void build_table()
 {
   TableData table;
@@ -262,6 +345,7 @@ static void build_table()
 
   std::cerr << "计算完成。" << '\n';
   (std::cerr <<= table) << '\n';
+  (std::cout << table) << '\n';
 
   // ----- 二进制文件写入 -----
   std::string output_filename = std::to_string(MAX_X) + "_table.bin";
@@ -308,8 +392,14 @@ static void build_table()
   std::cerr << "二进制查找表已成功生成到 " << output_filename << '\n';
 }
 
-// int main()
-// {
+// int main() {
 //   build_table();
+//   return 0;
+// }
+
+// int main() {
+//   SolveTrajectory test(11.8, 0, 13, -1);
+//   test.SolvePitch(0.05);
+//   test.SolvePitch(0, 0.05);
 //   return 0;
 // }

@@ -11,20 +11,25 @@
 #include <utility>
 
 #include "cycle_value.hpp"
+#include "libxr_rw.hpp"
 #include "logger.hpp"
 #include "message.hpp"
 #include "transform.hpp"
 
-ArmorTracker::ArmorTracker(LibXR::HardwareContainer&, LibXR::ApplicationManager&,
+ArmorTracker::ArmorTracker(LibXR::HardwareContainer& hw, LibXR::ApplicationManager&,
                            Config cfg)
-    : cfg_(std::move(cfg))
+    : cfg_(std::move(cfg)),
+      solver_cfg_(cfg_.solver),
+      cmd_file_(LibXR::RamFS::CreateFile(name_, CommandFun, this))
 {
   XR_LOG_INFO("Starting ArmorTracker!");
 
+  hw.template FindOrExit<LibXR::RamFS>({"ramfs"})->Add(cmd_file_);
+
   // 轨迹解算器
   io_.solver = std::make_unique<SolveTrajectory>(
-      cfg_.solver.k, cfg_.solver.bias_time, cfg_.solver.s_bias, cfg_.solver.z_bias,
-      cfg_.solver.calculate_mode, cfg_.solver.table_config);
+      solver_cfg_.k, solver_cfg_.bias_time, solver_cfg_.s_bias, solver_cfg_.z_bias,
+      solver_cfg_.calculate_mode, solver_cfg_.table_config);
 
   // 初值（和老逻辑一致）
   rt_.tracking_thres = cfg_.thresholds.tracking_thres;
@@ -207,6 +212,11 @@ ArmorTracker::ArmorTracker(LibXR::HardwareContainer&, LibXR::ApplicationManager&
       [](bool, ArmorTracker* self, LibXR::RawData& data)
       {
         auto armors_msg = reinterpret_cast<ArmorDetectorResults*>(data.addr_);
+        if (self->params_is_changed_ == true)
+        {
+          self->SetConfig(self->cfg_);
+          self->params_is_changed_ = false;
+        }
         self->ArmorsCallback(*armors_msg);
       },
       this);
@@ -481,23 +491,12 @@ void ArmorTracker::Update(const ArmorDetectorResults& armors_msg)
     if (min_position_diff < cfg_.match.max_match_distance &&
         yaw_diff < cfg_.match.max_match_yaw_diff)
     {
+      matched = true;
       auto p = rt_.tracked_armor.pose.translation;
       double measured_yaw = OrientationToYaw(rt_.tracked_armor.pose.rotation);
-      Eigen::Vector4d z(p.x(), p.y(), p.z(), measured_yaw);
-
-      double gate_threshold = 9.5;  // 4 维观测，95% 卡方阈值约 9.49
-      double d2 = 0.0;
-      if (ekf_.ekf.GateMeasurement(z, gate_threshold, &d2))
-      {
-        matched = true;
-        ekf_.measurement = z;
-        ekf_.state = ekf_.ekf.Update(ekf_.measurement);
-        XR_LOG_DEBUG("EKF update, Mahalanobis d2=%.3f", d2);
-      }
-      else
-      {
-        XR_LOG_INFO("Gate reject, d2=%.3f", d2);
-      }
+      ekf_.measurement = Eigen::Vector4d(p.x(), p.y(), p.z(), measured_yaw);
+      ekf_.state = ekf_.ekf.Update(ekf_.measurement);
+      XR_LOG_DEBUG("EKF update");
     }
     else if (same_id_armors_count == 1 && yaw_diff > cfg_.match.max_match_yaw_diff)
     {
@@ -507,36 +506,6 @@ void ArmorTracker::Update(const ArmorDetectorResults& armors_msg)
     {
       XR_LOG_INFO("No matched armor found!");
     }
-  }
-
-  if (matched)
-  {
-    rt_.unmatched_count = 0;
-  }
-  else
-  {
-    rt_.unmatched_count++;
-    rt_.unmatched_count = std::min(rt_.unmatched_count, 50);
-  }
-
-  if (!matched)
-  {
-    double k = 1.0 + 0.2 * rt_.unmatched_count;  // 每帧 +20%
-    k = std::min(k, 10.0);
-
-    auto P = ekf_.ekf.GetCovariance();
-    P *= k;
-    ekf_.ekf.SetCovariance(P);
-
-    // 轻微衰减加速度
-    ekf_.state(ExtendedKalmanFilter::A_X_CENTER) *= 0.95;
-    ekf_.state(ExtendedKalmanFilter::A_Y_CENTER) *= 0.95;
-    ekf_.state(ExtendedKalmanFilter::A_Z_ARMOR) *= 0.95;
-    ekf_.state(ExtendedKalmanFilter::A_YAW) *= 0.95;
-    ekf_.ekf.SetState(ekf_.state);
-
-    ekf_.ekf.PriToPost();
-    ekf_.state = ekf_.ekf.GetState();
   }
 
   // 防止半径发散
@@ -650,6 +619,18 @@ void ArmorTracker::ArmorsCallback(ArmorDetectorResults& armors_msg)
   }
   else
   {
+    // // dt
+    // time_.dt = (time - time_.last_time).ToSecond();
+    // if (time_.dt <= 0)
+    // {
+    //   time_.dt = 1.0 / 100.0;
+    // }
+    // rt_.lost_thres = static_cast<int>(cfg_.thresholds.lost_time_thres / time_.dt);
+    // if (rt_.lost_thres < 1)
+    // {
+    //   rt_.lost_thres = 1;
+    // }
+
     // dt 滤波，避免帧率跳变影响预测
     double raw_dt = (time - time_.last_time).ToSecond();
     if (raw_dt <= 0.0 || raw_dt > 0.05)
@@ -791,8 +772,9 @@ void ArmorTracker::ArmorsCallback(ArmorDetectorResults& armors_msg)
   }
 
   time_.last_time = time;
-  ekf_.ekf.PrintCovariance();
+
   io_.target_eulr_topic.Publish(target_eulr);
+  // printf("target_eulr: (%.3f, %.3f)\n", target_eulr.Pitch(), target_eulr.Yaw());
   io_.target_topic.Publish(target_msg);
 }
 
@@ -878,6 +860,7 @@ void ArmorTracker::HandleArmorJump(const ArmorDetectorResult& current_armor)
     ekf_.ekf.SetStateWithUncertainty(ekf_.state, diag_p);
 
     XR_LOG_ERROR("Reset State!");
+    printf("Reset State!\n");
   }
 
   ekf_.ekf.SetState(ekf_.state);
@@ -903,4 +886,173 @@ Eigen::Vector3d ArmorTracker::GetArmorPositionFromState(const Eigen::VectorXd& x
   double xa = xc - r * std::cos(yaw);
   double ya = yc - r * std::sin(yaw);
   return Eigen::Vector3d(xa, ya, za);
+}
+
+void ArmorTracker::SetConfig(const Config& cfg)
+{
+  if (cfg.thresholds.tracking_thres != rt_.tracking_thres)
+  {
+    rt_.tracking_thres = cfg.thresholds.tracking_thres;
+  }
+  cfg_ = cfg;
+  if (cfg.solver.bias_time != solver_cfg_.bias_time ||
+      cfg.solver.s_bias != solver_cfg_.s_bias || cfg.solver.z_bias != solver_cfg_.z_bias)
+  {
+    solver_cfg_ = cfg_.solver;
+    io_.solver->SetBiasTime(solver_cfg_.bias_time);
+    io_.solver->SetSBias(static_cast<float>(solver_cfg_.s_bias));
+    io_.solver->SetZBias(static_cast<float>(solver_cfg_.z_bias));
+  }
+}
+
+int ArmorTracker::CommandFun(ArmorTracker* self, int argc, char** argv)
+{
+  if (argc == 1)
+  {
+    LibXR::STDIO::Printf("ArmorTracker\n\n");
+    LibXR::STDIO::Printf("Usage\r\n");
+    LibXR::STDIO::Printf("  show\r\n");
+    LibXR::STDIO::Printf("  max_armor_distance <value>\r\n");
+    LibXR::STDIO::Printf("  max_z_position <value>\r\n");
+    LibXR::STDIO::Printf("  max_match_distance <value>\r\n");
+    LibXR::STDIO::Printf("  max_match_yaw_diff <value>\r\n");
+    LibXR::STDIO::Printf("  tracking_thres <value>\r\n");
+    LibXR::STDIO::Printf("  bias_time <value>\r\n");
+    LibXR::STDIO::Printf("  s_bias <value>\r\n");
+    LibXR::STDIO::Printf("  z_bias <value>\r\n");
+    LibXR::STDIO::Printf("  sigma2_q_xyz <value>\r\n");
+    LibXR::STDIO::Printf("  sigma2_q_yaw <value>\r\n");
+    LibXR::STDIO::Printf("  sigma2_q_r <value>\r\n");
+    LibXR::STDIO::Printf("  r_xyz_factor <value>\r\n");
+    LibXR::STDIO::Printf("  r_yaw <value>\r\n");
+    return 0;
+  }
+  else if (argc == 2)
+  {
+    std::string cmd = argv[1];
+    if (cmd == "show")
+    {
+      // clang-format off
+      LibXR::STDIO::Printf("name: ArmorTracker\r\n");
+      LibXR::STDIO::Printf("cfg:\r\n");
+      LibXR::STDIO::Printf("  limits:\r\n");
+      LibXR::STDIO::Printf("    max_armor_distance: %f\r\n", self->cfg_.limits.max_armor_distance);
+      LibXR::STDIO::Printf("    max_z_position: %f\r\n", self->cfg_.limits.max_z_position);
+      LibXR::STDIO::Printf("  match:\r\n");
+      LibXR::STDIO::Printf("    max_match_distance: %f\r\n", self->cfg_.match.max_match_distance);
+      LibXR::STDIO::Printf("    max_match_yaw_diff: %f\r\n", self->cfg_.match.max_match_yaw_diff);
+      LibXR::STDIO::Printf("  thresholds:\r\n");
+      LibXR::STDIO::Printf("    tracking_thres: %d\r\n", self->cfg_.thresholds.tracking_thres);
+      LibXR::STDIO::Printf("    lost_time_thres: %f\r\n", self->cfg_.thresholds.lost_time_thres);
+      LibXR::STDIO::Printf("  solver:\r\n");
+      LibXR::STDIO::Printf("    k: %f\r\n", self->cfg_.solver.k);
+      LibXR::STDIO::Printf("    bias_time: %d\r\n", self->cfg_.solver.bias_time);
+      LibXR::STDIO::Printf("    s_bias: %f\r\n", self->cfg_.solver.s_bias);
+      LibXR::STDIO::Printf("    z_bias: %f\r\n", self->cfg_.solver.z_bias);
+      LibXR::STDIO::Printf("    calculate_mode: %d\r\n", static_cast<int>(self->cfg_.solver.calculate_mode));
+      LibXR::STDIO::Printf("    table_config:\r\n");
+      LibXR::STDIO::Printf("      max_x: %f\r\n", self->cfg_.solver.table_config.max_x);
+      LibXR::STDIO::Printf("      min_x: %f\r\n", self->cfg_.solver.table_config.min_x);
+      LibXR::STDIO::Printf("      max_y: %f\r\n", self->cfg_.solver.table_config.max_y);
+      LibXR::STDIO::Printf("      min_y: %f\r\n", self->cfg_.solver.table_config.min_y);
+      LibXR::STDIO::Printf("      resolution: %f\r\n", self->cfg_.solver.table_config.resolution);  
+      LibXR::STDIO::Printf("      filename: %s\r\n", self->cfg_.solver.table_config.filename.c_str());
+      LibXR::STDIO::Printf("  ekf:\r\n");
+      LibXR::STDIO::Printf("    sigma2_q_xyz: %f\r\n", self->cfg_.ekf.sigma2_q_xyz);
+      LibXR::STDIO::Printf("    sigma2_q_yaw: %f\r\n", self->cfg_.ekf.sigma2_q_yaw);
+      LibXR::STDIO::Printf("    sigma2_q_r: %f\r\n", self->cfg_.ekf.sigma2_q_r);
+      LibXR::STDIO::Printf("  noise:\r\n");
+      LibXR::STDIO::Printf("    r_xyz_factor: %f\r\n", self->cfg_.noise.r_xyz_factor);
+      LibXR::STDIO::Printf("    r_yaw: %f\r\n", self->cfg_.noise.r_yaw);
+      LibXR::STDIO::Printf("  frames:\r\n");
+      LibXR::STDIO::Printf("    rotation:\r\n");
+      LibXR::STDIO::Printf("      - %f\r\n", self->cfg_.frames.base_transform_static.rotation(0));
+      LibXR::STDIO::Printf("      - %f\r\n", self->cfg_.frames.base_transform_static.rotation(1));
+      LibXR::STDIO::Printf("      - %f\r\n", self->cfg_.frames.base_transform_static.rotation(2));
+      LibXR::STDIO::Printf("      - %f\r\n", self->cfg_.frames.base_transform_static.rotation(3));
+      LibXR::STDIO::Printf("    translation:\r\n");
+      LibXR::STDIO::Printf("      - %f\r\n", self->cfg_.frames.base_transform_static.translation(0));
+      LibXR::STDIO::Printf("      - %f\r\n", self->cfg_.frames.base_transform_static.translation(1));
+      LibXR::STDIO::Printf("      - %f\r\n", self->cfg_.frames.base_transform_static.translation(2));
+      // clang-format on
+    }
+    return 0;
+  }
+  else if (argc == 3)
+  {
+    std::string cmd = argv[1];
+    if (cmd == "max_armor_distance")
+    {
+      self->cfg_.limits.max_armor_distance = std::stod(argv[2]);
+      self->params_is_changed_ = true;
+    }
+    else if (cmd == "max_z_position")
+    {
+      self->cfg_.limits.max_z_position = std::stod(argv[2]);
+      self->params_is_changed_ = true;
+    }
+    else if (cmd == "max_match_distance")
+    {
+      self->cfg_.match.max_match_distance = std::stod(argv[2]);
+      self->params_is_changed_ = true;
+    }
+    else if (cmd == "max_match_yaw_diff")
+    {
+      self->cfg_.match.max_match_yaw_diff = std::stod(argv[2]);
+      self->params_is_changed_ = true;
+    }
+    else if (cmd == "tracking_thres")
+    {
+      self->cfg_.thresholds.tracking_thres = std::stoi(argv[2]);
+      self->params_is_changed_ = true;
+    }
+    else if (cmd == "bias_time")
+    {
+      self->cfg_.solver.bias_time = std::stoi(argv[2]);
+      self->params_is_changed_ = true;
+    }
+    else if (cmd == "s_bias")
+    {
+      self->cfg_.solver.s_bias = std::stod(argv[2]);
+      self->params_is_changed_ = true;
+    }
+    else if (cmd == "z_bias")
+    {
+      self->cfg_.solver.z_bias = std::stod(argv[2]);
+      self->params_is_changed_ = true;
+    }
+    else if (cmd == "sigma2_q_xyz")
+    {
+      self->cfg_.ekf.sigma2_q_xyz = std::stod(argv[2]);
+      self->params_is_changed_ = true;
+    }
+    else if (cmd == "sigma2_q_yaw")
+    {
+      self->cfg_.ekf.sigma2_q_yaw = std::stod(argv[2]);
+      self->params_is_changed_ = true;
+    }
+    else if (cmd == "sigma2_q_r")
+    {
+      self->cfg_.ekf.sigma2_q_r = std::stod(argv[2]);
+      self->params_is_changed_ = true;
+    }
+    else if (cmd == "r_xyz_factor")
+    {
+      self->cfg_.noise.r_xyz_factor = std::stod(argv[2]);
+      self->params_is_changed_ = true;
+    }
+    else if (cmd == "r_yaw")
+    {
+      self->cfg_.noise.r_yaw = std::stod(argv[2]);
+      self->params_is_changed_ = true;
+    }
+    else
+    {
+      LibXR::STDIO::Printf("Unknown command: %s\n", argv[1]);
+      return -1;
+    }
+    return 0;
+  }
+  LibXR::STDIO::Printf("Unknown command: %s\n", argv[1]);
+  return -1;
 }
