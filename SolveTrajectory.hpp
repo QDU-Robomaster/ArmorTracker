@@ -208,6 +208,10 @@ class SolveTrajectory
   void AutoSolveTrajectory(float& pitch, float& yaw, float& aim_x, float& aim_y,
                            float& aim_z, Target* msg);
 
+  void SetBiasTime(int bias_time) { bias_time_ = bias_time; }
+  void SetSBias(float s_bias) { s_bias_ = s_bias; }
+  void SetZBias(float z_bias) { z_bias_ = z_bias; }
+
  private:
   float k_;                 ///< 空气阻力系数
   float current_v_ = 16.0;  ///< 当前弹速 [m/s]

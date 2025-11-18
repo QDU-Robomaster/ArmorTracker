@@ -192,6 +192,10 @@ class ArmorTracker : public LibXR::Application
   double OrientationToYaw(const LibXR::Quaternion<double>& q);
   Eigen::Vector3d GetArmorPositionFromState(const Eigen::VectorXd& x);
 
+  static int CommandFun(ArmorTracker* self, int argc, char** argv);
+
+  const Config& GetConfig() const { return cfg_; }
+  void SetConfig(const Config& cfg);
   // ====================== 内部聚合成员（类内聚合） ======================
   struct EKFBlock
   {
@@ -251,6 +255,11 @@ class ArmorTracker : public LibXR::Application
 
   // 保存配置（类内聚合）
   Config cfg_;
+  Config::Solver solver_cfg_;
+
+  const char* name_ = "armor_tracker";
+  LibXR::RamFS::File cmd_file_;
+  std::atomic<bool> params_is_changed_{false};
 
   EkfPointsMsg ekf_msg_;
   std::shared_ptr<CameraBase::CameraInfo> cam_info_{};  ///< 相机内参/畸变
