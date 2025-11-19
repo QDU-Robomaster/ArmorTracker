@@ -172,6 +172,14 @@ class ArmorTracker : public LibXR::Application
   // ====================== 构造与监控 ======================
   explicit ArmorTracker(LibXR::HardwareContainer& hw, LibXR::ApplicationManager& app,
                         Config cfg);
+                        
+  static int CommandFun(ArmorTracker* self, int argc, char** argv);
+  const Config& GetConfig() const { return cfg_; }
+  void SetConfig(const Config& cfg);
+  static int CommandAdapter(void* instance, int argc, char** argv)
+  {
+    return CommandFun(static_cast<ArmorTracker*>(instance), argc, argv);
+  }
 
   void OnMonitor() override;
 
@@ -192,10 +200,6 @@ class ArmorTracker : public LibXR::Application
   double OrientationToYaw(const LibXR::Quaternion<double>& q);
   Eigen::Vector3d GetArmorPositionFromState(const Eigen::VectorXd& x);
 
-  static int CommandFun(ArmorTracker* self, int argc, char** argv);
-
-  const Config& GetConfig() const { return cfg_; }
-  void SetConfig(const Config& cfg);
   // ====================== 内部聚合成员（类内聚合） ======================
   struct EKFBlock
   {
