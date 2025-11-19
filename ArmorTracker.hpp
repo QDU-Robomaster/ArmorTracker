@@ -60,7 +60,6 @@ depends:
 #include "app_framework.hpp"
 #include "armor.hpp"
 #include "extended_kalman_filter.hpp"
-#include "libxr_rw.hpp"
 #include "libxr_time.hpp"
 #include "message.hpp"
 #include "mutex.hpp"
@@ -174,6 +173,14 @@ class ArmorTracker : public LibXR::Application
   explicit ArmorTracker(LibXR::HardwareContainer& hw, LibXR::ApplicationManager& app,
                         Config cfg);
 
+  static int CommandFun(ArmorTracker* self, int argc, char** argv);
+  const Config& GetConfig() const { return cfg_; }
+  void SetConfig(const Config& cfg);
+  static int CommandAdapter(void* instance, int argc, char** argv)
+  {
+    return CommandFun(static_cast<ArmorTracker*>(instance), argc, argv);
+  }
+
   void OnMonitor() override;
 
  private:
@@ -185,7 +192,6 @@ class ArmorTracker : public LibXR::Application
   // ====================== IO 与回调（原 Node 逻辑） ======================
   void VelocityCallback(double velocity_msg);
   void ArmorsCallback(ArmorDetectorResults& armors_msg);
-  static int CommandFun(ArmorTracker* self, int argc, char** argv);
 
   // ====================== 辅助函数 ======================
   void InitEKF(const ArmorDetectorResult& a);
@@ -193,8 +199,7 @@ class ArmorTracker : public LibXR::Application
   void HandleArmorJump(const ArmorDetectorResult& current_armor);
   double OrientationToYaw(const LibXR::Quaternion<double>& q);
   Eigen::Vector3d GetArmorPositionFromState(const Eigen::VectorXd& x);
-  const Config& GetConfig() const { return cfg_; }
-  void SetConfig(const Config& cfg);
+
   // ====================== 内部聚合成员（类内聚合） ======================
   struct EKFBlock
   {
