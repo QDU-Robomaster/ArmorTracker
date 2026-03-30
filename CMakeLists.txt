@@ -11,6 +11,11 @@ file(GLOB MODULE_ARMORTRACKER_SRC CONFIGURE_DEPENDS
   "${CMAKE_CURRENT_LIST_DIR}/*.c"
 )
 
+# The active runtime path is Tracker -> Aimer. Keep legacy ballistic utilities
+# available in-tree for reference, but do not link them into the tracker module.
+list(FILTER MODULE_ARMORTRACKER_SRC EXCLUDE REGEX ".*/SolveTrajectory\\.cpp$")
+list(FILTER MODULE_ARMORTRACKER_SRC EXCLUDE REGEX ".*/TableGenerator\\.cpp$")
+
 target_sources(xr PRIVATE ${MODULE_ARMORTRACKER_SRC})
 
 # INTERFACE deps shell
@@ -18,12 +23,11 @@ get_filename_component(_MODULE_DIRNAME ${CMAKE_CURRENT_LIST_DIR} NAME)
 set(_DEPS_TARGET "${_MODULE_DIRNAME}_deps")
 add_library(${_DEPS_TARGET} INTERFACE)
 
-# find_package(YourPkg REQUIRED COMPONENTS a b c)
+find_package(OpenCV REQUIRED)
 
-# target_link_libraries(${_DEPS_TARGET} INTERFACE
-#   # YourLibA
-#   # YourLibB
-# )
+target_link_libraries(${_DEPS_TARGET} INTERFACE
+  ${OpenCV_LIBS}
+)
 
 # target_compile_definitions(${_DEPS_TARGET} INTERFACE
 #   # FOO=1
