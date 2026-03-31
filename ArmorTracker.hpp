@@ -23,7 +23,7 @@ constructor_args:
 template_args: []
 required_hardware: []
 depends:
-  - qdu-future/ArmorDetector
+  - qdu-future/ArmorDetector@feat/sp_vision
   - qdu-future/CameraBase
 === END MANIFEST === */
 // clang-format on
