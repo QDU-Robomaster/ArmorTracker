@@ -66,19 +66,23 @@ jobs:
         run: |
           pip3 install xrobot libxr
 
+      - name: Add current repo to module list
+        run: |
+          xrobot_add_mod qdu-future/${{ env.XR_MODULE_NAME }}
+
+      - name: Add qdu-future source
+        run: |
+          xrobot_src_man add-source https://qdu-robomaster.github.io/qdu-future-modules/index.yaml
+
       - name: Run xrobot_setup
         run: |
-          xrobot_src_man add-source https://qdu-robomaster.github.io/qdu-future-modules/index.yaml && xrobot_src_man add-source https://xrobot-org.github.io/xrobot-modules/index.yaml && xrobot_setup || true
-
-      - name: Run xrobot_init_mod
-        run: |
-          xrobot_init_mod
+          xrobot_setup
 
       - name: Add BlinkLED module
         run: |
-          xrobot_add_mod ${{ env.XR_MODULE_NAME }} && xrobot_add_mod qdu-future/ArmorDetector && cat User/xrobot.yaml
+          xrobot_add_mod BlinkLED --instance-id BlinkLED_0
 
-      - name: Add this repo module
+      - name: Add this repo module instance
         run: |
           xrobot_add_mod ${{ env.XR_MODULE_NAME }} && cat User/xrobot.yaml
 
