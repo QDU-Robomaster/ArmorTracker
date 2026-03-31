@@ -63,16 +63,39 @@ Eigen::VectorXd ExtendedKalmanFilter::Update(
     std::function<Eigen::VectorXd(const Eigen::VectorXd&, const Eigen::VectorXd&)> z_subtract)
 {
   const Eigen::VectorXd x_prior = x;
+  const Eigen::VectorXd innovation = z_subtract(z, observe(x));
+  const Eigen::MatrixXd innovation_covariance = h * P * h.transpose() + r;
+  const Eigen::LLT<Eigen::MatrixXd> innovation_covariance_llt(innovation_covariance);
+
+  if (innovation_covariance_llt.info() != Eigen::Success)
+  {
+    data["nis_fail"] = 1.0;
+    data["nees_fail"] = 0.0;
+    data["nis"] = 0.0;
+    data["nees"] = 0.0;
+    data["recent_nis_failures"] = 1.0;
+    last_nis = 0.0;
+    recent_nis_failures.push_back(1);
+    if (recent_nis_failures.size() > window_size)
+    {
+      recent_nis_failures.pop_front();
+    }
+    return x;
+  }
+
+  const Eigen::MatrixXd ph_t = P * h.transpose();
   const Eigen::MatrixXd kalman_gain =
-      P * h.transpose() * (h * P * h.transpose() + r).inverse();
+      innovation_covariance_llt.solve(ph_t.transpose()).transpose();
 
   P = (identity_ - kalman_gain * h) * P * (identity_ - kalman_gain * h).transpose() +
       kalman_gain * r * kalman_gain.transpose();
-  x = x_add_(x, kalman_gain * z_subtract(z, observe(x)));
+  x = x_add_(x, kalman_gain * innovation);
 
   const Eigen::VectorXd residual = z_subtract(z, observe(x));
   const Eigen::MatrixXd s = h * P * h.transpose() + r;
-  const double nis = residual.transpose() * s.inverse() * residual;
+  const Eigen::LLT<Eigen::MatrixXd> s_llt(s);
+  const double nis =
+      (s_llt.info() == Eigen::Success) ? residual.dot(s_llt.solve(residual)) : 0.0;
   const double nees = (x - x_prior).transpose() * P.inverse() * (x - x_prior);
 
   data["nis_fail"] = 0.0;
