@@ -70,25 +70,32 @@ jobs:
         run: |
           xrobot_add_mod qdu-future/${{ env.XR_MODULE_NAME }}
 
+      - name: Add xrobot source
+        run: |
+          xrobot_src_man add-source https://xrobot-org.github.io/xrobot-modules/index.yaml
+
       - name: Add qdu-future source
         run: |
           xrobot_src_man add-source https://qdu-robomaster.github.io/qdu-future-modules/index.yaml
 
-      - name: Run xrobot_setup
+      - name: Sync module repos
         run: |
-          xrobot_setup
+          xrobot_init_mod
 
-      - name: Add BlinkLED module
+      - name: Create minimal module config
         run: |
-          xrobot_add_mod BlinkLED --instance-id BlinkLED_0
+          mkdir -p User
+          cat > User/xrobot.yaml <<'EOF'
+          global_settings:
+            monitor_sleep_ms: 1000
+          modules: []
+          EOF
+          xrobot_add_mod ${{ env.XR_MODULE_NAME }}
+          cat User/xrobot.yaml
 
-      - name: Add this repo module instance
+      - name: Generate main
         run: |
-          xrobot_add_mod ${{ env.XR_MODULE_NAME }} && cat User/xrobot.yaml
-
-      - name: Generate main again
-        run: |
-          xrobot_setup
+          xrobot_gen_main --output User/xrobot_main.hpp
 
       - name: Build
         run: |
