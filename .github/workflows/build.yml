@@ -4,7 +4,7 @@ on:
   push:
   pull_request:
   schedule:
-    - cron: '0 3 1 * *'  # 每月1日凌晨3点（UTC）自动触发
+    - cron: '0 3 1 * *'
 
 jobs:
   build:
@@ -45,6 +45,7 @@ jobs:
           set(CMAKE_CXX_STANDARD 17)
           add_executable(xr_test main.cpp)
           set(XROBOT_MODULES_DIR ${CMAKE_CURRENT_SOURCE_DIR}/Modules/)
+          set(WEBOTS_HOME /usr/local/webots)
           add_subdirectory(libxr)
           target_include_directories(xr_test PUBLIC $<TARGET_PROPERTY:xr,INTERFACE_INCLUDE_DIRECTORIES> ${CMAKE_SOURCE_DIR}/User)
           target_link_libraries(xr_test PUBLIC xr)
@@ -97,11 +98,14 @@ jobs:
         run: |
           xrobot_gen_main --output User/xrobot_main.hpp
 
+      - name: Use bundled OpenVINO runtime
+        run: echo "OpenVINO runtime is provided by ghcr.io/xrobot-org/docker-image-webots:main"
+
       - name: Build
         run: |
           mkdir -p build
           cd build
-          cmake ..
+          cmake .. -DOpenVINO_DIR=/opt/intel/openvino_2025.4.0/runtime/cmake
           make
 
       - name: Create Tag via GitHub API
@@ -120,10 +124,8 @@ jobs:
             const SS = String(date.getUTCSeconds()).padStart(2, '0');
             const tagName = `${tagPrefix}${yyyy}${mm}${dd}-${HH}${MM}${SS}`;
 
-            // 获取当前 commit sha
             const sha = process.env.GITHUB_SHA;
 
-            // 创建 tag reference
             await github.rest.git.createRef({
               owner: context.repo.owner,
               repo: context.repo.repo,
