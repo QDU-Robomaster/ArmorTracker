@@ -74,6 +74,7 @@ class SolveTrajectory
     bool tracking;                         ///< 是否正在追踪
     ArmorNumber id;                        ///< 目标ID（来自 armor.hpp）
     int armors_num;                        ///< 装甲板数量（3 或 4）
+    bool jumped;                           ///< 是否曾发生装甲板跳变
     Eigen::Matrix<double, 3, 1> position;  ///< 世界系目标中心位置 [m]
     Eigen::Matrix<double, 3, 1> velocity;  ///< 世界系目标线速度 [m/s]
     double yaw;                            ///< 目标当前 yaw [rad]

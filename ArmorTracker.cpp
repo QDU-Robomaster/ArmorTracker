@@ -1,907 +1,1580 @@
 #include "ArmorTracker.hpp"
 
 #include <algorithm>
-#include <cfloat>
+#include <chrono>
 #include <cmath>
-#include <cstdint>
-#include <opencv2/calib3d.hpp>
-#include <opencv2/core/types.hpp>
-#include <opencv2/highgui.hpp>
-#include <opencv2/imgproc.hpp>
+#include <cstdlib>
+#include <limits>
+#include <numeric>
+#include <sstream>
 #include <utility>
 
-#include "cycle_value.hpp"
+#include <opencv2/calib3d.hpp>
+#include <opencv2/highgui.hpp>
+#include <opencv2/imgproc.hpp>
+
+#include "TrackerMath.hpp"
 #include "logger.hpp"
-#include "message.hpp"
-#include "transform.hpp"
+#include "timebase.hpp"
 
-ArmorTracker::ArmorTracker(LibXR::HardwareContainer& hw, LibXR::ApplicationManager&,
-                           Config cfg)
-    : cfg_(std::move(cfg)),
-      solver_cfg_(cfg_.solver),
-      cmd_file_(LibXR::RamFS::CreateFile(name_, CommandFun, this))
-
+namespace
 {
-  XR_LOG_INFO("Starting ArmorTracker!");
+constexpr double MAX_TRACKER_DT_S = 0.1;
+constexpr double BAD_CONVERGENCE_RATIO = 0.4;
+constexpr int INFO_PANEL_WIDTH = 420;
+constexpr int MAX_DEBUG_OBSERVATIONS = 6;
+constexpr double HEADER_BAR_ALPHA = 0.8;
+constexpr double SMALL_ARMOR_HALF_WIDTH_M = 0.135 * 0.5;
+constexpr double LARGE_ARMOR_HALF_WIDTH_M = 0.225 * 0.5;
+constexpr double ARMOR_HALF_HEIGHT_M = 0.055 * 0.5;
+constexpr double PROJECTED_ARMOR_FILL_ALPHA = 0.20;
+constexpr double GOOD_PREDICTION_ERROR_PX = 12.0;
+constexpr double WARN_PREDICTION_ERROR_PX = 28.0;
+constexpr std::size_t MAX_GIMBAL_ROTATION_HISTORY_SIZE = 256U;
+constexpr double MAX_GIMBAL_ROTATION_HISTORY_S = 2.0;
+constexpr int OPTIMIZED_YAW_SEARCH_RANGE_DEG = 140;
+constexpr double OUTPOST_ARMOR_PITCH_RAD = -15.0 * CV_PI / 180.0;
+constexpr double DEFAULT_ARMOR_PITCH_RAD = 15.0 * CV_PI / 180.0;
 
-  hw.template FindOrExit<LibXR::RamFS>({"ramfs"})->Add(cmd_file_);
+struct PreviewProjector
+{
+  bool valid{false};
+  int image_width{0};
+  int image_height{0};
+  cv::Mat camera_matrix{};
+  cv::Mat dist_coeffs{};
+  Eigen::Quaterniond camera_rotation = Eigen::Quaterniond::Identity();
+  Eigen::Vector3d camera_translation = Eigen::Vector3d::Zero();
 
-  // 轨迹解算器
-  io_.solver = std::make_unique<SolveTrajectory>(
-      solver_cfg_.k, solver_cfg_.bias_time, solver_cfg_.s_bias, solver_cfg_.z_bias,
-      solver_cfg_.calculate_mode, solver_cfg_.table_config);
+  bool Project(const Eigen::Vector3d& world_xyz, cv::Point2f& image_point) const
+  {
+    if (!valid)
+    {
+      return false;
+    }
 
-  // 初值（和老逻辑一致）
-  rt_.tracking_thres = cfg_.thresholds.tracking_thres;
-  io_.gimbal_to_camera_transform_static = cfg_.frames.base_transform_static;
+    const Eigen::Vector3d camera_xyz =
+        camera_rotation.conjugate() * (world_xyz - camera_translation);
+    if (camera_xyz.z() <= 1e-6)
+    {
+      return false;
+    }
 
-  // ---------------- EKF 设置 ----------------
-  // 状态 x = [xc, vxc, yc, vyc, za, vza, yaw, vyaw, r]
-  // 观测 z = [xa, ya, za, yaw]
-  auto f = [this](const Eigen::VectorXd& x)
-  {
-    Eigen::VectorXd x_new = x;
-    x_new(ExtendedKalmanFilter::X_CENTER) +=
-        x(ExtendedKalmanFilter::V_X_CENTER) * time_.dt;
-    x_new(ExtendedKalmanFilter::Y_CENTER) +=
-        x(ExtendedKalmanFilter::V_Y_CENTER) * time_.dt;
-    x_new(ExtendedKalmanFilter::Z_ARMOR) += x(ExtendedKalmanFilter::V_Z_ARMOR) * time_.dt;
-    x_new(ExtendedKalmanFilter::YAW) += x(ExtendedKalmanFilter::V_YAW) * time_.dt;
-    return x_new;
-  };
-  auto j_f = [this](const Eigen::VectorXd&)
-  {
-    Eigen::MatrixXd f(9, 9);
-    double d = time_.dt;
-    // clang-format off
-    f << 1, d, 0, 0, 0, 0, 0, 0, 0,
-         0, 1, 0, 0, 0, 0, 0, 0, 0,
-         0, 0, 1, d, 0, 0, 0, 0, 0,
-         0, 0, 0, 1, 0, 0, 0, 0, 0,
-         0, 0, 0, 0, 1, d, 0, 0, 0,
-         0, 0, 0, 0, 0, 1, 0, 0, 0,
-         0, 0, 0, 0, 0, 0, 1, d, 0,
-         0, 0, 0, 0, 0, 0, 0, 1, 0,
-         0, 0, 0, 0, 0, 0, 0, 0, 1;
-    // clang-format on
-    return f;
-  };
-  auto h = [](const Eigen::VectorXd& x)
-  {
-    Eigen::VectorXd z(4);
-    double xc = x(ExtendedKalmanFilter::X_CENTER), yc = x(ExtendedKalmanFilter::Y_CENTER),
-           yaw = x(ExtendedKalmanFilter::YAW), r = x(ExtendedKalmanFilter::ROBOT_R);
-    z(0) = xc - r * std::cos(yaw);            // xa
-    z(1) = yc - r * std::sin(yaw);            // ya
-    z(2) = x(ExtendedKalmanFilter::Z_ARMOR);  // za
-    z(3) = x(ExtendedKalmanFilter::YAW);      // yaw
-    return z;
-  };
-  auto j_h = [](const Eigen::VectorXd& x)
-  {
-    Eigen::MatrixXd h(4, 9);
-    double yaw = x(6), r = x(8);
-    //                 xc vxc yc vyc za vza yaw               vyaw r
-    h << /*xa*/ 1, 0, 0, 0, 0, 0, r * std::sin(yaw), 0, -std::cos(yaw),
-        /*ya */ 0, 0, 1, 0, 0, 0, -r * std::cos(yaw), 0, -std::sin(yaw),
-        /*za */ 0, 0, 0, 0, 1, 0, 0, 0, 0,
-        /*yaw*/ 0, 0, 0, 0, 0, 0, 1, 0, 0;
-    return h;
-  };
-  auto u_q = [this]()
-  {
-    Eigen::MatrixXd q(9, 9);
-    double t = time_.dt, x = cfg_.ekf.sigma2_q_xyz, y = cfg_.ekf.sigma2_q_yaw,
-           r = cfg_.ekf.sigma2_q_r;
-    double q_x_x = std::pow(t, 4) / 4 * x, q_x_vx = std::pow(t, 3) / 2 * x,
-           q_vx_vx = std::pow(t, 2) * x;
-    double q_y_y = std::pow(t, 4) / 4 * y, q_y_vy = std::pow(t, 3) / 2 * y,
-           q_vy_vy = std::pow(t, 2) * y;
-    double q_r = std::pow(t, 4) / 4 * r;
-    // clang-format off
-    q.setZero();
-    q(0,0)=q_x_x;  q(0,1)=q_x_vx; q(1,0)=q_x_vx; q(1,1)=q_vx_vx;
-    q(2,2)=q_x_x;  q(2,3)=q_x_vx; q(3,2)=q_x_vx; q(3,3)=q_vx_vx;
-    q(4,4)=q_x_x;  q(4,5)=q_x_vx; q(5,4)=q_x_vx; q(5,5)=q_vx_vx;
-    q(6,6)=q_y_y;  q(6,7)=q_y_vy; q(7,6)=q_y_vy; q(7,7)=q_vy_vy;
-    q(8,8)=q_r;
-    // clang-format on
-    return q;
-  };
-  auto u_r = [this](const Eigen::VectorXd& z)
-  {
-    Eigen::DiagonalMatrix<double, 4> r;
-    double x = cfg_.noise.r_xyz_factor;
-    r.diagonal() << std::abs(x * z[0]), std::abs(x * z[1]), std::abs(x * z[2]),
-        cfg_.noise.r_yaw;
-    return r;
-  };
-  Eigen::DiagonalMatrix<double, 9> p0;
-  p0.setIdentity();
-  ekf_.ekf = ExtendedKalmanFilter{f, h, j_f, j_h, u_q, u_r, p0};
+    std::vector<cv::Point3d> object_points = {
+        cv::Point3d(camera_xyz.x(), camera_xyz.y(), camera_xyz.z())};
+    std::vector<cv::Point2d> image_points;
+    cv::projectPoints(object_points, cv::Vec3d(0.0, 0.0, 0.0),
+                      cv::Vec3d(0.0, 0.0, 0.0), camera_matrix, dist_coeffs,
+                      image_points);
+    if (image_points.empty())
+    {
+      return false;
+    }
 
-  // ---------------- Topics & 回调 ----------------
-  // 装甲板识别结果订阅
-  LibXR::Topic::Domain armor_detector_domain = LibXR::Topic::Domain("armor_detector");
-  LibXR::Topic armors_topic = LibXR::Topic::Find("armors_result", &armor_detector_domain);
-  auto armors_cb = LibXR::Topic::Callback::Create(
-      [](bool, ArmorTracker* self, LibXR::RawData& data)
+    const cv::Point2d projected = image_points.front();
+    if (!std::isfinite(projected.x) || !std::isfinite(projected.y))
+    {
+      return false;
+    }
+
+    constexpr double IMAGE_BORDER_MARGIN = 64.0;
+    if (projected.x < -IMAGE_BORDER_MARGIN ||
+        projected.x > static_cast<double>(image_width) + IMAGE_BORDER_MARGIN ||
+        projected.y < -IMAGE_BORDER_MARGIN ||
+        projected.y > static_cast<double>(image_height) + IMAGE_BORDER_MARGIN)
+    {
+      return false;
+    }
+
+    image_point = cv::Point2f(static_cast<float>(projected.x),
+                              static_cast<float>(projected.y));
+    return true;
+  }
+};
+
+bool is_balance_armor(const TrackedArmorObservation& armor)
+{
+  return armor.result.type == ArmorType::LARGE &&
+         (armor.result.number == ArmorNumber::THREE ||
+          armor.result.number == ArmorNumber::FOUR ||
+          armor.result.number == ArmorNumber::FIVE);
+}
+
+std::string state_to_string(ArmorTracker::State state)
+{
+  switch (state)
+  {
+    case ArmorTracker::State::LOST:
+      return "LOST";
+    case ArmorTracker::State::DETECTING:
+      return "DETECTING";
+    case ArmorTracker::State::TRACKING:
+      return "TRACKING";
+    case ArmorTracker::State::TEMP_LOST:
+      return "TEMP LOST";
+    default:
+      return "UNKNOWN";
+  }
+}
+
+cv::Scalar state_to_color(ArmorTracker::State state)
+{
+  switch (state)
+  {
+    case ArmorTracker::State::LOST:
+      return cv::Scalar(92, 102, 119);
+    case ArmorTracker::State::DETECTING:
+      return cv::Scalar(255, 204, 92);
+    case ArmorTracker::State::TRACKING:
+      return cv::Scalar(84, 196, 116);
+    case ArmorTracker::State::TEMP_LOST:
+      return cv::Scalar(255, 153, 77);
+    default:
+      return cv::Scalar(160, 160, 160);
+  }
+}
+
+cv::Scalar armor_color_to_scalar(ArmorColor color)
+{
+  switch (color)
+  {
+    case ArmorColor::BLUE:
+      return cv::Scalar(255, 185, 40);
+    case ArmorColor::RED:
+      return cv::Scalar(72, 96, 255);
+    default:
+      return cv::Scalar(180, 220, 180);
+  }
+}
+
+cv::Scalar prediction_error_to_color(double error_px)
+{
+  if (error_px <= GOOD_PREDICTION_ERROR_PX)
+  {
+    return cv::Scalar(128, 226, 142);
+  }
+  if (error_px <= WARN_PREDICTION_ERROR_PX)
+  {
+    return cv::Scalar(255, 214, 102);
+  }
+  return cv::Scalar(255, 128, 128);
+}
+
+std::string armor_number_to_string(ArmorNumber number)
+{
+  const std::size_t index = static_cast<std::size_t>(number);
+  if (index >= ARMOR_NUMBER_NAMES.size())
+  {
+    return "invalid";
+  }
+  return std::string(ARMOR_NUMBER_NAMES[index]);
+}
+
+std::string format_value(double value, int precision = 3)
+{
+  std::ostringstream stream;
+  stream.setf(std::ios::fixed);
+  stream.precision(precision);
+  stream << value;
+  return stream.str();
+}
+
+void draw_info_row(cv::Mat& canvas, int x, int y, const std::string& key,
+                   const std::string& value, const cv::Scalar& value_color)
+{
+  constexpr int FONT = cv::FONT_HERSHEY_DUPLEX;
+  constexpr double FONT_SCALE = 0.55;
+  constexpr int THICKNESS = 1;
+
+  cv::putText(canvas, key, cv::Point(x, y), FONT, FONT_SCALE,
+              cv::Scalar(170, 182, 196), THICKNESS, cv::LINE_AA);
+  cv::putText(canvas, value, cv::Point(x + 170, y), FONT, FONT_SCALE, value_color,
+              THICKNESS, cv::LINE_AA);
+}
+
+void draw_state_chip(cv::Mat& canvas, const std::string& text, const cv::Point& origin,
+                     const cv::Scalar& color)
+{
+  constexpr int FONT = cv::FONT_HERSHEY_DUPLEX;
+  constexpr double FONT_SCALE = 0.66;
+  constexpr int THICKNESS = 1;
+  constexpr int PADDING_X = 10;
+  constexpr int PADDING_Y = 8;
+
+  int baseline = 0;
+  const cv::Size text_size =
+      cv::getTextSize(text, FONT, FONT_SCALE, THICKNESS, &baseline);
+  const cv::Rect rect(origin.x, origin.y - text_size.height - PADDING_Y,
+                      text_size.width + 2 * PADDING_X,
+                      text_size.height + 2 * PADDING_Y);
+  cv::rectangle(canvas, rect, color, cv::FILLED, cv::LINE_AA);
+  cv::putText(canvas, text,
+              cv::Point(origin.x + PADDING_X,
+                        origin.y - PADDING_Y + baseline / 2),
+              FONT, FONT_SCALE, cv::Scalar(16, 18, 24), THICKNESS, cv::LINE_AA);
+}
+
+PreviewProjector build_preview_projector(
+    const std::shared_ptr<CameraBase::CameraInfo>& camera_info,
+    const LibXR::Quaternion<double>& gimbal_rotation,
+    const LibXR::Transform<double>& camera_to_gimbal_transform)
+{
+  PreviewProjector projector;
+  if (camera_info == nullptr)
+  {
+    return projector;
+  }
+
+  projector.image_width = static_cast<int>(camera_info->width);
+  projector.image_height = static_cast<int>(camera_info->height);
+  projector.camera_matrix =
+      cv::Mat(3, 3, CV_64F, const_cast<double*>(camera_info->camera_matrix.data())).clone();
+
+  const auto dist_coeffs = CameraBase::CameraInfo::ToPnPDistCoeffs(
+      camera_info->distortion_model, camera_info->distortion_coefficients);
+  if (!dist_coeffs.empty())
+  {
+    projector.dist_coeffs =
+        cv::Mat(1, static_cast<int>(dist_coeffs.size()), CV_64F,
+                const_cast<double*>(dist_coeffs.data()))
+            .clone();
+  }
+
+  const LibXR::Transform<double> world_to_gimbal(gimbal_rotation, {0.0, 0.0, 0.0});
+  const LibXR::Transform<double> world_to_camera =
+      world_to_gimbal + camera_to_gimbal_transform;
+
+  projector.camera_rotation = Eigen::Quaterniond(world_to_camera.rotation);
+  projector.camera_translation =
+      Eigen::Vector3d(world_to_camera.translation.x(), world_to_camera.translation.y(),
+                      world_to_camera.translation.z());
+  projector.valid = true;
+  return projector;
+}
+
+std::array<Eigen::Vector3d, 4> build_predicted_armor_corners(
+    const Eigen::Vector4d& armor_xyza, ArmorType armor_type, ArmorNumber armor_number)
+{
+  (void)armor_number;
+  const double half_width = (armor_type == ArmorType::LARGE) ? LARGE_ARMOR_HALF_WIDTH_M
+                                                             : SMALL_ARMOR_HALF_WIDTH_M;
+  const Eigen::Vector3d center = armor_xyza.head<3>();
+  const double yaw = armor_xyza[3];
+  const Eigen::Vector3d width_axis(-std::sin(yaw), std::cos(yaw), 0.0);
+  const Eigen::Vector3d height_axis(0.0, 0.0, 1.0);
+
+  return {
+      center + width_axis * half_width - height_axis * ARMOR_HALF_HEIGHT_M,
+      center + width_axis * half_width + height_axis * ARMOR_HALF_HEIGHT_M,
+      center - width_axis * half_width + height_axis * ARMOR_HALF_HEIGHT_M,
+      center - width_axis * half_width - height_axis * ARMOR_HALF_HEIGHT_M,
+  };
+}
+
+Eigen::Matrix3d build_armor_to_world_rotation(double pitch, double yaw)
+{
+  const double SIN_YAW = std::sin(yaw);
+  const double COS_YAW = std::cos(yaw);
+  const double SIN_PITCH = std::sin(pitch);
+  const double COS_PITCH = std::cos(pitch);
+
+  Eigen::Matrix3d armor_to_world;
+  armor_to_world << COS_YAW * COS_PITCH, -SIN_YAW, COS_YAW * SIN_PITCH,
+      SIN_YAW * COS_PITCH, COS_YAW, SIN_YAW * SIN_PITCH, -SIN_PITCH, 0.0,
+      COS_PITCH;
+  return armor_to_world;
+}
+
+double get_armor_pitch_rad(ArmorNumber armor_number)
+{
+  return armor_number == ArmorNumber::OUTPOST ? OUTPOST_ARMOR_PITCH_RAD
+                                              : DEFAULT_ARMOR_PITCH_RAD;
+}
+
+std::array<Eigen::Vector3d, 4> build_observation_ordered_armor_corners(
+    const Eigen::Vector3d& center, const Eigen::Matrix3d& armor_to_world,
+    ArmorType armor_type)
+{
+  const double HALF_WIDTH = (armor_type == ArmorType::LARGE) ? LARGE_ARMOR_HALF_WIDTH_M
+                                                             : SMALL_ARMOR_HALF_WIDTH_M;
+  const auto world_point = [&](double y, double z)
+  {
+    return center + armor_to_world * Eigen::Vector3d(0.0, y, z);
+  };
+
+  return {
+      world_point(HALF_WIDTH, ARMOR_HALF_HEIGHT_M),
+      world_point(-HALF_WIDTH, ARMOR_HALF_HEIGHT_M),
+      world_point(-HALF_WIDTH, -ARMOR_HALF_HEIGHT_M),
+      world_point(HALF_WIDTH, -ARMOR_HALF_HEIGHT_M),
+  };
+}
+
+bool project_predicted_armor_quad(const PreviewProjector& projector,
+                                  const std::array<Eigen::Vector3d, 4>& world_corners,
+                                  std::array<cv::Point, 4>& image_corners)
+{
+  for (std::size_t corner_index = 0; corner_index < world_corners.size(); ++corner_index)
+  {
+    cv::Point2f image_point;
+    if (!projector.Project(world_corners[corner_index], image_point))
+    {
+      return false;
+    }
+
+    image_corners[corner_index] =
+        cv::Point(cvRound(image_point.x), cvRound(image_point.y));
+  }
+  return true;
+}
+
+bool project_armor_quad(const PreviewProjector& projector,
+                        const std::array<Eigen::Vector3d, 4>& world_corners,
+                        std::array<cv::Point2f, 4>& image_corners)
+{
+  for (std::size_t corner_index = 0; corner_index < world_corners.size();
+       ++corner_index)
+  {
+    if (!projector.Project(world_corners[corner_index], image_corners[corner_index]))
+    {
+      return false;
+    }
+  }
+  return true;
+}
+
+void draw_projected_armor_quad(cv::Mat& canvas,
+                               const std::array<cv::Point, 4>& image_corners,
+                               const cv::Scalar& outline_color,
+                               const cv::Scalar& fill_color,
+                               int outline_thickness)
+{
+  std::vector<cv::Point> polygon(image_corners.begin(), image_corners.end());
+  cv::Mat overlay = canvas.clone();
+  cv::fillConvexPoly(overlay, polygon, fill_color, cv::LINE_AA);
+  cv::addWeighted(overlay, PROJECTED_ARMOR_FILL_ALPHA, canvas,
+                  1.0 - PROJECTED_ARMOR_FILL_ALPHA, 0.0, canvas);
+
+  const cv::Point* points = image_corners.data();
+  const int point_count = static_cast<int>(image_corners.size());
+  cv::polylines(canvas, &points, &point_count, 1, true, outline_color, outline_thickness,
+                cv::LINE_AA);
+}
+
+struct ProjectedArmorCandidate
+{
+  cv::Point2f center{};
+  std::array<cv::Point, 4> quad{};
+};
+
+cv::Point2f quad_center(const std::array<cv::Point, 4>& quad)
+{
+  cv::Point2f center(0.0F, 0.0F);
+  for (const auto& point : quad)
+  {
+    center.x += static_cast<float>(point.x);
+    center.y += static_cast<float>(point.y);
+  }
+  center.x /= 4.0F;
+  center.y /= 4.0F;
+  return center;
+}
+
+double quad_rms_error_px(const std::array<cv::Point, 4>& projected_quad,
+                         const std::array<cv::Point2f, 4>& observed_quad)
+{
+  double best_mean_square_error = std::numeric_limits<double>::max();
+
+  for (int reverse = 0; reverse < 2; ++reverse)
+  {
+    for (int shift = 0; shift < 4; ++shift)
+    {
+      double mean_square_error = 0.0;
+      for (int index = 0; index < 4; ++index)
       {
-        auto armors_msg = reinterpret_cast<ArmorDetectorResults*>(data.addr_);
-        if (self->params_is_changed_ == true)
-        {
-          self->SetConfig(self->cfg_);
-          self->params_is_changed_ = false;
-        }
-        self->ArmorsCallback(*armors_msg);
-      },
-      this);
-  armors_topic.RegisterCallback(armors_cb);
+        const int observed_index =
+            reverse == 0 ? (index + shift) % 4 : (shift - index + 4) % 4;
+        const double dx = static_cast<double>(projected_quad[index].x) -
+                          static_cast<double>(observed_quad[observed_index].x);
+        const double dy = static_cast<double>(projected_quad[index].y) -
+                          static_cast<double>(observed_quad[observed_index].y);
+        mean_square_error += dx * dx + dy * dy;
+      }
+      best_mean_square_error =
+          std::min(best_mean_square_error, mean_square_error / 4.0);
+    }
+  }
 
-  // 弹丸速度订阅（用于弹道解算初始化）
-  LibXR::Topic::Domain referee_domain = LibXR::Topic::Domain("referee");
-  LibXR::Topic bullet_speed_tp =
-      LibXR::Topic::FindOrCreate<float>("bullet_speed", &referee_domain);
-  auto velocity_cb = LibXR::Topic::Callback::Create(
-      [](bool, ArmorTracker* self, LibXR::RawData& data)
-      {
-        auto velocity_msg = reinterpret_cast<float*>(data.addr_);
-        self->VelocityCallback(*velocity_msg);
-      },
-      this);
-  bullet_speed_tp.RegisterCallback(velocity_cb);
+  return std::sqrt(best_mean_square_error);
+}
 
-  // 云台姿态订阅
-  LibXR::Topic::Domain gimbal_domain = LibXR::Topic::Domain("gimbal");
-  LibXR::Topic gimbal_rotation_topic =
-      LibXR::Topic::FindOrCreate<LibXR::Quaternion<float>>("rotation", &gimbal_domain);
-  auto base_rotation_cb = LibXR::Topic::Callback::Create(
-      [](bool, ArmorTracker* self, LibXR::RawData& data)
-      {
-        LibXR::Mutex::LockGuard lock(self->io_.gimbal_rotation_lock);
-        auto base_rotation_msg = reinterpret_cast<LibXR::Quaternion<float>*>(data.addr_);
-        self->io_.gimbal_rotation =
-            LibXR::Quaternion<double>(base_rotation_msg->w(), base_rotation_msg->x(),
-                                      base_rotation_msg->y(), base_rotation_msg->z());
-      },
-      this);
-  gimbal_rotation_topic.RegisterCallback(base_rotation_cb);
+double quad_rms_error_px(const std::array<cv::Point2f, 4>& projected_quad,
+                         const std::array<cv::Point2f, 4>& observed_quad)
+{
+  double mean_square_error = 0.0;
+  for (int index = 0; index < 4; ++index)
+  {
+    const cv::Point2f delta = projected_quad[index] - observed_quad[index];
+    mean_square_error +=
+        static_cast<double>(delta.x) * static_cast<double>(delta.x) +
+        static_cast<double>(delta.y) * static_cast<double>(delta.y);
+  }
+  return std::sqrt(mean_square_error / 4.0);
+}
 
-  io_.solver->SetFireCallback(
-      [&](bool is_fire)
-      {
-        XR_LOG_INFO("is_fire: {}", is_fire);
-        // uint8_t fire_notify = is_fire ? 1 : 0;
-        uint8_t fire_notify = 0;
-        io_.fire_notify_topic.Publish(fire_notify);
-      });
+double optimize_observation_yaw(const PreviewProjector& projector,
+                                const ArmorDetectorResult& armor,
+                                const Eigen::Vector3d& xyz_in_world,
+                                const LibXR::Quaternion<double>& frame_gimbal_rotation,
+                                double raw_yaw)
+{
+  if (!projector.valid)
+  {
+    return raw_yaw;
+  }
 
-#if defined(AUTO_AIM_PREVIEW_IMAGE) && AUTO_AIM_PREVIEW_IMAGE
+  const double GIMBAL_YAW =
+      TrackerMath::LimitRad(frame_gimbal_rotation.ToEulerAngleZYX()[2]);
+  const double YAW_START =
+      TrackerMath::LimitRad(
+          GIMBAL_YAW - 0.5 * OPTIMIZED_YAW_SEARCH_RANGE_DEG * CV_PI / 180.0);
+  const double ARMOR_PITCH = get_armor_pitch_rad(armor.number);
+
+  double best_yaw = raw_yaw;
+  double best_error = std::numeric_limits<double>::max();
+  for (int step = 0; step < OPTIMIZED_YAW_SEARCH_RANGE_DEG; ++step)
+  {
+    const double candidate_yaw =
+        TrackerMath::LimitRad(YAW_START + step * CV_PI / 180.0);
+    const auto candidate_corners = build_observation_ordered_armor_corners(
+        xyz_in_world, build_armor_to_world_rotation(ARMOR_PITCH, candidate_yaw),
+        armor.type);
+    std::array<cv::Point2f, 4> projected_corners{};
+    if (!project_armor_quad(projector, candidate_corners, projected_corners))
+    {
+      continue;
+    }
+
+    const double error = quad_rms_error_px(projected_corners, armor.points);
+    if (error < best_error)
+    {
+      best_error = error;
+      best_yaw = candidate_yaw;
+    }
+  }
+
+  return best_yaw;
+}
+
+LibXR::Quaternion<double> slerp_quaternion(const LibXR::Quaternion<double>& lhs,
+                                           const LibXR::Quaternion<double>& rhs,
+                                           double alpha)
+{
+  const double clamped_alpha = std::clamp(alpha, 0.0, 1.0);
+  const Eigen::Quaterniond lhs_eigen(lhs);
+  const Eigen::Quaterniond rhs_eigen(rhs);
+  return LibXR::Quaternion<double>(lhs_eigen.slerp(clamped_alpha, rhs_eigen));
+}
+}  // namespace
+
+ArmorTracker::ArmorTracker(LibXR::HardwareContainer&, LibXR::ApplicationManager& app,
+                           Config cfg)
+    : cfg_(std::move(cfg))
+{
+  camera_to_gimbal_transform_static_ = cfg_.frames.camera_to_gimbal_transform;
 
   auto info_topic = LibXR::Topic(LibXR::Topic::Find("camera_info"));
-  auto info_cb = LibXR::Topic::Callback::Create(
+  auto info_callback = LibXR::Topic::Callback::Create(
       [](bool, ArmorTracker* self, LibXR::RawData& data)
       {
         auto* camera_info = reinterpret_cast<CameraBase::CameraInfo*>(data.addr_);
-        static bool inited = false;
-        if (!inited)
-        {
-          XR_LOG_PASS("Got camera info!");
-          inited = true;
-
-          self->cam_info_ = std::make_shared<CameraBase::CameraInfo>(*camera_info);
-        }
+        self->CameraInfoCallback(camera_info);
       },
       this);
-  info_topic.RegisterCallback(info_cb);
+  info_topic.RegisterCallback(info_callback);
 
-  auto img_topic = LibXR::Topic(LibXR::Topic::Find("image_raw"));
-  auto img_cb = LibXR::Topic::Callback::Create(
+  if (cfg_.debug.preview)
+  {
+    auto image_topic = LibXR::Topic(LibXR::Topic::Find("image_raw"));
+    auto image_callback = LibXR::Topic::Callback::Create(
+        [](bool, ArmorTracker* self, LibXR::RawData& data)
+        {
+          auto* image = reinterpret_cast<cv::Mat*>(data.addr_);
+          self->ImageCallback(image);
+        },
+        this);
+    image_topic.RegisterCallback(image_callback);
+  }
+
+  LibXR::Topic::Domain armor_detector_domain("armor_detector");
+  LibXR::Topic armors_topic =
+      LibXR::Topic::FindOrCreate<ArmorDetectionsMessage>("armors_result",
+                                                         &armor_detector_domain);
+  auto armors_callback = LibXR::Topic::Callback::Create(
       [](bool, ArmorTracker* self, LibXR::RawData& data)
       {
-        auto* img_msg = reinterpret_cast<cv::Mat*>(data.addr_);
-        cv::Mat frame = img_msg->clone();
-
-        EkfPointsMsg& ekf = self->ekf_msg_;
-
-        // —— 用 info_cb 提供的内参/畸变；若还没拿到则直接显示原图 ——
-        if (!self->cam_info_)
-        {
-          cv::imshow("ekf_overlay", frame);
-          cv::waitKey(1);
-          return;
-        }
-        const CameraBase::CameraInfo& cam = *self->cam_info_;
-
-        // 只考虑 PLUMB_BOB；否则当作无畸变
-        bool has_distortion =
-            (cam.distortion_model == CameraBase::DistortionModel::PLUMB_BOB);
-
-        // --- 构造 K(3x3) ---
-        const auto& k_arr = cam.camera_matrix;  // 行优先 3x3
-        cv::Mat k = (cv::Mat_<double>(3, 3) << k_arr[0], k_arr[1], k_arr[2], k_arr[3],
-                     k_arr[4], k_arr[5], k_arr[6], k_arr[7], k_arr[8]);
-
-        // --- 构造 D（PLUMB_BOB: k1,k2,p1,p2,k3）---
-        cv::Mat d;
-        if (has_distortion)
-        {
-          const auto& pb = cam.distortion_coefficients.plumb_bob;
-          std::vector<double> dvec = {pb.k1, pb.k2, pb.p1, pb.p2, pb.k3};
-          d = cv::Mat(dvec).clone().reshape(1, 1);  // 1x5
-        }
-        else
-        {
-          d = cv::Mat();  // 空 -> 无畸变
-        }
-
-        // 若当前帧分辨率与标定分辨率不同，缩放 K；D 不缩放
-        const double SX =
-            static_cast<double>(frame.cols) / static_cast<double>(cam.width);
-        const double SY =
-            static_cast<double>(frame.rows) / static_cast<double>(cam.height);
-        cv::Mat k_scaled = k.clone();
-        k_scaled.at<double>(0, 0) *= SX;  // fx
-        k_scaled.at<double>(1, 1) *= SY;  // fy
-        k_scaled.at<double>(0, 2) *= SX;  // cx
-        k_scaled.at<double>(1, 2) *= SY;  // cy
-
-        auto project = [&](const Eigen::Vector3d& Pc, cv::Point2d& uv) -> bool
-        {
-          if (!(Pc.z() > 1e-6) || !std::isfinite(Pc.x()) || !std::isfinite(Pc.y()) ||
-              !std::isfinite(Pc.z()))
-          {
-            return false;
-          }
-
-          std::vector<cv::Point3d> obj{cv::Point3d(Pc.x(), Pc.y(), Pc.z())};
-          static cv::Mat rvec = cv::Mat::zeros(1, 3, CV_64F);
-          static cv::Mat tvec = cv::Mat::zeros(1, 3, CV_64F);
-          std::vector<cv::Point2d> imgpts;
-          cv::projectPoints(obj, rvec, tvec, k_scaled, d, imgpts);
-          uv = imgpts[0];
-          return (0 <= uv.x && uv.x < frame.cols && 0 <= uv.y && uv.y < frame.rows);
-        };
-
-        if (ekf.valid[0])
-        {
-          cv::Point2d uv;
-          Eigen::Vector3d pc(ekf.center_cam.x(), ekf.center_cam.y(), ekf.center_cam.z());
-          if (project(pc, uv))
-          {
-            cv::circle(frame, uv, 5, cv::Scalar(0, 255, 0), 2, cv::LINE_AA);
-            cv::putText(frame, "C", uv + cv::Point2d(6, -6), cv::FONT_HERSHEY_SIMPLEX,
-                        0.5, cv::Scalar(0, 255, 0), 1, cv::LINE_AA);
-          }
-        }
-
-        for (int i = 0; i < std::min<int>(ekf.count, 4); ++i)
-        {
-          if (!ekf.valid[i + 1])
-          {
-            continue;
-          }
-          cv::Point2d uv;
-          Eigen::Vector3d pc(ekf.armors_cam[i].x(), ekf.armors_cam[i].y(),
-                             ekf.armors_cam[i].z());
-          if (project(pc, uv))
-          {
-            cv::circle(frame, uv, 4, cv::Scalar(255, 255, 0), 2, cv::LINE_AA);
-            char buf[16];
-            (void)std::snprintf(buf, sizeof(buf), "A%d", i);
-            cv::putText(frame, buf, uv + cv::Point2d(6, -6), cv::FONT_HERSHEY_SIMPLEX,
-                        0.5, cv::Scalar(255, 255, 0), 1, cv::LINE_AA);
-          }
-        }
-
-        for (int i = 0; i < std::min<int>(ekf.count, 4); ++i)
-        {
-          if (!ekf.valid[0] || !ekf.valid[i + 1])
-          {
-            continue;
-          }
-          cv::Point2d uc, ua;
-          Eigen::Vector3d pc_c(ekf.center_cam.x(), ekf.center_cam.y(),
-                               ekf.center_cam.z());
-          Eigen::Vector3d pc_a(ekf.armors_cam[i].x(), ekf.armors_cam[i].y(),
-                               ekf.armors_cam[i].z());
-          if (project(pc_c, uc) && project(pc_a, ua))
-          {
-            cv::line(frame, uc, ua, cv::Scalar(80, 180, 255), 1, cv::LINE_AA);
-          }
-        }
-
-        cv::imshow("ekf_overlay", frame);
-        cv::waitKey(1);
+        auto* armors_msg = reinterpret_cast<ArmorDetectionsMessage*>(data.addr_);
+        self->ArmorsCallback(*armors_msg);
       },
       this);
+  armors_topic.RegisterCallback(armors_callback);
 
-  img_topic.RegisterCallback(img_cb);
-#endif
+  LibXR::Topic::Domain gimbal_domain("gimbal");
+  LibXR::Topic gimbal_rotation_topic =
+      LibXR::Topic::FindOrCreate<LibXR::Quaternion<float>>("rotation", &gimbal_domain);
+  auto gimbal_rotation_callback = LibXR::Topic::Callback::Create(
+      [](bool, ArmorTracker* self, LibXR::RawData& data)
+      {
+        auto* rotation_msg = reinterpret_cast<LibXR::Quaternion<float>*>(data.addr_);
+        self->GimbalRotationCallback(rotation_msg);
+      },
+      this);
+  gimbal_rotation_topic.RegisterCallback(gimbal_rotation_callback);
+
+  app.Register(*this);
 }
 
-void ArmorTracker::OnMonitor() {}
-
-void ArmorTracker::Init(const ArmorDetectorResults& armors_msg)
+void ArmorTracker::CameraInfoCallback(CameraBase::CameraInfo* camera_info)
 {
-  if (armors_msg.empty())
+  if (camera_info == nullptr)
   {
     return;
   }
 
-  double min_distance = DBL_MAX;
-  rt_.tracked_armor = armors_msg[0];
-  for (const auto& armor : armors_msg)
+  LibXR::Mutex::LockGuard lock(preview_frame_lock_);
+  camera_info_ = std::make_shared<CameraBase::CameraInfo>(*camera_info);
+}
+
+void ArmorTracker::ImageCallback(cv::Mat* img_msg)
+{
+  if (img_msg == nullptr || img_msg->empty())
   {
-    if (armor.distance_to_image_center < min_distance)
+    return;
+  }
+
+  cv::Mat bgr_img = ConvertToBgr(*img_msg);
+  LibXR::Mutex::LockGuard lock(preview_frame_lock_);
+  latest_frame_ = std::move(bgr_img);
+}
+
+void ArmorTracker::GimbalRotationCallback(LibXR::Quaternion<float>* rotation_msg)
+{
+  if (rotation_msg == nullptr)
+  {
+    return;
+  }
+
+  PushGimbalRotationSample(
+      LibXR::Timebase::GetMicroseconds(),
+      LibXR::Quaternion<double>(rotation_msg->w(), rotation_msg->x(),
+                                rotation_msg->y(), rotation_msg->z()));
+}
+
+cv::Mat ArmorTracker::ConvertToBgr(const cv::Mat& input) const
+{
+  std::shared_ptr<CameraBase::CameraInfo> camera_info;
+  {
+    LibXR::Mutex::LockGuard lock(preview_frame_lock_);
+    camera_info = camera_info_;
+  }
+
+  if (camera_info == nullptr)
+  {
+    return input.clone();
+  }
+
+  switch (camera_info->encoding)
+  {
+    case CameraBase::Encoding::RGB8:
     {
-      min_distance = armor.distance_to_image_center;
-      rt_.tracked_armor = armor;
+      cv::Mat output;
+      cv::cvtColor(input, output, cv::COLOR_RGB2BGR);
+      return output;
+    }
+    case CameraBase::Encoding::BGRA8:
+    {
+      cv::Mat output;
+      cv::cvtColor(input, output, cv::COLOR_BGRA2BGR);
+      return output;
+    }
+    case CameraBase::Encoding::RGBA8:
+    {
+      cv::Mat output;
+      cv::cvtColor(input, output, cv::COLOR_RGBA2BGR);
+      return output;
+    }
+    default:
+      return input.clone();
+  }
+}
+
+void ArmorTracker::PushGimbalRotationSample(LibXR::MicrosecondTimestamp timestamp,
+                                            const LibXR::Quaternion<double>& rotation)
+{
+  LibXR::Mutex::LockGuard lock(gimbal_rotation_lock_);
+
+  const uint64_t TIMESTAMP_US = static_cast<uint64_t>(timestamp);
+  if (!gimbal_rotation_history_.empty())
+  {
+    const uint64_t LAST_TIMESTAMP_US =
+        static_cast<uint64_t>(gimbal_rotation_history_.back().timestamp);
+    if (TIMESTAMP_US < LAST_TIMESTAMP_US)
+    {
+      gimbal_rotation_history_.clear();
+    }
+    else if (TIMESTAMP_US == LAST_TIMESTAMP_US)
+    {
+      gimbal_rotation_history_.pop_back();
     }
   }
 
-  InitEKF(rt_.tracked_armor);
-  XR_LOG_DEBUG("Init EKF!");
+  gimbal_rotation_history_.push_back({timestamp, rotation});
+  while (gimbal_rotation_history_.size() > MAX_GIMBAL_ROTATION_HISTORY_SIZE)
+  {
+    gimbal_rotation_history_.pop_front();
+  }
+  while (gimbal_rotation_history_.size() > 1U)
+  {
+    const double history_span_s =
+        TrackerMath::DeltaTime(gimbal_rotation_history_.back().timestamp,
+                               gimbal_rotation_history_.front().timestamp);
+    if (history_span_s <= MAX_GIMBAL_ROTATION_HISTORY_S)
+    {
+      break;
+    }
+    gimbal_rotation_history_.pop_front();
+  }
 
-  rt_.tracked_id = rt_.tracked_armor.number;
-  rt_.state = State::DETECTING;
-  UpdateArmorsNum(rt_.tracked_armor);
+  gimbal_rotation_ = rotation;
+  has_gimbal_rotation_ = true;
 }
 
-void ArmorTracker::Update(const ArmorDetectorResults& armors_msg)
+bool ArmorTracker::QueryGimbalRotationAt(LibXR::MicrosecondTimestamp timestamp,
+                                         LibXR::Quaternion<double>& rotation) const
 {
-  Eigen::VectorXd ekf_prediction = ekf_.ekf.Predict();  // 预测
-  XR_LOG_DEBUG("EKF predict");
-  bool matched = false;
-  ekf_.state = ekf_prediction;
-
-  if (!armors_msg.empty())
+  LibXR::Mutex::LockGuard lock(gimbal_rotation_lock_);
+  if (!has_gimbal_rotation_)
   {
-    ArmorDetectorResult same_id_armor{};
-    int same_id_armors_count = 0;
-    auto predicted_position = GetArmorPositionFromState(ekf_prediction);
+    return false;
+  }
 
-    double min_position_diff = DBL_MAX;
-    double yaw_diff = DBL_MAX;
+  if (gimbal_rotation_history_.empty() || static_cast<uint64_t>(timestamp) == 0U)
+  {
+    rotation = gimbal_rotation_;
+    return true;
+  }
 
-    for (const auto& armor : armors_msg)
-    {
-      if (armor.number == rt_.tracked_id)
+  auto upper_it = std::lower_bound(
+      gimbal_rotation_history_.begin(), gimbal_rotation_history_.end(), timestamp,
+      [](const TimedGimbalRotation& sample, const LibXR::MicrosecondTimestamp& target)
       {
-        same_id_armor = armor;
-        same_id_armors_count++;
+        return static_cast<uint64_t>(sample.timestamp) < static_cast<uint64_t>(target);
+      });
 
-        auto p = armor.pose.translation;
-        Eigen::Vector3d position_vec(p.x(), p.y(), p.z());
-        double position_diff = (predicted_position - position_vec).norm();
+  if (upper_it == gimbal_rotation_history_.begin())
+  {
+    rotation = upper_it->rotation;
+    return true;
+  }
 
-        if (position_diff < min_position_diff)
+  if (upper_it == gimbal_rotation_history_.end())
+  {
+    rotation = gimbal_rotation_history_.back().rotation;
+    return true;
+  }
+
+  const auto& NEXT_SAMPLE = *upper_it;
+  const auto& PREV_SAMPLE = *(upper_it - 1);
+  const double DT_S = TrackerMath::DeltaTime(NEXT_SAMPLE.timestamp, PREV_SAMPLE.timestamp);
+  if (DT_S <= 1e-6)
+  {
+    rotation = NEXT_SAMPLE.rotation;
+    return true;
+  }
+
+  const double INTERP_ALPHA =
+      TrackerMath::DeltaTime(timestamp, PREV_SAMPLE.timestamp) / DT_S;
+  rotation = slerp_quaternion(PREV_SAMPLE.rotation, NEXT_SAMPLE.rotation,
+                              INTERP_ALPHA);
+  return true;
+}
+
+void ArmorTracker::ArmorsCallback(ArmorDetectionsMessage& armors_msg)
+{
+  const auto start_time = std::chrono::steady_clock::now();
+  const uint64_t FRAME_TIMESTAMP_VALUE =
+      armors_msg.image_timestamp_us == 0U
+          ? static_cast<uint64_t>(LibXR::Timebase::GetMicroseconds())
+          : armors_msg.image_timestamp_us;
+  const LibXR::MicrosecondTimestamp FRAME_TIMESTAMP(FRAME_TIMESTAMP_VALUE);
+
+  if (state_ != State::LOST &&
+      static_cast<uint64_t>(last_timestamp_) != 0U &&
+      TrackerMath::DeltaTime(FRAME_TIMESTAMP, last_timestamp_) > MAX_TRACKER_DT_S)
+  {
+    XR_LOG_WARN("ArmorTracker reset because dt exceeded %.3f s", MAX_TRACKER_DT_S);
+    ++reset_count_;
+    state_ = State::LOST;
+    detect_count_ = 0;
+    temp_lost_count_ = 0;
+    tracked_id_ = ArmorNumber::INVALID;
+  }
+
+  LibXR::Quaternion<double> frame_gimbal_rotation{};
+  if (!QueryGimbalRotationAt(FRAME_TIMESTAMP, frame_gimbal_rotation))
+  {
+    XR_LOG_WARN("ArmorTracker skipped frame because gimbal rotation is unavailable");
+    return;
+  }
+
+  auto observations = BuildObservations(armors_msg, frame_gimbal_rotation);
+  SortObservations(observations);
+
+  bool found = false;
+  if (state_ == State::LOST)
+  {
+    found = SetTarget(observations, FRAME_TIMESTAMP);
+  }
+  else
+  {
+    found = UpdateTarget(observations, FRAME_TIMESTAMP);
+  }
+
+  StateMachine(found);
+
+  if (state_ != State::LOST && target_.Diverged())
+  {
+    XR_LOG_WARN("ArmorTracker reset because target diverged");
+    ++reset_count_;
+    state_ = State::LOST;
+    tracked_id_ = ArmorNumber::INVALID;
+  }
+
+  if (state_ != State::LOST)
+  {
+    const int recent_nis_failures = std::accumulate(
+        target_.GetEkf().recent_nis_failures.begin(),
+        target_.GetEkf().recent_nis_failures.end(), 0);
+    if (recent_nis_failures >=
+        static_cast<int>(BAD_CONVERGENCE_RATIO * target_.GetEkf().window_size))
+    {
+      XR_LOG_WARN("ArmorTracker reset because convergence degraded");
+      ++reset_count_;
+      state_ = State::LOST;
+      tracked_id_ = ArmorNumber::INVALID;
+    }
+  }
+
+  const double tracker_latency_ms =
+      std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
+                                                start_time)
+          .count();
+  uint32_t projection_sample_count = 0U;
+  double prediction_center_error_px = 0.0;
+  double prediction_corner_error_px = 0.0;
+  EvaluateProjectionMetrics(observations, frame_gimbal_rotation,
+                            projection_sample_count,
+                            prediction_center_error_px,
+                            prediction_corner_error_px);
+  PublishOutputs(observations.size(), found ? 1U : 0U, tracker_latency_ms,
+                 projection_sample_count, prediction_center_error_px,
+                 prediction_corner_error_px);
+  if (ShouldShowPreview())
+  {
+    ShowDebugPreview(armors_msg, observations, found ? 1U : 0U,
+                     frame_gimbal_rotation);
+  }
+  last_timestamp_ = FRAME_TIMESTAMP;
+}
+
+std::vector<TrackedArmorObservation> ArmorTracker::BuildObservations(
+    const ArmorDetectionsMessage& armors_msg,
+    const LibXR::Quaternion<double>& frame_gimbal_rotation) const
+{
+  std::vector<TrackedArmorObservation> observations;
+  observations.reserve(armors_msg.results.size());
+
+  std::shared_ptr<CameraBase::CameraInfo> camera_info;
+  {
+    LibXR::Mutex::LockGuard lock(preview_frame_lock_);
+    camera_info = camera_info_;
+  }
+  const PreviewProjector YAW_PROJECTOR =
+      build_preview_projector(camera_info, frame_gimbal_rotation,
+                              camera_to_gimbal_transform_static_);
+
+  const LibXR::Transform<double> world_to_gimbal(frame_gimbal_rotation, {0.0, 0.0, 0.0});
+  for (const auto& armor : armors_msg.results)
+  {
+    const auto& pose = armor.pose;
+    if (std::abs(pose.translation.x()) < 1e-6 && std::abs(pose.translation.y()) < 1e-6 &&
+        std::abs(pose.translation.z()) < 1e-6)
+    {
+      continue;
+    }
+
+    const LibXR::Transform<double> world_pose =
+        world_to_gimbal + camera_to_gimbal_transform_static_ + pose;
+    const Eigen::Vector3d xyz_in_world(world_pose.translation.x(),
+                                       world_pose.translation.y(),
+                                       world_pose.translation.z());
+
+    if (std::abs(xyz_in_world.z()) > cfg_.limits.max_z_position ||
+        xyz_in_world.head<2>().norm() > cfg_.limits.max_armor_distance)
+    {
+      continue;
+    }
+
+    const auto euler = world_pose.rotation.ToEulerAngleZYX();
+    const double RAW_YAW = GetArmorWorldYaw(world_pose.rotation);
+    const double OPTIMIZED_YAW =
+        optimize_observation_yaw(YAW_PROJECTOR, armor, xyz_in_world,
+                                 frame_gimbal_rotation, RAW_YAW);
+
+    TrackedArmorObservation observation;
+    observation.result = armor;
+    observation.result.pose = world_pose;
+    observation.xyz_in_world = xyz_in_world;
+    observation.ypr_in_world = Eigen::Vector3d(OPTIMIZED_YAW, euler[1], euler[0]);
+    observation.ypd_in_world = TrackerMath::XyzToYpd(observation.xyz_in_world);
+    observation.raw_yaw_in_world = RAW_YAW;
+    observation.yaw_optimization_delta =
+        TrackerMath::LimitRad(OPTIMIZED_YAW - RAW_YAW);
+    observations.emplace_back(std::move(observation));
+  }
+
+  return observations;
+}
+
+void ArmorTracker::SortObservations(std::vector<TrackedArmorObservation>& armors) const
+{
+  std::stable_sort(
+      armors.begin(), armors.end(),
+      [](const TrackedArmorObservation& lhs, const TrackedArmorObservation& rhs)
+      {
+        return lhs.result.distance_to_image_center < rhs.result.distance_to_image_center;
+      });
+
+  std::stable_sort(
+      armors.begin(), armors.end(),
+      [](const TrackedArmorObservation& lhs, const TrackedArmorObservation& rhs)
+      {
+        return static_cast<int>(lhs.result.priority) <
+               static_cast<int>(rhs.result.priority);
+      });
+}
+
+bool ArmorTracker::SetTarget(std::vector<TrackedArmorObservation>& armors,
+                             LibXR::MicrosecondTimestamp timestamp)
+{
+  if (armors.empty())
+  {
+    return false;
+  }
+
+  const TrackedArmorObservation& armor = armors.front();
+
+  Eigen::VectorXd p0_diag(11);
+  double radius = 0.2;
+  int armor_count = 4;
+
+  if (is_balance_armor(armor))
+  {
+    p0_diag << 1, 64, 1, 64, 1, 64, 0.4, 100, 1, 1, 1;
+  }
+  else if (armor.result.number == ArmorNumber::OUTPOST)
+  {
+    p0_diag << 1, 64, 1, 64, 1, 81, 0.4, 100, 1e-4, 0, 0;
+    radius = 0.2765;
+    armor_count = 3;
+  }
+  else if (armor.result.number == ArmorNumber::BASE)
+  {
+    p0_diag << 1, 64, 1, 64, 1, 64, 0.4, 100, 1e-4, 0, 0;
+    radius = 0.3205;
+    armor_count = 3;
+  }
+  else
+  {
+    p0_diag << 1, 64, 1, 64, 1, 64, 0.4, 100, 1, 1, 1;
+  }
+
+  target_ = Target(armor, timestamp, radius, armor_count, p0_diag);
+  tracked_id_ = armor.result.number;
+  return true;
+}
+
+bool ArmorTracker::UpdateTarget(std::vector<TrackedArmorObservation>& armors,
+                                LibXR::MicrosecondTimestamp timestamp)
+{
+  target_.Predict(timestamp);
+  target_.jumped = false;
+
+  int matched_count = 0;
+  for (const auto& armor : armors)
+  {
+    if (armor.result.number != tracked_id_ || armor.result.type != target_.armor_type)
+    {
+      continue;
+    }
+    ++matched_count;
+  }
+
+  if (matched_count == 0)
+  {
+    return false;
+  }
+
+  for (const auto& armor : armors)
+  {
+    if (armor.result.number != tracked_id_ || armor.result.type != target_.armor_type)
+    {
+      continue;
+    }
+    if (target_.Update(armor))
+    {
+      target_.jumped = true;
+    }
+  }
+  return true;
+}
+
+void ArmorTracker::StateMachine(bool found)
+{
+  if (state_ == State::LOST)
+  {
+    if (!found)
+    {
+      return;
+    }
+    state_ = State::DETECTING;
+    detect_count_ = 1;
+    temp_lost_count_ = 0;
+  }
+  else if (state_ == State::DETECTING)
+  {
+    if (found)
+    {
+      ++detect_count_;
+      if (detect_count_ >= cfg_.thresholds.min_detect_count)
+      {
+        state_ = State::TRACKING;
+      }
+    }
+    else
+    {
+      detect_count_ = 0;
+      state_ = State::LOST;
+      tracked_id_ = ArmorNumber::INVALID;
+    }
+  }
+  else if (state_ == State::TRACKING)
+  {
+    if (!found)
+    {
+      temp_lost_count_ = 1;
+      state_ = State::TEMP_LOST;
+    }
+  }
+  else if (state_ == State::TEMP_LOST)
+  {
+    if (found)
+    {
+      temp_lost_count_ = 0;
+      state_ = State::TRACKING;
+    }
+    else
+    {
+      ++temp_lost_count_;
+      const int max_temp_lost_count =
+          (tracked_id_ == ArmorNumber::OUTPOST)
+              ? cfg_.thresholds.outpost_max_temp_lost_count
+              : cfg_.thresholds.max_temp_lost_count;
+      if (temp_lost_count_ > max_temp_lost_count)
+      {
+        temp_lost_count_ = 0;
+        state_ = State::LOST;
+        tracked_id_ = ArmorNumber::INVALID;
+      }
+    }
+  }
+}
+
+void ArmorTracker::PublishOutputs(std::size_t input_armor_count,
+                                  std::size_t matched_armor_count,
+                                  double tracker_latency_ms,
+                                  uint32_t projection_sample_count,
+                                  double prediction_center_error_px,
+                                  double prediction_corner_error_px)
+{
+  ++frame_index_;
+
+  info_msg_ = {};
+  target_msg_ = {};
+
+  metrics_msg_.frame_index = frame_index_;
+  metrics_msg_.input_armor_count = static_cast<uint32_t>(input_armor_count);
+  metrics_msg_.matched_armor_count = static_cast<uint32_t>(matched_armor_count);
+  metrics_msg_.projection_sample_count = projection_sample_count;
+  metrics_msg_.state = static_cast<uint32_t>(state_);
+  metrics_msg_.reset_count = reset_count_;
+  metrics_msg_.tracking =
+      (state_ == State::TRACKING || state_ == State::TEMP_LOST);
+  metrics_msg_.tracked_id = tracked_id_;
+  metrics_msg_.tracker_latency_ms = tracker_latency_ms;
+  metrics_msg_.prediction_center_error_px = prediction_center_error_px;
+  metrics_msg_.prediction_corner_error_px = prediction_corner_error_px;
+
+  if (state_ != State::LOST)
+  {
+    const auto& state = target_.GetState();
+    info_msg_.position_diff = target_.GetEkf().data.at("residual_distance");
+    info_msg_.yaw_diff = target_.GetEkf().data.at("residual_angle");
+    info_msg_.position.x() = state[0];
+    info_msg_.position.y() = state[2];
+    info_msg_.position.z() = state[4];
+    info_msg_.yaw = state[6];
+
+    metrics_msg_.last_nis = target_.GetEkf().last_nis;
+    metrics_msg_.recent_nis_failure_rate =
+        target_.GetEkf().data.at("recent_nis_failures");
+  }
+
+  if (state_ == State::TRACKING || state_ == State::TEMP_LOST)
+  {
+    const auto& state = target_.GetState();
+    target_msg_.tracking = true;
+    target_msg_.id = tracked_id_;
+    target_msg_.armor_type = target_.armor_type;
+    target_msg_.armors_num = target_.GetArmorCount();
+    target_msg_.jumped = target_.jumped;
+    target_msg_.position.x() = state[0];
+    target_msg_.velocity.x() = state[1];
+    target_msg_.position.y() = state[2];
+    target_msg_.velocity.y() = state[3];
+    target_msg_.position.z() = state[4];
+    target_msg_.velocity.z() = state[5];
+    target_msg_.yaw = state[6];
+    target_msg_.v_yaw = state[7];
+    target_msg_.radius_1 = state[8];
+    target_msg_.radius_2 = state[8] + state[9];
+    target_msg_.dz = state[10];
+  }
+
+  info_topic_.Publish(info_msg_);
+  metrics_topic_.Publish(metrics_msg_);
+  target_topic_.Publish(target_msg_);
+
+  if ((frame_index_ % 30U) == 0U)
+  {
+    XR_LOG_INFO(
+        "ArmorTracker frame=%llu state=%d tracked=%d latency_ms=%.2f nis=%.3f pred_center_px=%.2f pred_corner_px=%.2f samples=%u",
+        static_cast<unsigned long long>(frame_index_),
+        static_cast<int>(state_), static_cast<int>(tracked_id_),
+        metrics_msg_.tracker_latency_ms, metrics_msg_.last_nis,
+        metrics_msg_.prediction_center_error_px,
+        metrics_msg_.prediction_corner_error_px,
+        metrics_msg_.projection_sample_count);
+  }
+}
+
+void ArmorTracker::EvaluateProjectionMetrics(
+    const std::vector<TrackedArmorObservation>& observations,
+    const LibXR::Quaternion<double>& frame_gimbal_rotation,
+    uint32_t& projection_sample_count, double& prediction_center_error_px,
+    double& prediction_corner_error_px) const
+{
+  projection_sample_count = 0U;
+  prediction_center_error_px = 0.0;
+  prediction_corner_error_px = 0.0;
+
+  if (state_ == State::LOST || tracked_id_ == ArmorNumber::INVALID || observations.empty())
+  {
+    return;
+  }
+
+  std::shared_ptr<CameraBase::CameraInfo> camera_info;
+  {
+    LibXR::Mutex::LockGuard lock(preview_frame_lock_);
+    camera_info = camera_info_;
+  }
+  if (camera_info == nullptr)
+  {
+    return;
+  }
+
+  const PreviewProjector projector =
+      build_preview_projector(camera_info, frame_gimbal_rotation,
+                              camera_to_gimbal_transform_static_);
+  if (!projector.valid)
+  {
+    return;
+  }
+
+  std::vector<ProjectedArmorCandidate> predicted_candidates;
+  const auto predicted_armors = target_.GetArmorXYZAList();
+  predicted_candidates.reserve(predicted_armors.size());
+
+  for (const auto& predicted_armor : predicted_armors)
+  {
+    std::array<cv::Point, 4> projected_quad{};
+        const auto predicted_corners =
+            build_predicted_armor_corners(predicted_armor, target_.armor_type, tracked_id_);
+        if (!project_predicted_armor_quad(projector, predicted_corners, projected_quad))
         {
-          min_position_diff = position_diff;
-          yaw_diff = std::abs(OrientationToYaw(armor.pose.rotation) - ekf_prediction(6));
-          rt_.tracked_armor = armor;
+          continue;
+    }
+
+    predicted_candidates.push_back({quad_center(projected_quad), projected_quad});
+  }
+
+  if (predicted_candidates.empty())
+  {
+    return;
+  }
+
+  double center_error_sum_px = 0.0;
+  double corner_error_sum_px = 0.0;
+  for (const auto& observation : observations)
+  {
+    if (observation.result.number != tracked_id_ ||
+        observation.result.type != target_.armor_type)
+    {
+      continue;
+    }
+
+    double best_center_error_px = std::numeric_limits<double>::max();
+    double best_corner_error_px = std::numeric_limits<double>::max();
+    for (const auto& candidate : predicted_candidates)
+    {
+      const double center_error_px =
+          cv::norm(observation.result.center - candidate.center);
+      if (center_error_px >= best_center_error_px)
+      {
+        continue;
+      }
+
+      best_center_error_px = center_error_px;
+      best_corner_error_px =
+          quad_rms_error_px(candidate.quad, observation.result.points);
+    }
+
+    if (!std::isfinite(best_center_error_px) || !std::isfinite(best_corner_error_px))
+    {
+      continue;
+    }
+
+    center_error_sum_px += best_center_error_px;
+    corner_error_sum_px += best_corner_error_px;
+    ++projection_sample_count;
+  }
+
+  if (projection_sample_count == 0U)
+  {
+    return;
+  }
+
+  prediction_center_error_px =
+      center_error_sum_px / static_cast<double>(projection_sample_count);
+  prediction_corner_error_px =
+      corner_error_sum_px / static_cast<double>(projection_sample_count);
+}
+
+void ArmorTracker::ShowDebugPreview(
+    const ArmorDetectionsMessage& armors_msg,
+    const std::vector<TrackedArmorObservation>& observations,
+    std::size_t matched_armor_count,
+    const LibXR::Quaternion<double>& frame_gimbal_rotation)
+{
+  try
+  {
+    cv::Mat frame;
+    std::shared_ptr<CameraBase::CameraInfo> camera_info;
+    {
+      LibXR::Mutex::LockGuard lock(preview_frame_lock_);
+      if (!latest_frame_.empty())
+      {
+        frame = latest_frame_.clone();
+      }
+      camera_info = camera_info_;
+    }
+
+    if (frame.empty())
+    {
+      frame = cv::Mat(720, 1280, CV_8UC3, cv::Scalar(20, 24, 30));
+      cv::putText(frame, "No image frame yet", cv::Point(40, 80),
+                  cv::FONT_HERSHEY_DUPLEX, 1.0, cv::Scalar(220, 224, 230), 1,
+                  cv::LINE_AA);
+    }
+
+    cv::Mat canvas(frame.rows, frame.cols + INFO_PANEL_WIDTH, CV_8UC3,
+                   cv::Scalar(18, 22, 28));
+    frame.copyTo(canvas(cv::Rect(0, 0, frame.cols, frame.rows)));
+
+    cv::Mat header = canvas(cv::Rect(0, 0, frame.cols, 58));
+    cv::Mat header_overlay = header.clone();
+    cv::rectangle(header_overlay, cv::Rect(0, 0, header.cols, header.rows),
+                  cv::Scalar(10, 16, 22), cv::FILLED);
+    cv::addWeighted(header_overlay, HEADER_BAR_ALPHA, header, 1.0 - HEADER_BAR_ALPHA, 0.0,
+                    header);
+
+    cv::putText(canvas, "ArmorTracker Preview", cv::Point(18, 36),
+                cv::FONT_HERSHEY_DUPLEX, 0.88, cv::Scalar(240, 244, 250), 1,
+                cv::LINE_AA);
+    cv::putText(canvas, "state machine + EKF + aim command", cv::Point(18, 56),
+                cv::FONT_HERSHEY_DUPLEX, 0.50, cv::Scalar(151, 170, 192), 1,
+                cv::LINE_AA);
+    draw_state_chip(canvas, state_to_string(state_), cv::Point(18, 92),
+                    state_to_color(state_));
+
+    if (cfg_.debug.draw_candidates)
+    {
+      for (const auto& armor : armors_msg.results)
+      {
+        const bool tracked_candidate =
+            (state_ != State::LOST && armor.number == tracked_id_);
+        const cv::Scalar armor_color =
+            tracked_candidate ? state_to_color(State::TRACKING)
+                              : armor_color_to_scalar(armor.color);
+
+        std::array<cv::Point, 4> polygon{};
+        for (std::size_t point_index = 0; point_index < armor.points.size(); ++point_index)
+        {
+          polygon[point_index] = armor.points[point_index];
         }
+
+        const cv::Point* polygon_points = polygon.data();
+        const int polygon_size = static_cast<int>(polygon.size());
+        cv::polylines(canvas, &polygon_points, &polygon_size, 1, true, armor_color,
+                      tracked_candidate ? 3 : 2, cv::LINE_AA);
+        cv::rectangle(canvas, armor.box, armor_color, tracked_candidate ? 2 : 1,
+                      cv::LINE_AA);
+        cv::circle(canvas, armor.center, 4, armor_color, cv::FILLED, cv::LINE_AA);
+
+        std::ostringstream label;
+        if (tracked_candidate)
+        {
+          label << "TRACK ";
+        }
+        label << armor_number_to_string(armor.number) << " "
+              << format_value(armor.confidence, 2);
+        cv::putText(canvas, label.str(),
+                    cv::Point(std::max(armor.box.x, 8),
+                              std::max(armor.box.y - 8, 118)),
+                    cv::FONT_HERSHEY_DUPLEX, 0.52, armor_color, 1, cv::LINE_AA);
       }
     }
 
-    // 存储信息
-    rt_.info_position_diff = min_position_diff;
-    rt_.info_yaw_diff = yaw_diff;
-
-    // 判定匹配
-    if (min_position_diff < cfg_.match.max_match_distance &&
-        yaw_diff < cfg_.match.max_match_yaw_diff)
+    std::size_t predicted_visible_count = 0U;
+    if (state_ != State::LOST)
     {
-      matched = true;
-      auto p = rt_.tracked_armor.pose.translation;
-      double measured_yaw = OrientationToYaw(rt_.tracked_armor.pose.rotation);
-      ekf_.measurement = Eigen::Vector4d(p.x(), p.y(), p.z(), measured_yaw);
-      ekf_.state = ekf_.ekf.Update(ekf_.measurement);
-      XR_LOG_DEBUG("EKF update");
-    }
-    else if (same_id_armors_count == 1 && yaw_diff > cfg_.match.max_match_yaw_diff)
-    {
-      HandleArmorJump(same_id_armor);
-    }
-    else
-    {
-      XR_LOG_INFO("No matched armor found!");
-    }
-  }
-
-  // 防止半径发散
-  if (ekf_.state(8) < 0.12)
-  {
-    ekf_.state(8) = 0.12;
-    ekf_.ekf.SetState(ekf_.state);
-  }
-  else if (ekf_.state(8) > 0.4)
-  {
-    ekf_.state(8) = 0.4;
-    ekf_.ekf.SetState(ekf_.state);
-  }
-
-  // 状态机
-  if (rt_.state == State::DETECTING)
-  {
-    if (matched)
-    {
-      rt_.detect_count++;
-      if (rt_.detect_count > rt_.tracking_thres)
+      const PreviewProjector projector = build_preview_projector(
+          camera_info, frame_gimbal_rotation, camera_to_gimbal_transform_static_);
+      if (projector.valid)
       {
-        rt_.detect_count = 0;
-        rt_.state = State::TRACKING;
-      }
-    }
-    else
-    {
-      rt_.detect_count = 0;
-      rt_.state = State::LOST;
-    }
-  }
-  else if (rt_.state == State::TRACKING)
-  {
-    if (!matched)
-    {
-      rt_.state = State::TEMP_LOST;
-      rt_.lost_count++;
-    }
-  }
-  else if (rt_.state == State::TEMP_LOST)
-  {
-    if (!matched)
-    {
-      rt_.lost_count++;
-      if (rt_.lost_count > rt_.lost_thres)
-      {
-        rt_.lost_count = 0;
-        rt_.state = State::LOST;
-      }
-    }
-    else
-    {
-      rt_.state = State::TRACKING;
-      rt_.lost_count = 0;
-    }
-  }
-}
+        const auto& state = target_.GetState();
+        const Eigen::Vector3d target_center_world(state[0], state[2], state[4]);
+        cv::Point2f projected_center_f(0.0F, 0.0F);
+        const bool center_visible =
+            projector.Project(target_center_world, projected_center_f);
+        const cv::Point projected_center(
+            cvRound(projected_center_f.x), cvRound(projected_center_f.y));
 
-void ArmorTracker::VelocityCallback(double velocity_msg)
-{
-  io_.solver->Init(velocity_msg);
-}
+        if (center_visible)
+        {
+          const cv::Rect center_box(projected_center.x - 7, projected_center.y - 7, 14, 14);
+          cv::rectangle(canvas, center_box, cv::Scalar(255, 122, 162), 2, cv::LINE_AA);
+          cv::putText(canvas, "EKF center",
+                      projected_center + cv::Point(10, -10),
+                      cv::FONT_HERSHEY_DUPLEX, 0.46, cv::Scalar(255, 182, 202), 1,
+                      cv::LINE_AA);
+        }
 
-void ArmorTracker::ArmorsCallback(ArmorDetectorResults& armors_msg)
-{
-  if (!armors_msg.empty())
-  {
-    XR_LOG_INFO("Got %d armors", static_cast<int>(armors_msg.size()));
-  }
-
-  // 图像坐标 -> 世界坐标
-  // gimbal +X  = camera +Z
-  // gimbal +Y  = camera -X
-  // gimbal +Z  = camera -Y
-  io_.gimbal_rotation_lock.Lock();
-  for (auto& armor : armors_msg)
-  {
-    LibXR::Transform<double> tf = armor.pose;
-    armor.pose = LibXR::Transform<double>(io_.gimbal_rotation, {0.0, 0.0, 0.0}) +
-                 io_.gimbal_to_camera_transform_static + tf;
-  }
-  io_.gimbal_rotation_lock.Unlock();
-
-  // 过滤异常装甲
-  armors_msg.erase(
-      std::remove_if(
-          armors_msg.begin(), armors_msg.end(),
-          [this](const ArmorDetectorResult& armor)
+        const auto predicted_armors = target_.GetArmorXYZAList();
+        for (std::size_t armor_index = 0; armor_index < predicted_armors.size();
+             ++armor_index)
+        {
+          cv::Point2f projected_armor_f;
+          if (!projector.Project(predicted_armors[armor_index].head<3>(),
+                                 projected_armor_f))
           {
-            return std::abs(armor.pose.translation.z()) > cfg_.limits.max_z_position ||
-                   Eigen::Vector2d(armor.pose.translation.x(), armor.pose.translation.y())
-                           .norm() > cfg_.limits.max_armor_distance;
-          }),
-      armors_msg.end());
+            continue;
+          }
 
-  // 构造消息
-  TrackerInfo info_msg{};
-  SolveTrajectory::Target target_msg{};
-  LibXR::EulerAngle<float> target_eulr;
-  Send send_msg{};
-  target_msg.id = ArmorNumber::INVALID;
+          const cv::Point projected_armor(
+              cvRound(projected_armor_f.x), cvRound(projected_armor_f.y));
+          const bool is_primary_armor = (armor_index == 0U);
+          const cv::Scalar overlay_color =
+              is_primary_armor ? cv::Scalar(74, 226, 255)
+                               : cv::Scalar(197, 139, 255);
 
-  auto time = LibXR::Timebase::GetMicroseconds();
+          std::array<cv::Point, 4> projected_quad{};
+          const auto predicted_corners = build_predicted_armor_corners(
+              predicted_armors[armor_index], target_.armor_type, tracked_id_);
+          if (!project_predicted_armor_quad(projector, predicted_corners, projected_quad))
+          {
+            continue;
+          }
 
-  // 跟踪更新
-  if (rt_.state == State::LOST)
-  {
-    Init(armors_msg);
-    target_msg.tracking = false;
-  }
-  else
-  {
-    // dt
-    time_.dt = (time - time_.last_time).ToSecond();
-    if (time_.dt <= 0)
-    {
-      time_.dt = 1.0 / 100.0;
-    }
-    rt_.lost_thres = static_cast<int>(cfg_.thresholds.lost_time_thres / time_.dt);
-    if (rt_.lost_thres < 1)
-    {
-      rt_.lost_thres = 1;
-    }
+          ++predicted_visible_count;
+          const cv::Scalar fill_color =
+              is_primary_armor ? cv::Scalar(26, 110, 125)
+                               : cv::Scalar(86, 58, 117);
+          draw_projected_armor_quad(canvas, projected_quad, overlay_color, fill_color,
+                                    is_primary_armor ? 2 : 1);
 
-    Update(armors_msg);
-
-    // 发布 Info
-    info_msg.position_diff = rt_.info_position_diff;
-    info_msg.yaw_diff = rt_.info_yaw_diff;
-    info_msg.position.x() = ekf_.measurement(0);
-    info_msg.position.y() = ekf_.measurement(1);
-    info_msg.position.z() = ekf_.measurement(2);
-    info_msg.yaw = ekf_.measurement(3);
-    io_.info_topic.Publish(info_msg);
-
-    if (rt_.state == State::DETECTING)
-    {
-      target_msg.tracking = false;
-    }
-    else if (rt_.state == State::TRACKING || rt_.state == State::TEMP_LOST)
-    {
-      target_msg.tracking = true;
-      const auto& state = ekf_.state;
-      target_msg.id = rt_.tracked_id;
-      target_msg.armors_num = static_cast<int>(rt_.tracked_armors_num);
-      target_msg.position.x() = state(0);
-      target_msg.velocity.x() = state(1);
-      target_msg.position.y() = state(2);
-      target_msg.velocity.y() = state(3);
-      target_msg.position.z() = state(4);
-      target_msg.velocity.z() = state(5);
-      target_msg.yaw = state(6);
-      target_msg.v_yaw = state(7);
-      target_msg.radius_1 = state(8);
-      target_msg.radius_2 = rt_.another_r;
-      target_msg.dz = rt_.dz;
-
-      XR_LOG_INFO(
-          "Target position: (%.3f, %.3f, %.3f) velocity: (%.3f, %.3f, "
-          "%.3f) yaw: %.3f "
-          "v_yaw: %.3f radius_1: %.3f radius_2: %.3f dz: %.3f",
-          target_msg.position.x(), target_msg.position.y(), target_msg.position.z(),
-          target_msg.velocity.x(), target_msg.velocity.y(), target_msg.velocity.z(),
-          target_msg.yaw, target_msg.v_yaw, target_msg.radius_1, target_msg.radius_2,
-          target_msg.dz);
-
-      float pitch = 0, yaw = 0, aim_x = 0, aim_y = 0, aim_z = 0;
-      io_.solver->AutoSolveTrajectory(pitch, yaw, aim_x, aim_y, aim_z, &target_msg);
-
-      XR_LOG_INFO(
-          "AutoSolveTrajectory: pitch: %.3f yaw: %.3f aim_x: %.3f "
-          "aim_y: %.3f aim_z: "
-          "%.3f",
-          pitch, yaw, aim_x, aim_y, aim_z);
-
-      target_eulr.Pitch() = pitch;
-      target_eulr.Yaw() = yaw;
-
-#if defined(AUTO_AIM_PREVIEW_IMAGE) && AUTO_AIM_PREVIEW_IMAGE
-      Eigen::Vector3d pw_center, pw_armors[4];
-      {
-        const auto& st = ekf_.state;  // [xc,vxc,yc,vyc,za,vza,yaw,vyaw,r1]
-        const double XC = st(0), YC = st(2), ZA = st(4);
-        const double YAW = st(6);
-        const double R1 = st(8);
-        const double R2 = rt_.another_r;  // 另一半径（交替用）
-        const int N = static_cast<int>(rt_.tracked_armors_num);
-
-        pw_center = {XC, YC, ZA};
-        for (int i = 0; i < 4; ++i)
-        {
-          const double THETA = YAW + (2.0 * M_PI / std::max(1, N)) * i;
-          const double R = (i % 2 == 0 ? R1 : R2);
-          const double XA = XC - R * std::cos(THETA);
-          const double YA = YC - R * std::sin(THETA);
-          pw_armors[i] = {XA, YA, ZA};
+          std::ostringstream projected_label;
+          projected_label << "P" << armor_index;
+          if (is_primary_armor)
+          {
+            projected_label << " main";
+          }
+          cv::Point label_anchor = projected_armor + cv::Point(10, -8);
+          label_anchor.x = std::max(label_anchor.x, 8);
+          label_anchor.y = std::max(label_anchor.y, 118);
+          cv::putText(canvas, projected_label.str(),
+                      label_anchor,
+                      cv::FONT_HERSHEY_DUPLEX, 0.48, overlay_color, 1, cv::LINE_AA);
         }
       }
-
-      // === 计算 相机←世界 外参：T_CW = (T_WG ⊕ T_GC)^-1 ===
-      LibXR::Transform<double> t_wg(io_.gimbal_rotation, {0.0, 0.0, 0.0});  // 世界←云台
-      LibXR::Transform<double> t_wc =
-          t_wg + io_.gimbal_to_camera_transform_static;  // 世界←相机
-      auto r_wc = t_wc.rotation.ToRotationMatrix();
-      Eigen::Matrix3d r_cw = r_wc.transpose();  // 相机←世界 旋转
-      Eigen::Vector3d twc(t_wc.translation.x(), t_wc.translation.y(),
-                          t_wc.translation.z());
-
-      // === 变到相机系并发布 ===
-      ekf_msg_.count = static_cast<uint8_t>(rt_.tracked_armors_num);
-
-      auto to_cam = [&](const Eigen::Vector3d& pw,
-                        LibXR::Position<double>& out_pt) -> bool
-      {
-        Eigen::Vector3d pc = r_cw * (pw - twc);
-        out_pt = LibXR::Position<double>{pc.x(), pc.y(), pc.z()};
-        return pc.z() > 1e-6;  // 在相机前方才算可见
-      };
-
-      // center
-      ekf_msg_.valid[0] = to_cam(pw_center, ekf_msg_.center_cam);
-
-      // armors
-      for (int i = 0; i < 4; ++i)
-      {
-        ekf_msg_.valid[i + 1] = to_cam(pw_armors[i], ekf_msg_.armors_cam[i]);
-      }
-#endif
-      send_msg.position.x() = aim_x;
-      send_msg.position.y() = aim_y;
-      send_msg.position.z() = aim_z;
-      send_msg.v_yaw = target_msg.v_yaw;
-      send_msg.pitch = pitch;
-      send_msg.yaw = yaw;
     }
-  }
 
-  time_.last_time = time;
+    const cv::Point image_center(frame.cols / 2, frame.rows / 2);
+    cv::drawMarker(canvas, image_center, cv::Scalar(80, 92, 110), cv::MARKER_CROSS, 22, 1,
+                   cv::LINE_AA);
 
-  io_.target_eulr_topic.Publish(target_eulr);
-  io_.target_topic.Publish(target_msg);
-}
+    const int panel_x = frame.cols + 18;
+    int panel_y = 42;
 
-void ArmorTracker::InitEKF(const ArmorDetectorResult& a)
-{
-  double xa = a.pose.translation.x();
-  double ya = a.pose.translation.y();
-  double za = a.pose.translation.z();
-  rt_.last_yaw = 0;
-  double yaw = OrientationToYaw(a.pose.rotation);
+    cv::putText(canvas, "Tracker State", cv::Point(panel_x, panel_y),
+                cv::FONT_HERSHEY_DUPLEX, 0.74, cv::Scalar(243, 246, 250), 1,
+                cv::LINE_AA);
+    panel_y += 28;
+    draw_info_row(canvas, panel_x, panel_y, "state", state_to_string(state_),
+                  state_to_color(state_));
+    panel_y += 24;
+    draw_info_row(canvas, panel_x, panel_y, "tracked_id",
+                  armor_number_to_string(tracked_id_),
+                  tracked_id_ == ArmorNumber::INVALID ? cv::Scalar(151, 170, 192)
+                                                      : cv::Scalar(240, 244, 250));
+    panel_y += 24;
+    draw_info_row(canvas, panel_x, panel_y, "input_armors",
+                  std::to_string(metrics_msg_.input_armor_count),
+                  cv::Scalar(255, 214, 102));
+    panel_y += 24;
+    draw_info_row(canvas, panel_x, panel_y, "matched_armors",
+                  std::to_string(matched_armor_count),
+                  matched_armor_count > 0U ? cv::Scalar(128, 226, 142)
+                                           : cv::Scalar(255, 166, 77));
+    panel_y += 24;
+    draw_info_row(canvas, panel_x, panel_y, "pred_armors",
+                  std::to_string(predicted_visible_count),
+                  predicted_visible_count > 0U ? cv::Scalar(74, 226, 255)
+                                               : cv::Scalar(151, 170, 192));
+    panel_y += 24;
+    draw_info_row(
+        canvas, panel_x, panel_y, "pred_center_px",
+        metrics_msg_.projection_sample_count > 0U
+            ? format_value(metrics_msg_.prediction_center_error_px, 1)
+            : "--",
+        metrics_msg_.projection_sample_count > 0U
+            ? prediction_error_to_color(metrics_msg_.prediction_center_error_px)
+            : cv::Scalar(151, 170, 192));
+    panel_y += 24;
+    draw_info_row(
+        canvas, panel_x, panel_y, "pred_corner_px",
+        metrics_msg_.projection_sample_count > 0U
+            ? format_value(metrics_msg_.prediction_corner_error_px, 1)
+            : "--",
+        metrics_msg_.projection_sample_count > 0U
+            ? prediction_error_to_color(metrics_msg_.prediction_corner_error_px)
+            : cv::Scalar(151, 170, 192));
+    panel_y += 24;
+    draw_info_row(canvas, panel_x, panel_y, "reset_count",
+                  std::to_string(metrics_msg_.reset_count),
+                  cv::Scalar(255, 166, 77));
+    panel_y += 24;
+    draw_info_row(canvas, panel_x, panel_y, "tracker_ms",
+                  format_value(metrics_msg_.tracker_latency_ms, 2),
+                  cv::Scalar(91, 196, 255));
+    panel_y += 24;
+    draw_info_row(canvas, panel_x, panel_y, "last_nis",
+                  format_value(metrics_msg_.last_nis, 3),
+                  metrics_msg_.last_nis > 9.488 ? cv::Scalar(255, 120, 120)
+                                                : cv::Scalar(128, 226, 142));
+    panel_y += 24;
+    draw_info_row(canvas, panel_x, panel_y, "nis_fail_rate",
+                  format_value(metrics_msg_.recent_nis_failure_rate, 3),
+                  metrics_msg_.recent_nis_failure_rate > BAD_CONVERGENCE_RATIO
+                      ? cv::Scalar(255, 120, 120)
+                      : cv::Scalar(240, 244, 250));
 
-  // 初始在目标后方 r=0.26 m
-  ekf_.state = Eigen::VectorXd::Zero(9);
-  double r = 0.26;
-  double xc = xa + r * std::cos(yaw);
-  double yc = ya + r * std::sin(yaw);
-  rt_.dz = 0;
-  rt_.another_r = r;
-  ekf_.state << xc, 0, yc, 0, za, 0, yaw, 0, r;
+    panel_y += 36;
+    cv::putText(canvas, "Tracker Flags", cv::Point(panel_x, panel_y),
+                cv::FONT_HERSHEY_DUPLEX, 0.74, cv::Scalar(243, 246, 250), 1,
+                cv::LINE_AA);
+    panel_y += 28;
+    draw_info_row(canvas, panel_x, panel_y, "jumped", target_.jumped ? "true" : "false",
+                  target_.jumped ? cv::Scalar(128, 226, 142)
+                                 : cv::Scalar(151, 170, 192));
+    panel_y += 24;
+    draw_info_row(canvas, panel_x, panel_y, "armor_type",
+                  target_.armor_type == ArmorType::LARGE ? "large" : "small",
+                  cv::Scalar(240, 244, 250));
+    panel_y += 24;
+    draw_info_row(canvas, panel_x, panel_y, "detect_count",
+                  std::to_string(detect_count_), cv::Scalar(240, 244, 250));
+    panel_y += 24;
+    draw_info_row(canvas, panel_x, panel_y, "temp_lost",
+                  std::to_string(temp_lost_count_), cv::Scalar(240, 244, 250));
 
-  ekf_.ekf.SetState(ekf_.state);
-}
+    panel_y += 36;
+    cv::putText(canvas, "Active Target", cv::Point(panel_x, panel_y),
+                cv::FONT_HERSHEY_DUPLEX, 0.74, cv::Scalar(243, 246, 250), 1,
+                cv::LINE_AA);
+    panel_y += 28;
 
-void ArmorTracker::UpdateArmorsNum(const ArmorDetectorResult&)
-{
-  if (rt_.tracked_id == ArmorNumber::OUTPOST)
-  {
-    rt_.tracked_armors_num = ArmorsNum::OUTPOST_3;
-  }
-  else
-  {
-    rt_.tracked_armors_num = ArmorsNum::NORMAL_4;
-  }
-}
-
-void ArmorTracker::HandleArmorJump(const ArmorDetectorResult& current_armor)
-{
-  double yaw = OrientationToYaw(current_armor.pose.rotation);
-  ekf_.state(6) = yaw;
-  UpdateArmorsNum(current_armor);
-
-  if (rt_.tracked_armors_num == ArmorsNum::NORMAL_4)
-  {
-    rt_.dz = ekf_.state(4) - current_armor.pose.translation.z();
-    ekf_.state(4) = current_armor.pose.translation.z();
-    std::swap(ekf_.state(8), rt_.another_r);
-  }
-  XR_LOG_WARN("Armor jump!");
-
-  // 大偏差则重置中心位置
-  auto p = current_armor.pose.translation;
-  Eigen::Vector3d current_p(p.x(), p.y(), p.z());
-  Eigen::Vector3d infer_p = GetArmorPositionFromState(ekf_.state);
-  if ((current_p - infer_p).norm() > cfg_.match.max_match_distance)
-  {
-    double r = ekf_.state(8);
-    ekf_.state(0) = p.x() + r * std::cos(yaw);  // xc
-    ekf_.state(1) = 0;
-    ekf_.state(2) = p.y() + r * std::sin(yaw);  // yc
-    ekf_.state(3) = 0;
-    ekf_.state(4) = p.z();  // za
-    ekf_.state(5) = 0;
-    XR_LOG_ERROR("Reset State!");
-  }
-
-  ekf_.ekf.SetState(ekf_.state);
-}
-
-double ArmorTracker::OrientationToYaw(const LibXR::Quaternion<double>& q)
-{
-  LibXR::EulerAngle<double> eulr =
-      LibXR::RotationMatrix<double>(q.ToRotationMatrix()).ToEulerAngle();
-  auto yaw = eulr.Yaw();
-  const double DELTA =
-      LibXR::CycleValue<double>(yaw) - LibXR::CycleValue<double>(rt_.last_yaw);
-  yaw = rt_.last_yaw + DELTA;
-  rt_.last_yaw = yaw;
-  return yaw;
-}
-
-Eigen::Vector3d ArmorTracker::GetArmorPositionFromState(const Eigen::VectorXd& x)
-{
-  double xc = x(0), yc = x(2), za = x(4);
-  double yaw = x(6), r = x(8);
-  double xa = xc - r * std::cos(yaw);
-  double ya = yc - r * std::sin(yaw);
-  return Eigen::Vector3d(xa, ya, za);
-}
-
-void ArmorTracker::SetConfig(const Config& cfg)
-{
-  if (cfg.thresholds.tracking_thres != rt_.tracking_thres)
-  {
-    rt_.tracking_thres = cfg.thresholds.tracking_thres;
-  }
-  cfg_ = cfg;
-  if (cfg.solver.bias_time != solver_cfg_.bias_time ||
-      cfg.solver.s_bias != solver_cfg_.s_bias || cfg.solver.z_bias != solver_cfg_.z_bias)
-  {
-    solver_cfg_ = cfg_.solver;
-    io_.solver->SetBiasTime(solver_cfg_.bias_time);
-    io_.solver->SetSBias(static_cast<float>(solver_cfg_.s_bias));
-    io_.solver->SetZBias(static_cast<float>(solver_cfg_.z_bias));
-  }
-}
-
-int ArmorTracker::CommandFun(ArmorTracker* self, int argc, char** argv)
-{
-  if (argc == 1)
-  {
-    LibXR::STDIO::Printf("ArmorTracker\n\n");
-    LibXR::STDIO::Printf("Usage\r\n");
-    LibXR::STDIO::Printf("  show\r\n");
-    LibXR::STDIO::Printf("  max_armor_distance <value>\r\n");
-    LibXR::STDIO::Printf("  max_z_position <value>\r\n");
-    LibXR::STDIO::Printf("  max_match_distance <value>\r\n");
-    LibXR::STDIO::Printf("  max_match_yaw_diff <value>\r\n");
-    LibXR::STDIO::Printf("  tracking_thres <value>\r\n");
-    LibXR::STDIO::Printf("  bias_time <value>\r\n");
-    LibXR::STDIO::Printf("  s_bias <value>\r\n");
-    LibXR::STDIO::Printf("  z_bias <value>\r\n");
-    LibXR::STDIO::Printf("  sigma2_q_xyz <value>\r\n");
-    LibXR::STDIO::Printf("  sigma2_q_yaw <value>\r\n");
-    LibXR::STDIO::Printf("  sigma2_q_r <value>\r\n");
-    LibXR::STDIO::Printf("  r_xyz_factor <value>\r\n");
-    LibXR::STDIO::Printf("  r_yaw <value>\r\n");
-    return 0;
-  }
-  else if (argc == 2)
-  {
-    std::string cmd = argv[1];
-    if (cmd == "show")
+    if (state_ == State::LOST)
     {
-      // clang-format off
-      LibXR::STDIO::Printf("name: ArmorTracker\r\n");
-      LibXR::STDIO::Printf("cfg:\r\n");
-      LibXR::STDIO::Printf("  limits:\r\n");
-      LibXR::STDIO::Printf("    max_armor_distance: %f\r\n", self->cfg_.limits.max_armor_distance);
-      LibXR::STDIO::Printf("    max_z_position: %f\r\n", self->cfg_.limits.max_z_position);
-      LibXR::STDIO::Printf("  match:\r\n");
-      LibXR::STDIO::Printf("    max_match_distance: %f\r\n", self->cfg_.match.max_match_distance);
-      LibXR::STDIO::Printf("    max_match_yaw_diff: %f\r\n", self->cfg_.match.max_match_yaw_diff);
-      LibXR::STDIO::Printf("  thresholds:\r\n");
-      LibXR::STDIO::Printf("    tracking_thres: %d\r\n", self->cfg_.thresholds.tracking_thres);
-      LibXR::STDIO::Printf("    lost_time_thres: %f\r\n", self->cfg_.thresholds.lost_time_thres);
-      LibXR::STDIO::Printf("  solver:\r\n");
-      LibXR::STDIO::Printf("    k: %f\r\n", self->cfg_.solver.k);
-      LibXR::STDIO::Printf("    bias_time: %d\r\n", self->cfg_.solver.bias_time);
-      LibXR::STDIO::Printf("    s_bias: %f\r\n", self->cfg_.solver.s_bias);
-      LibXR::STDIO::Printf("    z_bias: %f\r\n", self->cfg_.solver.z_bias);
-      LibXR::STDIO::Printf("    calculate_mode: %d\r\n", static_cast<int>(self->cfg_.solver.calculate_mode));
-      LibXR::STDIO::Printf("    table_config:\r\n");
-      LibXR::STDIO::Printf("      max_x: %f\r\n", self->cfg_.solver.table_config.max_x);
-      LibXR::STDIO::Printf("      min_x: %f\r\n", self->cfg_.solver.table_config.min_x);
-      LibXR::STDIO::Printf("      max_y: %f\r\n", self->cfg_.solver.table_config.max_y);
-      LibXR::STDIO::Printf("      min_y: %f\r\n", self->cfg_.solver.table_config.min_y);
-      LibXR::STDIO::Printf("      resolution: %f\r\n", self->cfg_.solver.table_config.resolution);  
-      LibXR::STDIO::Printf("      filename: %s\r\n", self->cfg_.solver.table_config.filename.c_str());
-      LibXR::STDIO::Printf("  ekf:\r\n");
-      LibXR::STDIO::Printf("    sigma2_q_xyz: %f\r\n", self->cfg_.ekf.sigma2_q_xyz);
-      LibXR::STDIO::Printf("    sigma2_q_yaw: %f\r\n", self->cfg_.ekf.sigma2_q_yaw);
-      LibXR::STDIO::Printf("    sigma2_q_r: %f\r\n", self->cfg_.ekf.sigma2_q_r);
-      LibXR::STDIO::Printf("  noise:\r\n");
-      LibXR::STDIO::Printf("    r_xyz_factor: %f\r\n", self->cfg_.noise.r_xyz_factor);
-      LibXR::STDIO::Printf("    r_yaw: %f\r\n", self->cfg_.noise.r_yaw);
-      LibXR::STDIO::Printf("  frames:\r\n");
-      LibXR::STDIO::Printf("    rotation:\r\n");
-      LibXR::STDIO::Printf("      - %f\r\n", self->cfg_.frames.base_transform_static.rotation(0));
-      LibXR::STDIO::Printf("      - %f\r\n", self->cfg_.frames.base_transform_static.rotation(1));
-      LibXR::STDIO::Printf("      - %f\r\n", self->cfg_.frames.base_transform_static.rotation(2));
-      LibXR::STDIO::Printf("      - %f\r\n", self->cfg_.frames.base_transform_static.rotation(3));
-      LibXR::STDIO::Printf("    translation:\r\n");
-      LibXR::STDIO::Printf("      - %f\r\n", self->cfg_.frames.base_transform_static.translation(0));
-      LibXR::STDIO::Printf("      - %f\r\n", self->cfg_.frames.base_transform_static.translation(1));
-      LibXR::STDIO::Printf("      - %f\r\n", self->cfg_.frames.base_transform_static.translation(2));
-      // clang-format on
-    }
-    return 0;
-  }
-  else if (argc == 3)
-  {
-    std::string cmd = argv[1];
-    if (cmd == "max_armor_distance")
-    {
-      self->cfg_.limits.max_armor_distance = std::stod(argv[2]);
-      self->params_is_changed_ = true;
-    }
-    else if (cmd == "max_z_position")
-    {
-      self->cfg_.limits.max_z_position = std::stod(argv[2]);
-      self->params_is_changed_ = true;
-    }
-    else if (cmd == "max_match_distance")
-    {
-      self->cfg_.match.max_match_distance = std::stod(argv[2]);
-      self->params_is_changed_ = true;
-    }
-    else if (cmd == "max_match_yaw_diff")
-    {
-      self->cfg_.match.max_match_yaw_diff = std::stod(argv[2]);
-      self->params_is_changed_ = true;
-    }
-    else if (cmd == "tracking_thres")
-    {
-      self->cfg_.thresholds.tracking_thres = std::stoi(argv[2]);
-      self->params_is_changed_ = true;
-    }
-    else if (cmd == "bias_time")
-    {
-      self->cfg_.solver.bias_time = std::stoi(argv[2]);
-      self->params_is_changed_ = true;
-    }
-    else if (cmd == "s_bias")
-    {
-      self->cfg_.solver.s_bias = std::stod(argv[2]);
-      self->params_is_changed_ = true;
-    }
-    else if (cmd == "z_bias")
-    {
-      self->cfg_.solver.z_bias = std::stod(argv[2]);
-      self->params_is_changed_ = true;
-    }
-    else if (cmd == "sigma2_q_xyz")
-    {
-      self->cfg_.ekf.sigma2_q_xyz = std::stod(argv[2]);
-      self->params_is_changed_ = true;
-    }
-    else if (cmd == "sigma2_q_yaw")
-    {
-      self->cfg_.ekf.sigma2_q_yaw = std::stod(argv[2]);
-      self->params_is_changed_ = true;
-    }
-    else if (cmd == "sigma2_q_r")
-    {
-      self->cfg_.ekf.sigma2_q_r = std::stod(argv[2]);
-      self->params_is_changed_ = true;
-    }
-    else if (cmd == "r_xyz_factor")
-    {
-      self->cfg_.noise.r_xyz_factor = std::stod(argv[2]);
-      self->params_is_changed_ = true;
-    }
-    else if (cmd == "r_yaw")
-    {
-      self->cfg_.noise.r_yaw = std::stod(argv[2]);
-      self->params_is_changed_ = true;
+      cv::putText(canvas, "No active EKF target", cv::Point(panel_x, panel_y),
+                  cv::FONT_HERSHEY_DUPLEX, 0.56, cv::Scalar(151, 170, 192), 1,
+                  cv::LINE_AA);
+      panel_y += 24;
     }
     else
     {
-      LibXR::STDIO::Printf("Unknown command: %s\n", argv[1]);
-      return -1;
+      const auto& state = target_.GetState();
+      draw_info_row(canvas, panel_x, panel_y, "x", format_value(state[0], 3),
+                    cv::Scalar(240, 244, 250));
+      panel_y += 24;
+      draw_info_row(canvas, panel_x, panel_y, "vx", format_value(state[1], 3),
+                    cv::Scalar(240, 244, 250));
+      panel_y += 24;
+      draw_info_row(canvas, panel_x, panel_y, "y", format_value(state[2], 3),
+                    cv::Scalar(240, 244, 250));
+      panel_y += 24;
+      draw_info_row(canvas, panel_x, panel_y, "vy", format_value(state[3], 3),
+                    cv::Scalar(240, 244, 250));
+      panel_y += 24;
+      draw_info_row(canvas, panel_x, panel_y, "z", format_value(state[4], 3),
+                    cv::Scalar(240, 244, 250));
+      panel_y += 24;
+      draw_info_row(canvas, panel_x, panel_y, "vz", format_value(state[5], 3),
+                    cv::Scalar(240, 244, 250));
+      panel_y += 24;
+      draw_info_row(canvas, panel_x, panel_y, "yaw_rad", format_value(state[6], 3),
+                    cv::Scalar(240, 244, 250));
+      panel_y += 24;
+      draw_info_row(canvas, panel_x, panel_y, "v_yaw", format_value(state[7], 3),
+                    cv::Scalar(240, 244, 250));
+      panel_y += 24;
+      draw_info_row(canvas, panel_x, panel_y, "r1", format_value(state[8], 3),
+                    cv::Scalar(240, 244, 250));
+      panel_y += 24;
+      draw_info_row(canvas, panel_x, panel_y, "r2", format_value(state[8] + state[9], 3),
+                    cv::Scalar(240, 244, 250));
+      panel_y += 24;
+      draw_info_row(canvas, panel_x, panel_y, "dz", format_value(state[10], 3),
+                    cv::Scalar(240, 244, 250));
     }
-    return 0;
+
+    panel_y += 36;
+    cv::putText(canvas, "Observations", cv::Point(panel_x, panel_y),
+                cv::FONT_HERSHEY_DUPLEX, 0.74, cv::Scalar(243, 246, 250), 1,
+                cv::LINE_AA);
+    panel_y += 26;
+
+    if (observations.empty())
+    {
+      cv::putText(canvas, "No valid observation after filtering",
+                  cv::Point(panel_x, panel_y), cv::FONT_HERSHEY_DUPLEX, 0.54,
+                  cv::Scalar(151, 170, 192), 1, cv::LINE_AA);
+    }
+    else
+    {
+      const int observation_count =
+          std::min(static_cast<int>(observations.size()), MAX_DEBUG_OBSERVATIONS);
+      for (int index = 0; index < observation_count; ++index)
+      {
+        const auto& observation = observations[index];
+        const bool tracked_candidate =
+            (state_ != State::LOST && observation.result.number == tracked_id_);
+        const cv::Scalar item_color =
+            tracked_candidate ? state_to_color(State::TRACKING)
+                              : armor_color_to_scalar(observation.result.color);
+        const cv::Rect item_rect(panel_x - 10, panel_y - 18, INFO_PANEL_WIDTH - 32, 56);
+        cv::rectangle(canvas, item_rect, cv::Scalar(32, 39, 48), cv::FILLED,
+                      cv::LINE_AA);
+        cv::rectangle(canvas, item_rect, item_color, 1, cv::LINE_AA);
+
+        cv::putText(canvas, armor_number_to_string(observation.result.number),
+                    cv::Point(panel_x, panel_y), cv::FONT_HERSHEY_DUPLEX, 0.56,
+                    cv::Scalar(245, 247, 250), 1, cv::LINE_AA);
+
+        std::ostringstream world_xyz;
+        world_xyz << "xyz=" << format_value(observation.xyz_in_world.x(), 2) << ", "
+                  << format_value(observation.xyz_in_world.y(), 2) << ", "
+                  << format_value(observation.xyz_in_world.z(), 2);
+        cv::putText(canvas, world_xyz.str(), cv::Point(panel_x, panel_y + 20),
+                    cv::FONT_HERSHEY_DUPLEX, 0.42, item_color, 1, cv::LINE_AA);
+
+        std::ostringstream ypd;
+        ypd << "yaw=" << format_value(observation.ypr_in_world.x(), 2)
+            << " d=" << format_value(observation.yaw_optimization_delta, 2)
+            << "  dist=" << format_value(observation.ypd_in_world.z(), 2);
+        cv::putText(canvas, ypd.str(), cv::Point(panel_x, panel_y + 38),
+                    cv::FONT_HERSHEY_DUPLEX, 0.42, cv::Scalar(210, 220, 232), 1,
+                    cv::LINE_AA);
+        panel_y += 64;
+      }
+    }
+
+    cv::Mat display = canvas;
+    if (std::abs(cfg_.debug.overlay_scale - 1.0) > 1e-6)
+    {
+      cv::resize(canvas, display, cv::Size(), cfg_.debug.overlay_scale,
+                 cfg_.debug.overlay_scale);
+    }
+
+    cv::imshow("armor_tracker_debug", display);
+    cv::waitKey(std::max(cfg_.debug.wait_key_ms, 1));
   }
-  LibXR::STDIO::Printf("Unknown command: %s\n", argv[1]);
-  return -1;
+  catch (const cv::Exception& exception)
+  {
+    preview_available_ = false;
+    if (!preview_warned_)
+    {
+      preview_warned_ = true;
+      XR_LOG_WARN("ArmorTracker preview disabled: %s", exception.what());
+    }
+  }
+}
+
+bool ArmorTracker::ShouldShowPreview()
+{
+  if (!cfg_.debug.preview || !preview_available_)
+  {
+    return false;
+  }
+
+  const char* display = std::getenv("DISPLAY");
+  const char* wayland_display = std::getenv("WAYLAND_DISPLAY");
+  if (display == nullptr && wayland_display == nullptr)
+  {
+    preview_available_ = false;
+    if (!preview_warned_)
+    {
+      preview_warned_ = true;
+      XR_LOG_WARN("ArmorTracker preview disabled because DISPLAY is unavailable");
+    }
+    return false;
+  }
+
+  return true;
+}
+
+double ArmorTracker::GetArmorWorldYaw(const LibXR::Quaternion<double>& rotation) const
+{
+  const auto euler = rotation.ToEulerAngleZYX();
+  return TrackerMath::LimitRad(euler[2]);
 }
