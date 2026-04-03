@@ -127,13 +127,13 @@ ArmorTracker::ArmorTracker(LibXR::HardwareContainer& hw, LibXR::ApplicationManag
   auto armors_cb = LibXR::Topic::Callback::Create(
       [](bool, ArmorTracker* self, LibXR::RawData& data)
       {
-        auto armors_msg = reinterpret_cast<ArmorDetectorResults*>(data.addr_);
+        auto* armors_msg = reinterpret_cast<ArmorDetectionsMessage*>(data.addr_);
         if (self->params_is_changed_ == true)
         {
           self->SetConfig(self->cfg_);
           self->params_is_changed_ = false;
         }
-        self->ArmorsCallback(*armors_msg);
+        self->ArmorsCallback(armors_msg->results);
       },
       this);
   armors_topic.RegisterCallback(armors_cb);
@@ -528,7 +528,7 @@ void ArmorTracker::VelocityCallback(double velocity_msg)
   io_.solver->Init(velocity_msg);
 }
 
-void ArmorTracker::ArmorsCallback(ArmorDetectorResults& armors_msg)
+void ArmorTracker::ArmorsCallback(ArmorDetectorResults armors_msg)
 {
   // 图像坐标 -> 世界坐标
   // gimbal +X  = camera +Z

@@ -191,7 +191,7 @@ class ArmorTracker : public LibXR::Application
 
   // ====================== IO 与回调（原 Node 逻辑） ======================
   void VelocityCallback(double velocity_msg);
-  void ArmorsCallback(ArmorDetectorResults& armors_msg);
+  void ArmorsCallback(ArmorDetectorResults armors_msg);
 
   // ====================== 辅助函数 ======================
   void InitEKF(const ArmorDetectorResult& a);
