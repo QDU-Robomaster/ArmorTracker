@@ -412,7 +412,7 @@ void ArmorTracker::Update(const ArmorDetectorResults& armors_msg)
 
     const double relaxed_same_face_distance = cfg_.match.max_match_distance * 3.0;
     const double relaxed_face_switch_distance = 0.2;
-    const double relaxed_face_switch_yaw_diff = 2.0;
+    const double relaxed_face_switch_yaw_diff = 2.8;
 
     bool strict_match =
         best_face_index >= 0 && best_position_diff < cfg_.match.max_match_distance &&
