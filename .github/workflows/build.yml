@@ -4,7 +4,7 @@ on:
   push:
   pull_request:
   schedule:
-    - cron: '0 3 1 * *'
+    - cron: '0 3 1 * *'  # 每月1日凌晨3点（UTC）自动触发
 
 jobs:
   build:
@@ -45,7 +45,6 @@ jobs:
           set(CMAKE_CXX_STANDARD 17)
           add_executable(xr_test main.cpp)
           set(XROBOT_MODULES_DIR ${CMAKE_CURRENT_SOURCE_DIR}/Modules/)
-          set(WEBOTS_HOME /usr/local/webots)
           add_subdirectory(libxr)
           target_include_directories(xr_test PUBLIC $<TARGET_PROPERTY:xr,INTERFACE_INCLUDE_DIRECTORIES> ${CMAKE_SOURCE_DIR}/User)
           target_link_libraries(xr_test PUBLIC xr)
@@ -56,6 +55,8 @@ jobs:
 
       - name: Setup Python & Install deps
         run: |
+          apt-get update
+          apt-get install -y libgpiod-dev
           python3 -m pip install --upgrade pip
           pip3 install pyyaml requests
 
@@ -67,45 +68,31 @@ jobs:
         run: |
           pip3 install xrobot libxr
 
-      - name: Add current repo to module list
+      - name: Run xrobot_setup
         run: |
-          xrobot_add_mod qdu-future/${{ env.XR_MODULE_NAME }}
+          xrobot_src_man add-source https://qdu-robomaster.github.io/qdu-future-modules/index.yaml && xrobot_src_man add-source https://xrobot-org.github.io/xrobot-modules/index.yaml && xrobot_setup || true
 
-      - name: Add xrobot source
-        run: |
-          xrobot_src_man add-source https://xrobot-org.github.io/xrobot-modules/index.yaml
-
-      - name: Add qdu-future source
-        run: |
-          xrobot_src_man add-source https://qdu-robomaster.github.io/qdu-future-modules/index.yaml
-
-      - name: Sync module repos
+      - name: Run xrobot_init_mod
         run: |
           xrobot_init_mod
 
-      - name: Create minimal module config
+      - name: Add BlinkLED module
         run: |
-          mkdir -p User
-          cat > User/xrobot.yaml <<'EOF'
-          global_settings:
-            monitor_sleep_ms: 1000
-          modules: []
-          EOF
-          xrobot_add_mod ${{ env.XR_MODULE_NAME }}
-          cat User/xrobot.yaml
+          xrobot_add_mod ${{ env.XR_MODULE_NAME }} && xrobot_add_mod qdu-future/ArmorDetector && cat User/xrobot.yaml
 
-      - name: Generate main
+      - name: Add this repo module
         run: |
-          xrobot_gen_main --output User/xrobot_main.hpp
+          xrobot_add_mod ${{ env.XR_MODULE_NAME }} && cat User/xrobot.yaml
 
-      - name: Use bundled OpenVINO runtime
-        run: echo "OpenVINO runtime is provided by ghcr.io/xrobot-org/docker-image-webots:main"
+      - name: Generate main again
+        run: |
+          xrobot_setup
 
       - name: Build
         run: |
           mkdir -p build
           cd build
-          cmake .. -DOpenVINO_DIR=/opt/intel/openvino_2025.4.0/runtime/cmake
+          cmake ..
           make
 
       - name: Create Tag via GitHub API
@@ -124,8 +111,10 @@ jobs:
             const SS = String(date.getUTCSeconds()).padStart(2, '0');
             const tagName = `${tagPrefix}${yyyy}${mm}${dd}-${HH}${MM}${SS}`;
 
+            // 获取当前 commit sha
             const sha = process.env.GITHUB_SHA;
 
+            // 创建 tag reference
             await github.rest.git.createRef({
               owner: context.repo.owner,
               repo: context.repo.repo,
