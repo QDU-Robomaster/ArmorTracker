@@ -62,7 +62,14 @@ void LogImpossibleYawDiff(const char* tag, std::size_t armor_index, int face_ind
 }
 
 
-LibXR::Quaternion<double> PoseStampedToQuaternion(const PoseStamped& pose_msg)
+struct CameraPoseTopicMsg
+{
+  LibXR::MicrosecondTimestamp timestamp{};
+  LibXR::Quaternion<float> rotation{};
+  LibXR::Position<float> translation{};
+};
+
+LibXR::Quaternion<double> CameraPoseTopicRotation(const CameraPoseTopicMsg& pose_msg)
 {
   return LibXR::Quaternion<double>(pose_msg.rotation.w(), pose_msg.rotation.x(),
                                    pose_msg.rotation.y(), pose_msg.rotation.z());
@@ -482,10 +489,11 @@ ArmorTracker::ArmorTracker(LibXR::HardwareContainer& hw, LibXR::ApplicationManag
   auto camera_pose_cb = LibXR::Topic::Callback::Create(
       [](bool, ArmorTracker* self, LibXR::RawData& data)
       {
-        auto* pose_msg = reinterpret_cast<PoseStamped*>(data.addr_);
+        auto* pose_msg = reinterpret_cast<CameraPoseTopicMsg*>(data.addr_);
         if (pose_msg != nullptr)
         {
-          self->PushCameraPose(*pose_msg);
+          self->PushCameraPose(static_cast<uint64_t>(pose_msg->timestamp),
+                               CameraPoseTopicRotation(*pose_msg));
         }
       },
       this);
@@ -643,15 +651,17 @@ double ArmorTracker::TimestampDeltaSeconds(uint64_t newer, uint64_t older)
   return 0.0;
 }
 
-void ArmorTracker::PushCameraPose(const PoseStamped& pose_msg)
+void ArmorTracker::PushCameraPose(uint64_t timestamp_us,
+                                  const LibXR::Quaternion<double>& camera_rotation)
 {
   LibXR::Mutex::LockGuard lock(io_.gimbal_rotation_lock);
-  io_.gimbal_rotation = PoseStampedToQuaternion(pose_msg);
+  io_.gimbal_rotation = camera_rotation;
   io_.latest_camera_pose =
       CameraRotationToTrackerWorldPose(io_.gimbal_rotation,
                                        io_.gimbal_to_camera_transform_static);
   io_.latest_camera_pose_valid = true;
-  io_.camera_pose_history[io_.camera_pose_history_head] = pose_msg;
+  io_.camera_pose_history[io_.camera_pose_history_head] =
+      TimedCameraPose{timestamp_us, io_.latest_camera_pose};
   io_.camera_pose_history_head =
       (io_.camera_pose_history_head + 1) % IOBlock::kCameraPoseHistorySize;
   io_.camera_pose_history_count =
@@ -673,7 +683,7 @@ bool ArmorTracker::LookupCameraPose(uint64_t image_timestamp_us,
           (io_.camera_pose_history_head + IOBlock::kCameraPoseHistorySize - 1 - i) %
           IOBlock::kCameraPoseHistorySize;
       const auto& msg = io_.camera_pose_history[index];
-      const uint64_t ts = static_cast<uint64_t>(msg.timestamp);
+      const uint64_t ts = msg.timestamp_us;
       if (ts == 0)
       {
         continue;
@@ -692,9 +702,7 @@ bool ArmorTracker::LookupCameraPose(uint64_t image_timestamp_us,
     }
     if (found && best_diff <= 20000)
     {
-      pose_out = CameraRotationToTrackerWorldPose(
-          PoseStampedToQuaternion(io_.camera_pose_history[best_index]),
-          io_.gimbal_to_camera_transform_static);
+      pose_out = io_.camera_pose_history[best_index].pose;
       io_.latest_camera_pose = pose_out;
       io_.latest_camera_pose_valid = true;
       return true;
