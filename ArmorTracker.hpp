@@ -62,6 +62,7 @@ depends:
 
 #include <Eigen/Eigen>
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <vector>
@@ -77,6 +78,7 @@ depends:
 #include "message.hpp"
 #include "mutex.hpp"
 #include "timebase.hpp"
+#include "thread.hpp"
 #include "transform.hpp"
 
 class ArmorTracker : public LibXR::Application
@@ -305,6 +307,10 @@ class ArmorTracker : public LibXR::Application
   static double TimestampDeltaSeconds(uint64_t newer, uint64_t older);
   static bool CompatibleImageTrackLabel(const ImageIdTrack& track,
                                         const ArmorDetectorResult& armor);
+#if defined(AUTO_AIM_PREVIEW_IMAGE) && AUTO_AIM_PREVIEW_IMAGE
+  static void PreviewImageThreadFun(ArmorTracker* self);
+  static void RenderPreviewFrame(ArmorTracker* self, cv::Mat frame);
+#endif
 
   // ====================== 内部聚合成员（类内聚合） ======================
   struct EKFBlock
@@ -420,6 +426,9 @@ class ArmorTracker : public LibXR::Application
   const char* name_ = "armor_tracker";
   LibXR::RamFS::File cmd_file_;
   std::atomic<bool> params_is_changed_{false};
+#if defined(AUTO_AIM_PREVIEW_IMAGE) && AUTO_AIM_PREVIEW_IMAGE
+  LibXR::Thread preview_image_thread_{};
+#endif
 
   EkfPointsMsg ekf_msg_;
   CandidateDebugMsg candidate_debug_msg_{};

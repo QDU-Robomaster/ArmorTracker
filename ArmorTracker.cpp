@@ -13,6 +13,7 @@
 #include <utility>
 
 #include "cycle_value.hpp"
+#include "linux_shared_topic.hpp"
 #include "logger.hpp"
 #include "message.hpp"
 #include "transform.hpp"
@@ -73,6 +74,59 @@ LibXR::Quaternion<double> CameraPoseTopicRotation(const CameraPoseTopicMsg& pose
 {
   return LibXR::Quaternion<double>(pose_msg.rotation.w(), pose_msg.rotation.x(),
                                    pose_msg.rotation.y(), pose_msg.rotation.z());
+}
+
+constexpr uint32_t SHARED_IMAGE_WAIT_TIMEOUT_MS = 100;
+using SharedImageTopic = LibXR::LinuxSharedTopic<CameraBase::SharedImageFrame>;
+
+int CvTypeFromEncoding(CameraBase::Encoding encoding)
+{
+  switch (encoding)
+  {
+    case CameraBase::Encoding::RGB8:
+    case CameraBase::Encoding::BGR8:
+      return CV_8UC3;
+    case CameraBase::Encoding::RGBA8:
+    case CameraBase::Encoding::BGRA8:
+      return CV_8UC4;
+    case CameraBase::Encoding::MONO8:
+      return CV_8UC1;
+    default:
+      return -1;
+  }
+}
+
+cv::Mat ConvertToBgrWithEncoding(const cv::Mat& input, CameraBase::Encoding encoding)
+{
+  switch (encoding)
+  {
+    case CameraBase::Encoding::RGB8:
+    {
+      cv::Mat output;
+      cv::cvtColor(input, output, cv::COLOR_RGB2BGR);
+      return output;
+    }
+    case CameraBase::Encoding::BGRA8:
+    {
+      cv::Mat output;
+      cv::cvtColor(input, output, cv::COLOR_BGRA2BGR);
+      return output;
+    }
+    case CameraBase::Encoding::RGBA8:
+    {
+      cv::Mat output;
+      cv::cvtColor(input, output, cv::COLOR_RGBA2BGR);
+      return output;
+    }
+    case CameraBase::Encoding::MONO8:
+    {
+      cv::Mat output;
+      cv::cvtColor(input, output, cv::COLOR_GRAY2BGR);
+      return output;
+    }
+    default:
+      return input;
+  }
 }
 
 LibXR::Transform<double> CameraRotationToTrackerWorldPose(
@@ -509,130 +563,170 @@ ArmorTracker::ArmorTracker(LibXR::HardwareContainer& hw, LibXR::ApplicationManag
       });
 
 #if defined(AUTO_AIM_PREVIEW_IMAGE) && AUTO_AIM_PREVIEW_IMAGE
-
-  XR_LOG_PASS("ArmorTracker preview uses constructor camera info");
-
-  auto img_topic = LibXR::Topic(LibXR::Topic::Find("image_raw"));
-  auto img_cb = LibXR::Topic::Callback::Create(
-      [](bool, ArmorTracker* self, LibXR::RawData& data)
-      {
-        auto* img_msg = reinterpret_cast<cv::Mat*>(data.addr_);
-        cv::Mat frame = img_msg->clone();
-
-        EkfPointsMsg& ekf = self->ekf_msg_;
-
-        // —— 用构造注入的相机内参/畸变直接做投影 ——
-        const CameraBase::CameraInfo& cam = self->cam_info_;
-
-        // 只考虑 PLUMB_BOB；否则当作无畸变
-        bool has_distortion =
-            (cam.distortion_model == CameraBase::DistortionModel::PLUMB_BOB);
-
-        // --- 构造 K(3x3) ---
-        const auto& k_arr = cam.camera_matrix;  // 行优先 3x3
-        cv::Mat k = (cv::Mat_<double>(3, 3) << k_arr[0], k_arr[1], k_arr[2], k_arr[3],
-                     k_arr[4], k_arr[5], k_arr[6], k_arr[7], k_arr[8]);
-
-        // --- 构造 D（PLUMB_BOB: k1,k2,p1,p2,k3）---
-        cv::Mat d;
-        if (has_distortion)
-        {
-          std::vector<double> dvec = {cam.distortion_coefficients[0],
-                                      cam.distortion_coefficients[1],
-                                      cam.distortion_coefficients[2],
-                                      cam.distortion_coefficients[3],
-                                      cam.distortion_coefficients[4]};
-          d = cv::Mat(dvec).clone().reshape(1, 1);  // 1x5
-        }
-        else
-        {
-          d = cv::Mat();  // 空 -> 无畸变
-        }
-
-        // 若当前帧分辨率与标定分辨率不同，缩放 K；D 不缩放
-        const double SX =
-            static_cast<double>(frame.cols) / static_cast<double>(cam.width);
-        const double SY =
-            static_cast<double>(frame.rows) / static_cast<double>(cam.height);
-        cv::Mat k_scaled = k.clone();
-        k_scaled.at<double>(0, 0) *= SX;  // fx
-        k_scaled.at<double>(1, 1) *= SY;  // fy
-        k_scaled.at<double>(0, 2) *= SX;  // cx
-        k_scaled.at<double>(1, 2) *= SY;  // cy
-
-        auto project = [&](const Eigen::Vector3d& Pc, cv::Point2d& uv) -> bool
-        {
-          if (!(Pc.z() > 1e-6) || !std::isfinite(Pc.x()) || !std::isfinite(Pc.y()) ||
-              !std::isfinite(Pc.z()))
-          {
-            return false;
-          }
-
-          std::vector<cv::Point3d> obj{cv::Point3d(Pc.x(), Pc.y(), Pc.z())};
-          static cv::Mat rvec = cv::Mat::zeros(1, 3, CV_64F);
-          static cv::Mat tvec = cv::Mat::zeros(1, 3, CV_64F);
-          std::vector<cv::Point2d> imgpts;
-          cv::projectPoints(obj, rvec, tvec, k_scaled, d, imgpts);
-          uv = imgpts[0];
-          return (0 <= uv.x && uv.x < frame.cols && 0 <= uv.y && uv.y < frame.rows);
-        };
-
-        if (ekf.valid[0])
-        {
-          cv::Point2d uv;
-          Eigen::Vector3d pc(ekf.center_cam.x(), ekf.center_cam.y(), ekf.center_cam.z());
-          if (project(pc, uv))
-          {
-            cv::circle(frame, uv, 5, cv::Scalar(0, 255, 0), 2, cv::LINE_AA);
-            cv::putText(frame, "C", uv + cv::Point2d(6, -6), cv::FONT_HERSHEY_SIMPLEX,
-                        0.5, cv::Scalar(0, 255, 0), 1, cv::LINE_AA);
-          }
-        }
-
-        for (int i = 0; i < std::min<int>(ekf.count, 4); ++i)
-        {
-          if (!ekf.valid[i + 1])
-          {
-            continue;
-          }
-          cv::Point2d uv;
-          Eigen::Vector3d pc(ekf.armors_cam[i].x(), ekf.armors_cam[i].y(),
-                             ekf.armors_cam[i].z());
-          if (project(pc, uv))
-          {
-            cv::circle(frame, uv, 4, cv::Scalar(255, 255, 0), 2, cv::LINE_AA);
-            char buf[16];
-            (void)std::snprintf(buf, sizeof(buf), "A%d", i);
-            cv::putText(frame, buf, uv + cv::Point2d(6, -6), cv::FONT_HERSHEY_SIMPLEX,
-                        0.5, cv::Scalar(255, 255, 0), 1, cv::LINE_AA);
-          }
-        }
-
-        for (int i = 0; i < std::min<int>(ekf.count, 4); ++i)
-        {
-          if (!ekf.valid[0] || !ekf.valid[i + 1])
-          {
-            continue;
-          }
-          cv::Point2d uc, ua;
-          Eigen::Vector3d pc_c(ekf.center_cam.x(), ekf.center_cam.y(),
-                               ekf.center_cam.z());
-          Eigen::Vector3d pc_a(ekf.armors_cam[i].x(), ekf.armors_cam[i].y(),
-                               ekf.armors_cam[i].z());
-          if (project(pc_c, uc) && project(pc_a, ua))
-          {
-            cv::line(frame, uc, ua, cv::Scalar(80, 180, 255), 1, cv::LINE_AA);
-          }
-        }
-
-        cv::imshow("ekf_overlay", frame);
-        cv::waitKey(1);
-      },
-      this);
-
-  img_topic.RegisterCallback(img_cb);
+  preview_image_thread_.Create(this, PreviewImageThreadFun, "TrackPreviewImg",
+                               static_cast<size_t>(1024 * 128),
+                               LibXR::Thread::Priority::LOW);
 #endif
 }
+
+#if defined(AUTO_AIM_PREVIEW_IMAGE) && AUTO_AIM_PREVIEW_IMAGE
+void ArmorTracker::RenderPreviewFrame(ArmorTracker* self, cv::Mat frame)
+{
+  if (frame.empty())
+  {
+    return;
+  }
+
+  EkfPointsMsg& ekf = self->ekf_msg_;
+  const CameraBase::CameraInfo& cam = self->cam_info_;
+  const bool has_distortion =
+      (cam.distortion_model == CameraBase::DistortionModel::PLUMB_BOB);
+
+  const auto& k_arr = cam.camera_matrix;
+  cv::Mat k = (cv::Mat_<double>(3, 3) << k_arr[0], k_arr[1], k_arr[2], k_arr[3],
+               k_arr[4], k_arr[5], k_arr[6], k_arr[7], k_arr[8]);
+
+  cv::Mat d;
+  if (has_distortion)
+  {
+    std::vector<double> dvec = {cam.distortion_coefficients[0],
+                                cam.distortion_coefficients[1],
+                                cam.distortion_coefficients[2],
+                                cam.distortion_coefficients[3],
+                                cam.distortion_coefficients[4]};
+    d = cv::Mat(dvec).clone().reshape(1, 1);
+  }
+
+  const double sx = static_cast<double>(frame.cols) / static_cast<double>(cam.width);
+  const double sy = static_cast<double>(frame.rows) / static_cast<double>(cam.height);
+  cv::Mat k_scaled = k.clone();
+  k_scaled.at<double>(0, 0) *= sx;
+  k_scaled.at<double>(1, 1) *= sy;
+  k_scaled.at<double>(0, 2) *= sx;
+  k_scaled.at<double>(1, 2) *= sy;
+
+  auto project = [&](const Eigen::Vector3d& pc, cv::Point2d& uv) -> bool
+  {
+    if (!(pc.z() > 1e-6) || !std::isfinite(pc.x()) || !std::isfinite(pc.y()) ||
+        !std::isfinite(pc.z()))
+    {
+      return false;
+    }
+
+    std::vector<cv::Point3d> obj{cv::Point3d(pc.x(), pc.y(), pc.z())};
+    static cv::Mat rvec = cv::Mat::zeros(1, 3, CV_64F);
+    static cv::Mat tvec = cv::Mat::zeros(1, 3, CV_64F);
+    std::vector<cv::Point2d> imgpts;
+    cv::projectPoints(obj, rvec, tvec, k_scaled, d, imgpts);
+    uv = imgpts[0];
+    return (0 <= uv.x && uv.x < frame.cols && 0 <= uv.y && uv.y < frame.rows);
+  };
+
+  if (ekf.valid[0])
+  {
+    cv::Point2d uv;
+    Eigen::Vector3d pc(ekf.center_cam.x(), ekf.center_cam.y(), ekf.center_cam.z());
+    if (project(pc, uv))
+    {
+      cv::circle(frame, uv, 5, cv::Scalar(0, 255, 0), 2, cv::LINE_AA);
+      cv::putText(frame, "C", uv + cv::Point2d(6, -6), cv::FONT_HERSHEY_SIMPLEX,
+                  0.5, cv::Scalar(0, 255, 0), 1, cv::LINE_AA);
+    }
+  }
+
+  for (int i = 0; i < std::min<int>(ekf.count, 4); ++i)
+  {
+    if (!ekf.valid[i + 1])
+    {
+      continue;
+    }
+    cv::Point2d uv;
+    Eigen::Vector3d pc(ekf.armors_cam[i].x(), ekf.armors_cam[i].y(),
+                       ekf.armors_cam[i].z());
+    if (project(pc, uv))
+    {
+      cv::circle(frame, uv, 4, cv::Scalar(255, 255, 0), 2, cv::LINE_AA);
+      char buf[16];
+      (void)std::snprintf(buf, sizeof(buf), "A%d", i);
+      cv::putText(frame, buf, uv + cv::Point2d(6, -6), cv::FONT_HERSHEY_SIMPLEX,
+                  0.5, cv::Scalar(255, 255, 0), 1, cv::LINE_AA);
+    }
+  }
+
+  for (int i = 0; i < std::min<int>(ekf.count, 4); ++i)
+  {
+    if (!ekf.valid[0] || !ekf.valid[i + 1])
+    {
+      continue;
+    }
+    cv::Point2d uc, ua;
+    Eigen::Vector3d pc_c(ekf.center_cam.x(), ekf.center_cam.y(), ekf.center_cam.z());
+    Eigen::Vector3d pc_a(ekf.armors_cam[i].x(), ekf.armors_cam[i].y(),
+                         ekf.armors_cam[i].z());
+    if (project(pc_c, uc) && project(pc_a, ua))
+    {
+      cv::line(frame, uc, ua, cv::Scalar(80, 180, 255), 1, cv::LINE_AA);
+    }
+  }
+
+  cv::imshow("ekf_overlay", frame);
+  cv::waitKey(1);
+}
+
+void ArmorTracker::PreviewImageThreadFun(ArmorTracker* self)
+{
+  XR_LOG_PASS("ArmorTracker preview uses shared image topic");
+
+  while (true)
+  {
+    SharedImageTopic::Subscriber subscriber(CameraBase::kSharedImageTopicName);
+    if (!subscriber.Valid())
+    {
+      LibXR::Thread::Sleep(200);
+      continue;
+    }
+
+    SharedImageTopic::Data recv_data;
+    while (true)
+    {
+      const auto wait_ans = subscriber.Wait(recv_data, SHARED_IMAGE_WAIT_TIMEOUT_MS);
+      if (wait_ans == LibXR::ErrorCode::TIMEOUT)
+      {
+        continue;
+      }
+      if (wait_ans != LibXR::ErrorCode::OK)
+      {
+        recv_data.Reset();
+        break;
+      }
+
+      const CameraBase::SharedImageFrame* frame_msg = recv_data.GetData();
+      if (frame_msg != nullptr && frame_msg->width > 0 && frame_msg->height > 0 &&
+          frame_msg->step > 0 && frame_msg->data_size > 0 &&
+          frame_msg->data_size <= CameraBase::kSharedImageMaxBytes &&
+          static_cast<size_t>(frame_msg->step) * static_cast<size_t>(frame_msg->height) <=
+              frame_msg->data_size)
+      {
+        const int cv_type = CvTypeFromEncoding(frame_msg->encoding);
+        if (cv_type >= 0)
+        {
+          cv::Mat input(static_cast<int>(frame_msg->height),
+                        static_cast<int>(frame_msg->width), cv_type,
+                        const_cast<uint8_t*>(frame_msg->data.data()),
+                        static_cast<size_t>(frame_msg->step));
+          cv::Mat frame = ConvertToBgrWithEncoding(input, frame_msg->encoding);
+          if (!frame.empty())
+          {
+            RenderPreviewFrame(self, frame);
+          }
+        }
+      }
+      recv_data.Reset();
+    }
+  }
+}
+
+#endif
 
 void ArmorTracker::OnMonitor() {}
 
