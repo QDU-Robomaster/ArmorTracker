@@ -62,7 +62,7 @@ void LogImpossibleYawDiff(const char* tag, std::size_t armor_index, int face_ind
 }
 
 
-LibXR::Quaternion<double> PoseStampedToQuaternion(const CameraBase::PoseStamped& pose_msg)
+LibXR::Quaternion<double> PoseStampedToQuaternion(const PoseStamped& pose_msg)
 {
   return LibXR::Quaternion<double>(pose_msg.rotation.w(), pose_msg.rotation.x(),
                                    pose_msg.rotation.y(), pose_msg.rotation.z());
@@ -482,7 +482,7 @@ ArmorTracker::ArmorTracker(LibXR::HardwareContainer& hw, LibXR::ApplicationManag
   auto camera_pose_cb = LibXR::Topic::Callback::Create(
       [](bool, ArmorTracker* self, LibXR::RawData& data)
       {
-        auto* pose_msg = reinterpret_cast<CameraBase::PoseStamped*>(data.addr_);
+        auto* pose_msg = reinterpret_cast<PoseStamped*>(data.addr_);
         if (pose_msg != nullptr)
         {
           self->PushCameraPose(*pose_msg);
@@ -643,7 +643,7 @@ double ArmorTracker::TimestampDeltaSeconds(uint64_t newer, uint64_t older)
   return 0.0;
 }
 
-void ArmorTracker::PushCameraPose(const CameraBase::PoseStamped& pose_msg)
+void ArmorTracker::PushCameraPose(const PoseStamped& pose_msg)
 {
   LibXR::Mutex::LockGuard lock(io_.gimbal_rotation_lock);
   io_.gimbal_rotation = PoseStampedToQuaternion(pose_msg);

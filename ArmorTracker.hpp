@@ -274,7 +274,7 @@ class ArmorTracker : public LibXR::Application
   void UpdateImageIdTracks(const ArmorDetectorResults& armors_msg, uint64_t image_timestamp_us);
   int FindDetectionTrackId(std::size_t armor_index) const;
   bool IsDetectionTrackConfirmed(std::size_t armor_index) const;
-  void PushCameraPose(const CameraBase::PoseStamped& pose_msg);
+  void PushCameraPose(const PoseStamped& pose_msg);
   bool LookupCameraPose(uint64_t image_timestamp_us, LibXR::Transform<double>& pose_out);
 
   // ====================== IO 与回调（原 Node 逻辑） ======================
@@ -381,7 +381,7 @@ class ArmorTracker : public LibXR::Application
     LibXR::Quaternion<double> gimbal_rotation{};
     LibXR::Transform<double> latest_camera_pose{};
     bool latest_camera_pose_valid = false;
-    std::array<CameraBase::PoseStamped, kCameraPoseHistorySize> camera_pose_history{};
+    std::array<PoseStamped, kCameraPoseHistorySize> camera_pose_history{};
     std::size_t camera_pose_history_head = 0;
     std::size_t camera_pose_history_count = 0;
     LibXR::Mutex gimbal_rotation_lock;
