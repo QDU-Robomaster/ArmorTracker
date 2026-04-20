@@ -43,6 +43,16 @@ constructor_args:
     frames:
       rotation: [0.0, 0.0, 0.0, 0.0]
       translation: [0.0, 0.0, 0.0]
+  camera_info:
+    width: 1280
+    height: 720
+    step: 3840
+    encoding: CameraBase::Encoding::BGR8
+    camera_matrix: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+    distortion_model: CameraBase::DistortionModel::PLUMB_BOB
+    distortion_coefficients: [0.0, 0.0, 0.0, 0.0, 0.0]
+    rectification_matrix: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+    projection_matrix: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 template_args: []
 required_hardware: []
 depends:
@@ -242,8 +252,8 @@ class ArmorTracker : public LibXR::Application
  public:
   // ====================== 构造与监控 ======================
   explicit ArmorTracker(LibXR::HardwareContainer& hw, LibXR::ApplicationManager& app,
-                        Config cfg);
-                        
+                        Config cfg, CameraBase::CameraInfo camera_info);
+
   static int CommandFun(ArmorTracker* self, int argc, char** argv);
   const Config& GetConfig() const { return cfg_; }
   void SetConfig(const Config& cfg);
@@ -405,5 +415,5 @@ class ArmorTracker : public LibXR::Application
 
   EkfPointsMsg ekf_msg_;
   CandidateDebugMsg candidate_debug_msg_{};
-  std::shared_ptr<CameraBase::CameraInfo> cam_info_{};  ///< 相机内参/畸变
+  CameraBase::CameraInfo cam_info_{};  ///< 相机内参/畸变
 };

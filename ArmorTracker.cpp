@@ -326,11 +326,11 @@ bool IsBetterMatchCandidate(const ArmorMatchCandidate& candidate,
 }  // namespace
 
 ArmorTracker::ArmorTracker(LibXR::HardwareContainer& hw, LibXR::ApplicationManager&,
-                           Config cfg)
+                           Config cfg, CameraBase::CameraInfo camera_info)
     : cfg_(std::move(cfg)),
       solver_cfg_(cfg_.solver),
-      cmd_file_(LibXR::RamFS::CreateFile(name_, CommandFun, this))
-
+      cmd_file_(LibXR::RamFS::CreateFile(name_, CommandFun, this)),
+      cam_info_(std::move(camera_info))
 {
   XR_LOG_INFO("Starting ArmorTracker!");
 
@@ -502,22 +502,7 @@ ArmorTracker::ArmorTracker(LibXR::HardwareContainer& hw, LibXR::ApplicationManag
 
 #if defined(AUTO_AIM_PREVIEW_IMAGE) && AUTO_AIM_PREVIEW_IMAGE
 
-  auto info_topic = LibXR::Topic(LibXR::Topic::Find("camera_info"));
-  auto info_cb = LibXR::Topic::Callback::Create(
-      [](bool, ArmorTracker* self, LibXR::RawData& data)
-      {
-        auto* camera_info = reinterpret_cast<CameraBase::CameraInfo*>(data.addr_);
-        static bool inited = false;
-        if (!inited)
-        {
-          XR_LOG_PASS("Got camera info!");
-          inited = true;
-
-          self->cam_info_ = std::make_shared<CameraBase::CameraInfo>(*camera_info);
-        }
-      },
-      this);
-  info_topic.RegisterCallback(info_cb);
+  XR_LOG_PASS("ArmorTracker preview uses constructor camera info");
 
   auto img_topic = LibXR::Topic(LibXR::Topic::Find("image_raw"));
   auto img_cb = LibXR::Topic::Callback::Create(
@@ -528,14 +513,8 @@ ArmorTracker::ArmorTracker(LibXR::HardwareContainer& hw, LibXR::ApplicationManag
 
         EkfPointsMsg& ekf = self->ekf_msg_;
 
-        // —— 用 info_cb 提供的内参/畸变；若还没拿到则直接显示原图 ——
-        if (!self->cam_info_)
-        {
-          cv::imshow("ekf_overlay", frame);
-          cv::waitKey(1);
-          return;
-        }
-        const CameraBase::CameraInfo& cam = *self->cam_info_;
+        // —— 用构造注入的相机内参/畸变直接做投影 ——
+        const CameraBase::CameraInfo& cam = self->cam_info_;
 
         // 只考虑 PLUMB_BOB；否则当作无畸变
         bool has_distortion =
@@ -550,8 +529,11 @@ ArmorTracker::ArmorTracker(LibXR::HardwareContainer& hw, LibXR::ApplicationManag
         cv::Mat d;
         if (has_distortion)
         {
-          const auto& pb = cam.distortion_coefficients.plumb_bob;
-          std::vector<double> dvec = {pb.k1, pb.k2, pb.p1, pb.p2, pb.k3};
+          std::vector<double> dvec = {cam.distortion_coefficients[0],
+                                      cam.distortion_coefficients[1],
+                                      cam.distortion_coefficients[2],
+                                      cam.distortion_coefficients[3],
+                                      cam.distortion_coefficients[4]};
           d = cv::Mat(dvec).clone().reshape(1, 1);  // 1x5
         }
         else
