@@ -43,17 +43,18 @@ constructor_args:
     frames:
       rotation: [0.0, 0.0, 0.0, 0.0]
       translation: [0.0, 0.0, 0.0]
-  camera_info:
-    width: 1280
-    height: 720
-    step: 3840
-    encoding: CameraBase::Encoding::BGR8
-    camera_matrix: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
-    distortion_model: CameraBase::DistortionModel::PLUMB_BOB
-    distortion_coefficients: [0.0, 0.0, 0.0, 0.0, 0.0]
-    rectification_matrix: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
-    projection_matrix: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-template_args: []
+  image_topic_name: "image_frame"
+template_args:
+  - Info:
+      width: 1280
+      height: 720
+      step: 3840
+      encoding: CameraTypes::Encoding::BGR8
+      camera_matrix: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+      distortion_model: CameraTypes::DistortionModel::PLUMB_BOB
+      distortion_coefficients: [0.0, 0.0, 0.0, 0.0, 0.0]
+      rectification_matrix: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+      projection_matrix: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 required_hardware: []
 depends:
   - qdu-future/ArmorDetector
@@ -81,9 +82,27 @@ depends:
 #include "thread.hpp"
 #include "transform.hpp"
 
+struct ArmorTrackerSend
+{
+  bool is_fire{};
+  LibXR::Position<double> position{};
+  double v_yaw{};
+  double pitch{};
+  double yaw{};
+  Eigen::Matrix<double, 3, 1> cmd_vel_linear = Eigen::Matrix<double, 3, 1>::Zero();
+  Eigen::Matrix<double, 3, 1> cmd_vel_angular = Eigen::Matrix<double, 3, 1>::Zero();
+};
+
+template <CameraTypes::CameraInfo CameraInfoV>
 class ArmorTracker : public LibXR::Application
 {
  public:
+  using Base = CameraBase<CameraInfoV>;
+  using CameraInfo = typename Base::CameraInfo;
+  using SharedImageFrame = typename Base::SharedImageFrame;
+
+  static inline constexpr CameraInfo kCameraInfo = CameraInfoV;
+
   // ====================== 配置参数（构造入参聚合） ======================
   struct Config
   {
@@ -164,16 +183,7 @@ class ArmorTracker : public LibXR::Application
     double yaw{};
   };
 
-  struct Send
-  {
-    bool is_fire{};
-    LibXR::Position<double> position{};
-    double v_yaw{};
-    double pitch{};
-    double yaw{};
-    Eigen::Matrix<double, 3, 1> cmd_vel_linear = Eigen::Matrix<double, 3, 1>::Zero();
-    Eigen::Matrix<double, 3, 1> cmd_vel_angular = Eigen::Matrix<double, 3, 1>::Zero();
-  };
+  using Send = ArmorTrackerSend;
 
   struct EkfPointsMsg
   {
@@ -261,7 +271,7 @@ class ArmorTracker : public LibXR::Application
  public:
   // ====================== 构造与监控 ======================
   explicit ArmorTracker(LibXR::HardwareContainer& hw, LibXR::ApplicationManager& app,
-                        Config cfg, CameraBase::CameraInfo camera_info);
+                        Config cfg, const char* image_topic_name = "image_frame");
 
   static int CommandFun(ArmorTracker* self, int argc, char** argv);
   const Config& GetConfig() const { return cfg_; }
@@ -308,8 +318,8 @@ class ArmorTracker : public LibXR::Application
   static bool CompatibleImageTrackLabel(const ImageIdTrack& track,
                                         const ArmorDetectorResult& armor);
 #if defined(AUTO_AIM_PREVIEW_IMAGE) && AUTO_AIM_PREVIEW_IMAGE
-  static void PreviewImageThreadFun(ArmorTracker* self);
-  static void RenderPreviewFrame(ArmorTracker* self, cv::Mat frame);
+  static void PreviewImageThreadFun(ArmorTracker<CameraInfoV>* self);
+  static void RenderPreviewFrame(ArmorTracker<CameraInfoV>* self, cv::Mat frame);
 #endif
 
   // ====================== 内部聚合成员（类内聚合） ======================
@@ -432,5 +442,7 @@ class ArmorTracker : public LibXR::Application
 
   EkfPointsMsg ekf_msg_;
   CandidateDebugMsg candidate_debug_msg_{};
-  CameraBase::CameraInfo cam_info_{};  ///< 相机内参/畸变
+  const char* image_topic_name_{"image_frame"};
 };
+
+#include "ArmorTracker.inl"
