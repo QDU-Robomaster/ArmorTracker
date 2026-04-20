@@ -679,7 +679,7 @@ void ArmorTracker::PreviewImageThreadFun(ArmorTracker* self)
 
   while (true)
   {
-    SharedImageTopic::Subscriber subscriber(CameraBase::kSharedImageTopicName);
+    SharedImageTopic::Subscriber subscriber(CameraBase::SharedImageFrame::topic_name);
     if (!subscriber.Valid())
     {
       LibXR::Thread::Sleep(200);
@@ -701,11 +701,8 @@ void ArmorTracker::PreviewImageThreadFun(ArmorTracker* self)
       }
 
       const CameraBase::SharedImageFrame* frame_msg = recv_data.GetData();
-      if (frame_msg != nullptr && frame_msg->width > 0 && frame_msg->height > 0 &&
-          frame_msg->step > 0 && frame_msg->data_size > 0 &&
-          frame_msg->data_size <= CameraBase::kSharedImageMaxBytes &&
-          static_cast<size_t>(frame_msg->step) * static_cast<size_t>(frame_msg->height) <=
-              frame_msg->data_size)
+      if (frame_msg != nullptr &&
+          CameraBase::SharedImageFrame::HasValidPayload(*frame_msg))
       {
         const int cv_type = CvTypeFromEncoding(frame_msg->encoding);
         if (cv_type >= 0)
