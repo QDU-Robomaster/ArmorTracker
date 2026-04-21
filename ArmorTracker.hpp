@@ -43,7 +43,7 @@ constructor_args:
     frames:
       rotation: [0.0, 0.0, 0.0, 0.0]
       translation: [0.0, 0.0, 0.0]
-  image_topic_name: "image_frame"
+  frame_topic_name: "camera_frame_sync"
 template_args:
   - Info:
       width: 1280
@@ -58,6 +58,7 @@ template_args:
 required_hardware: []
 depends:
   - qdu-future/ArmorDetector
+  - qdu-future/CameraFrameSync
 === END MANIFEST === */
 // clang-format on
 
@@ -70,7 +71,7 @@ depends:
 #include <opencv2/core/types.hpp>
 
 // 框架与外部依赖头
-#include "CameraBase.hpp"
+#include "CameraFrameSync.hpp"
 #include "SolveTrajectory.hpp"
 #include "app_framework.hpp"
 #include "armor.hpp"
@@ -97,9 +98,10 @@ template <CameraTypes::CameraInfo CameraInfoV>
 class ArmorTracker : public LibXR::Application
 {
  public:
-  using Base = CameraBase<CameraInfoV>;
+  using FrameSync = CameraFrameSync<CameraInfoV>;
+  using Base = typename FrameSync::Base;
   using CameraInfo = typename Base::CameraInfo;
-  using SharedImageFrame = typename Base::SharedImageFrame;
+  using Frame = typename FrameSync::Frame;
 
   static inline constexpr CameraInfo kCameraInfo = CameraInfoV;
 
@@ -271,7 +273,7 @@ class ArmorTracker : public LibXR::Application
  public:
   // ====================== 构造与监控 ======================
   explicit ArmorTracker(LibXR::HardwareContainer& hw, LibXR::ApplicationManager& app,
-                        Config cfg, const char* image_topic_name = "image_frame");
+                        Config cfg, const char* frame_topic_name = "camera_frame_sync");
 
   static int CommandFun(ArmorTracker* self, int argc, char** argv);
   const Config& GetConfig() const { return cfg_; }
@@ -317,6 +319,7 @@ class ArmorTracker : public LibXR::Application
   static double TimestampDeltaSeconds(uint64_t newer, uint64_t older);
   static bool CompatibleImageTrackLabel(const ImageIdTrack& track,
                                         const ArmorDetectorResult& armor);
+  static void SyncFramePoseThreadFun(ArmorTracker<CameraInfoV>* self);
 #if defined(AUTO_AIM_PREVIEW_IMAGE) && AUTO_AIM_PREVIEW_IMAGE
   static void PreviewImageThreadFun(ArmorTracker<CameraInfoV>* self);
   static void RenderPreviewFrame(ArmorTracker<CameraInfoV>* self, cv::Mat frame);
@@ -436,13 +439,14 @@ class ArmorTracker : public LibXR::Application
   const char* name_ = "armor_tracker";
   LibXR::RamFS::File cmd_file_;
   std::atomic<bool> params_is_changed_{false};
+  LibXR::Thread sync_frame_pose_thread_{};
 #if defined(AUTO_AIM_PREVIEW_IMAGE) && AUTO_AIM_PREVIEW_IMAGE
   LibXR::Thread preview_image_thread_{};
 #endif
 
   EkfPointsMsg ekf_msg_;
   CandidateDebugMsg candidate_debug_msg_{};
-  const char* image_topic_name_{"image_frame"};
+  const char* frame_topic_name_{"camera_frame_sync"};
 };
 
 #include "ArmorTracker.inl"
