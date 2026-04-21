@@ -14,7 +14,6 @@
 #include <utility>
 
 #include "cycle_value.hpp"
-#include "linux_shared_topic.hpp"
 #include "logger.hpp"
 #include "message.hpp"
 #include "transform.hpp"
@@ -71,9 +70,6 @@ inline LibXR::Quaternion<double> PackedCameraRotation(
 }
 
 constexpr uint32_t kArmorTrackerSyncFrameWaitTimeoutMs = 100;
-template <CameraTypes::CameraInfo CameraInfoV>
-using ArmorTrackerSyncFrameTopic =
-    LibXR::LinuxSharedTopic<typename CameraFrameSync<CameraInfoV>::Frame>;
 
 inline int ArmorTrackerCvTypeFromEncoding(CameraTypes::Encoding encoding)
 {
@@ -445,11 +441,11 @@ using armor_tracker_detail::kArmorTrackerSyncFrameWaitTimeoutMs;
 template <CameraTypes::CameraInfo CameraInfoV>
 ArmorTracker<CameraInfoV>::ArmorTracker(LibXR::HardwareContainer& hw,
                                         LibXR::ApplicationManager&,
-                                        Config cfg, const char* frame_topic_name)
+                                        Config cfg, FrameSync& sync)
     : cfg_(std::move(cfg)),
       solver_cfg_(cfg_.solver),
       cmd_file_(LibXR::RamFS::CreateFile(name_, CommandFun, this)),
-      frame_topic_name_(frame_topic_name)
+      sync_(sync)
 {
   XR_LOG_INFO("Starting ArmorTracker!");
 
@@ -620,41 +616,39 @@ ArmorTracker<CameraInfoV>::ArmorTracker(LibXR::HardwareContainer& hw,
 template <CameraTypes::CameraInfo CameraInfoV>
 void ArmorTracker<CameraInfoV>::SyncFramePoseThreadFun(ArmorTracker<CameraInfoV>* self)
 {
-  using SyncFrameTopicT = armor_tracker_detail::ArmorTrackerSyncFrameTopic<CameraInfoV>;
-
-  XR_LOG_PASS("ArmorTracker pose sync uses frame topic: %s", self->frame_topic_name_);
+  XR_LOG_PASS("ArmorTracker pose sync uses image=%s imu=%s", self->sync_.ImageTopicName(),
+              self->sync_.ImuTopicName());
 
   while (true)
   {
-    typename SyncFrameTopicT::Subscriber subscriber(self->frame_topic_name_);
+    typename FrameSync::Subscriber subscriber(self->sync_);
     if (!subscriber.Valid())
     {
       LibXR::Thread::Sleep(200);
       continue;
     }
 
-    typename SyncFrameTopicT::Data recv_data;
+    SyncedFrame synced_frame;
     while (true)
     {
-      const auto wait_ans = subscriber.Wait(recv_data, kArmorTrackerSyncFrameWaitTimeoutMs);
+      const auto wait_ans =
+          subscriber.Wait(synced_frame, kArmorTrackerSyncFrameWaitTimeoutMs);
       if (wait_ans == LibXR::ErrorCode::TIMEOUT)
       {
         continue;
       }
       if (wait_ans != LibXR::ErrorCode::OK)
       {
-        recv_data.Reset();
         break;
       }
 
-      const Frame* frame_msg = recv_data.GetData();
-      if (frame_msg != nullptr)
+      const auto* image_frame = synced_frame.GetImageFrame();
+      if (image_frame != nullptr)
       {
-        self->PushCameraPose(frame_msg->timestamp_us,
+        self->PushCameraPose(image_frame->timestamp_us,
                              armor_tracker_detail::PackedCameraRotation(
-                                 frame_msg->rotation_wxyz));
+                                 synced_frame.imu.rotation_wxyz));
       }
-      recv_data.Reset();
     }
   }
 }
@@ -777,37 +771,36 @@ void ArmorTracker<CameraInfoV>::PreviewImageThreadFun(ArmorTracker<CameraInfoV>*
 
   while (true)
   {
-    using SyncFrameTopicT = armor_tracker_detail::ArmorTrackerSyncFrameTopic<CameraInfoV>;
-    typename SyncFrameTopicT::Subscriber subscriber(self->frame_topic_name_);
+    typename FrameSync::Subscriber subscriber(self->sync_);
     if (!subscriber.Valid())
     {
       LibXR::Thread::Sleep(200);
       continue;
     }
 
-    typename SyncFrameTopicT::Data recv_data;
+    SyncedFrame synced_frame;
     while (true)
     {
-      const auto wait_ans = subscriber.Wait(recv_data, kArmorTrackerSyncFrameWaitTimeoutMs);
+      const auto wait_ans =
+          subscriber.Wait(synced_frame, kArmorTrackerSyncFrameWaitTimeoutMs);
       if (wait_ans == LibXR::ErrorCode::TIMEOUT)
       {
         continue;
       }
       if (wait_ans != LibXR::ErrorCode::OK)
       {
-        recv_data.Reset();
         break;
       }
 
-      const Frame* frame_msg = recv_data.GetData();
-      if (frame_msg != nullptr)
+      const auto* image_frame = synced_frame.GetImageFrame();
+      if (image_frame != nullptr)
       {
         const int cv_type = ArmorTrackerCvTypeFromEncoding(kCameraInfo.encoding);
         if (cv_type >= 0)
         {
           cv::Mat input(static_cast<int>(kCameraInfo.height),
                         static_cast<int>(kCameraInfo.width), cv_type,
-                        const_cast<uint8_t*>(frame_msg->data.data()),
+                        const_cast<uint8_t*>(image_frame->data.data()),
                         static_cast<size_t>(kCameraInfo.step));
           cv::Mat frame = ArmorTrackerConvertToBgrWithEncoding(input, kCameraInfo.encoding);
           if (!frame.empty())
@@ -816,7 +809,6 @@ void ArmorTracker<CameraInfoV>::PreviewImageThreadFun(ArmorTracker<CameraInfoV>*
           }
         }
       }
-      recv_data.Reset();
     }
   }
 }

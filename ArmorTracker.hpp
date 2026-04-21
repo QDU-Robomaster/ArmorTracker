@@ -43,7 +43,7 @@ constructor_args:
     frames:
       rotation: [0.0, 0.0, 0.0, 0.0]
       translation: [0.0, 0.0, 0.0]
-  frame_topic_name: "camera_frame_sync"
+  sync: @camera_frame_sync
 template_args:
   - Info:
       width: 1280
@@ -101,7 +101,7 @@ class ArmorTracker : public LibXR::Application
   using FrameSync = CameraFrameSync<CameraInfoV>;
   using Base = typename FrameSync::Base;
   using CameraInfo = typename Base::CameraInfo;
-  using Frame = typename FrameSync::Frame;
+  using SyncedFrame = typename FrameSync::SyncedFrame;
 
   static inline constexpr CameraInfo kCameraInfo = CameraInfoV;
 
@@ -273,7 +273,7 @@ class ArmorTracker : public LibXR::Application
  public:
   // ====================== 构造与监控 ======================
   explicit ArmorTracker(LibXR::HardwareContainer& hw, LibXR::ApplicationManager& app,
-                        Config cfg, const char* frame_topic_name = "camera_frame_sync");
+                        Config cfg, FrameSync& sync);
 
   static int CommandFun(ArmorTracker* self, int argc, char** argv);
   const Config& GetConfig() const { return cfg_; }
@@ -446,7 +446,7 @@ class ArmorTracker : public LibXR::Application
 
   EkfPointsMsg ekf_msg_;
   CandidateDebugMsg candidate_debug_msg_{};
-  const char* frame_topic_name_{"camera_frame_sync"};
+  FrameSync& sync_;
 };
 
 #include "ArmorTracker.inl"
