@@ -1,1 +1,1 @@
-// Template implementation lives in ArmorTracker.hpp/ArmorTracker.inl.
+// Template implementation is fully merged into ArmorTracker.hpp.
