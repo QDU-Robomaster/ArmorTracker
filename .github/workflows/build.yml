@@ -22,6 +22,13 @@ jobs:
         with:
           path: Modules/${{ env.XR_MODULE_NAME }}
 
+      - name: Checkout CameraBase to ./Modules/CameraBase
+        uses: actions/checkout@v4
+        with:
+          repository: QDU-Robomaster/CameraBase
+          ref: feat/camerainfo-staticinfo-cxx20-20260420
+          path: Modules/CameraBase
+
       - name: Checkout CameraFrameSync to ./Modules/CameraFrameSync
         uses: actions/checkout@v4
         with:
@@ -123,6 +130,8 @@ jobs:
 
           modules = Path("Modules/modules.yaml")
           lines = [line.rstrip("\n") for line in modules.read_text().splitlines()]
+          if "- CameraBase" not in lines:
+              lines.append("- CameraBase")
           if "- CameraFrameSync" not in lines:
               lines.append("- CameraFrameSync")
           if "- ArmorDetector" not in lines:
