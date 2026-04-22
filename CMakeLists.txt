@@ -3,12 +3,12 @@
 # Add module to include path
 target_include_directories(xr PUBLIC ${CMAKE_CURRENT_LIST_DIR})
 
-# Auto-include source files
-file(GLOB MODULE_ARMORTRACKER_SRC CONFIGURE_DEPENDS
-  "${CMAKE_CURRENT_LIST_DIR}/*.cpp"
-  "${CMAKE_CURRENT_LIST_DIR}/*.cxx"
-  "${CMAKE_CURRENT_LIST_DIR}/*.cc"
-  "${CMAKE_CURRENT_LIST_DIR}/*.c"
+# Runtime sources only.
+# ArmorTracker itself is header-only now; TableGenerator.cpp is an offline tool
+# and must not be linked into the module target.
+set(MODULE_ARMORTRACKER_SRC
+  "${CMAKE_CURRENT_LIST_DIR}/SolveTrajectory.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/extended_kalman_filter.cpp"
 )
 
 target_sources(xr PRIVATE ${MODULE_ARMORTRACKER_SRC})
