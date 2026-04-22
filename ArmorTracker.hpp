@@ -43,7 +43,7 @@ constructor_args:
     frames:
       rotation: [0.0, 0.0, 0.0, 0.0]
       translation: [0.0, 0.0, 0.0]
-  sync: @camera_frame_sync
+  sync: '@camera_frame_sync'
 template_args:
   - Info:
       width: 1280
