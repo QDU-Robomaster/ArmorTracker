@@ -29,6 +29,13 @@ jobs:
           ref: feat/camera-frame-sync-mode1-20260421
           path: Modules/CameraFrameSync
 
+      - name: Checkout ArmorDetector to ./Modules/ArmorDetector
+        uses: actions/checkout@v4
+        with:
+          repository: QDU-Robomaster/ArmorDetector
+          ref: feat/camerainfo-staticinfo-cxx20-20260420
+          path: Modules/ArmorDetector
+
       - name: Normalize CameraFrameSync manifest for released xrobot
         run: |
           python3 - <<'PY'
@@ -111,7 +118,6 @@ jobs:
 
       - name: Register dependency modules
         run: |
-          xrobot_add_mod qdu-future/ArmorDetector
           python3 - <<'PY'
           from pathlib import Path
 
@@ -119,7 +125,9 @@ jobs:
           lines = [line.rstrip("\n") for line in modules.read_text().splitlines()]
           if "- CameraFrameSync" not in lines:
               lines.append("- CameraFrameSync")
-              modules.write_text("\n".join(lines) + "\n")
+          if "- ArmorDetector" not in lines:
+              lines.append("- ArmorDetector")
+          modules.write_text("\n".join(lines) + "\n")
           print(modules.read_text(), end="")
           PY
 
