@@ -61,7 +61,7 @@ jobs:
 
       - name: Pull libxr to ./libxr
         run: |
-          git clone --depth=1 --branch review/libxr-time-wrap-diff-20260422 \
+          git clone --depth=1 --branch fix/webots-time-semantics-master-20260416 \
             https://github.com/Jiu-xiao/libxr ./libxr
           python3 - <<'PY'
           from pathlib import Path
