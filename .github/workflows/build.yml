@@ -22,6 +22,27 @@ jobs:
         with:
           path: Modules/${{ env.XR_MODULE_NAME }}
 
+      - name: Checkout CameraFrameSync to ./Modules/CameraFrameSync
+        uses: actions/checkout@v4
+        with:
+          repository: QDU-Robomaster/CameraFrameSync
+          ref: feat/camera-frame-sync-mode1-20260421
+          path: Modules/CameraFrameSync
+
+      - name: Normalize CameraFrameSync manifest for released xrobot
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          header = Path("Modules/CameraFrameSync/CameraFrameSync.hpp")
+          text = header.read_text()
+          old = "  camera: @camera\n"
+          new = "  camera: '@camera'\n"
+          if old not in text:
+              raise SystemExit("unexpected CameraFrameSync manifest layout")
+          header.write_text(text.replace(old, new, 1))
+          PY
+
       - name: Create main.cpp
         run: |
           cat > main.cpp <<'EOF'
@@ -88,9 +109,19 @@ jobs:
         run: |
           xrobot_init_mod
 
-      - name: Add required modules
+      - name: Register dependency modules
         run: |
-          xrobot_add_mod ${{ env.XR_MODULE_NAME }} && xrobot_add_mod qdu-future/ArmorDetector && xrobot_add_mod qdu-future/CameraFrameSync && cat User/xrobot.yaml
+          xrobot_add_mod qdu-future/ArmorDetector
+          python3 - <<'PY'
+          from pathlib import Path
+
+          modules = Path("Modules/modules.yaml")
+          lines = [line.rstrip("\n") for line in modules.read_text().splitlines()]
+          if "- CameraFrameSync" not in lines:
+              lines.append("- CameraFrameSync")
+              modules.write_text("\n".join(lines) + "\n")
+          print(modules.read_text(), end="")
+          PY
 
       - name: Add this repo module
         run: |
