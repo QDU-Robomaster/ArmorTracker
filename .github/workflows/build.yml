@@ -111,6 +111,7 @@ jobs:
 
       - name: Create test module config
         run: |
+          mkdir -p User
           cat > User/xrobot.yaml <<'EOF'
           constexpr_namespace: ProjectConstexpr
 
