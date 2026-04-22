@@ -111,8 +111,7 @@ jobs:
 
       - name: Create test module config
         run: |
-          mkdir -p User
-          cat > User/xrobot.yaml <<'EOF'
+          cat > tracker_ci.yaml <<'EOF'
           constexpr_namespace: ProjectConstexpr
 
           constexprs:
@@ -224,11 +223,11 @@ jobs:
                     translation: [0.0, 0.0, 0.0]
                 sync: '@camera_frame_sync'
           EOF
-          cat User/xrobot.yaml
+          cat tracker_ci.yaml
 
       - name: Generate main
         run: |
-          xrobot_gen_main --output User/xrobot_main.hpp
+          xrobot_gen_main --config tracker_ci.yaml --output User/xrobot_main.hpp
 
       - name: Build
         run: |
