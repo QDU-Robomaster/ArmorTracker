@@ -63,17 +63,6 @@ jobs:
         run: |
           git clone --depth=1 --branch fix/webots-time-semantics-master-20260416 \
             https://github.com/Jiu-xiao/libxr ./libxr
-          python3 - <<'PY'
-          from pathlib import Path
-
-          header = Path("libxr/system/webots/linux_shared_topic.hpp")
-          text = header.read_text()
-          old = '#include "../Linux/linux_shared_topic_impl.hpp"'
-          new = '#include "../linux/linux_shared_topic_impl.hpp"'
-          if old not in text:
-              raise SystemExit("unexpected libxr shared-topic include layout")
-          header.write_text(text.replace(old, new, 1))
-          PY
 
       - name: Setup Python & Install deps
         run: |
