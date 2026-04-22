@@ -117,7 +117,9 @@ inline cv::Mat ArmorTrackerConvertToBgrWithEncoding(const cv::Mat& input, Camera
       return output;
     }
     default:
-      return input;
+      // Preview overlays must never write back into the shared sync image.
+      // Detach even when the source frame is already BGR.
+      return input.clone();
   }
 }
 
