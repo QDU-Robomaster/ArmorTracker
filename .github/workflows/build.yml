@@ -91,7 +91,7 @@ jobs:
           xrobot_add_mod qdu-future/CameraBase@feat/camerainfo-staticinfo-cxx20-20260420
           xrobot_add_mod qdu-future/WebotsCamera@feat/camerainfo-staticinfo-cxx20-20260420
           xrobot_add_mod qdu-future/CameraFrameSync@feat/camera-frame-sync-mode1-20260421
-          xrobot_add_mod qdu-future/ArmorDetector@feat/camerainfo-staticinfo-cxx20-20260420
+          xrobot_add_mod qdu-future/ArmorDetector@feat/tracker-sp-baseline-20260426
           cat Modules/modules.yaml
 
       - name: Sync dependency repos
@@ -207,6 +207,10 @@ jobs:
                   noise:
                     r_xyz_factor: 0.05
                     r_yaw: 0.02
+                  geometry:
+                    initial_radius: 0.26
+                    min_radius: 0.12
+                    max_radius: 0.4
                   frames:
                     rotation: [0.0, 0.0, 0.0, 0.0]
                     translation: [0.0, 0.0, 0.0]
