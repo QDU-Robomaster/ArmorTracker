@@ -1,22 +1,34 @@
 # ArmorTracker
 
-请先将TableGenerator.cpp中的main函数取消注释，随后运行以下命令：
-```bash
-cd Modules/ArmorTracker
-g++ -o TableGenerator TableGenerator.cpp -O3
-./TableGenerator
-mv table.bin ../../build/table.bin
-```
-随后将TableGenerator.cpp中的main函数注释掉。
+`ArmorTracker` is the target-level tracker module used by the Webots/Linux
+auto-aim pipeline.
 
-## Required Hardware
-None
+## Current Layout
 
-## Constructor Arguments
-None
+- `ArmorTracker.hpp`: tracker orchestration, EKF wiring, topics, state machine
+- `ArmorTrackerCommon.hpp`: shared yaw/time/image-area utilities
+- `ArmorTrackerRuntimeSupport.hpp`: runtime/env helper functions
+- `ArmorTrackerSelectionSupport.hpp`: face-binding and selection logging helpers
+- `ArmorTrackerDebugSupport.hpp`: preview overlay and candidate-debug helpers
+- `ArmorTrackerFaceSelector.hpp`: face selection policy and candidate scoring
+- `ArmorTrackerImageTracker.hpp`: image-space armor identity tracking
+- `ArmorTrackerObserver.hpp`: vehicle geometry observation model
+- `extended_kalman_filter.*`: generic EKF implementation
+- `SolveTrajectory.*`, `TrajectoryCompensationTable.hpp`, `table.bin`:
+  projectile compensation support
 
-## Template Arguments
-None
+## Trajectory Table
 
-## Depends
-None
+`table.bin` is a runtime asset for trajectory compensation.
+
+If the table must be regenerated, build and run `TableGenerator.cpp`
+separately, then replace `table.bin`.
+
+## Build Boundary
+
+- Runtime module sources:
+  - `SolveTrajectory.cpp`
+  - `extended_kalman_filter.cpp`
+- The tracker itself is header-only.
+- `TableGenerator.cpp` is an offline tool and must not be linked into the
+  runtime target.

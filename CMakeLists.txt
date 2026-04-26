@@ -1,11 +1,6 @@
-# CMakeLists.txt for ArmorTracker
-
-# Add module to include path
+# ArmorTracker runtime module
 target_include_directories(xr PUBLIC ${CMAKE_CURRENT_LIST_DIR})
 
-# Runtime sources only.
-# ArmorTracker itself is header-only now; TableGenerator.cpp is an offline tool
-# and must not be linked into the module target.
 set(MODULE_ARMORTRACKER_SRC
   "${CMAKE_CURRENT_LIST_DIR}/SolveTrajectory.cpp"
   "${CMAKE_CURRENT_LIST_DIR}/extended_kalman_filter.cpp"
@@ -13,24 +8,7 @@ set(MODULE_ARMORTRACKER_SRC
 
 target_sources(xr PRIVATE ${MODULE_ARMORTRACKER_SRC})
 
-# INTERFACE deps shell
 get_filename_component(_MODULE_DIRNAME ${CMAKE_CURRENT_LIST_DIR} NAME)
 set(_DEPS_TARGET "${_MODULE_DIRNAME}_deps")
 add_library(${_DEPS_TARGET} INTERFACE)
-
-# find_package(YourPkg REQUIRED COMPONENTS a b c)
-
-# target_link_libraries(${_DEPS_TARGET} INTERFACE
-#   # YourLibA
-#   # YourLibB
-# )
-
-# target_compile_definitions(${_DEPS_TARGET} INTERFACE
-#   # FOO=1
-# )
-# target_compile_options(${_DEPS_TARGET} INTERFACE
-#   # -Wall
-# )
-
-# Register to global
 set_property(GLOBAL APPEND PROPERTY XR_MODULE_DEPS ${_DEPS_TARGET})

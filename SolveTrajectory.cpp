@@ -3,11 +3,21 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <cstdlib>
 #include <iostream>
 #include <limits>
 #include <utility>
 
 #include "logger.hpp"
+
+namespace
+{
+bool SolverUseTargetDeltaZ()
+{
+  const char* env = std::getenv("XR_SOLVER_USE_TARGET_DZ");
+  return env != nullptr && env[0] != '\0' && env[0] != '0';
+}
+}  // namespace
 
 SolveTrajectory::SolveTrajectory(const float& k_, const int& bias_time_,
                                  const float& s_bias_, const float& z_bias_,
@@ -142,13 +152,31 @@ void SolveTrajectory::CalculateArmorPosition(Target* msg, bool use_1,
       r = static_cast<float>(use_1 ? msg->radius_1 : msg->radius_2);
     }
 
-    // 世界坐标推算（简单平面圆周 + 保持 z 不变）
-    tar_position_[i].x = static_cast<float>(msg->position.x()) - r * std::cos(TMP_YAW);
-    tar_position_[i].y = static_cast<float>(msg->position.y()) - r * std::sin(TMP_YAW);
-    tar_position_[i].z = static_cast<float>(msg->position.z());
+    const bool use_delta_z =
+        SolverUseTargetDeltaZ() && msg->armors_num == ARMOR_NUM_NORMAL &&
+        (i == 1 || i == 3);
+
+    // 世界坐标推算。默认保持旧行为；实验开关打开时按 SP 的 1/3 号面使用 dz。
+    tar_position_[i].x = static_cast<float>(msg->position.x()) + r * std::cos(TMP_YAW);
+    tar_position_[i].y = static_cast<float>(msg->position.y()) + r * std::sin(TMP_YAW);
+    tar_position_[i].z = static_cast<float>(msg->position.z() +
+                                            (use_delta_z ? msg->dz : 0.0));
     tar_position_[i].yaw = TMP_YAW;
 
     use_1 = !use_1;  // 交替使用 r1/r2
+  }
+
+  if (msg->measured_face_valid && msg->measured_face_index >= 0 &&
+      msg->measured_face_index < msg->armors_num)
+  {
+    const int idx = msg->measured_face_index;
+    tar_position_[idx].x = static_cast<float>(msg->measured_face_position.x());
+    tar_position_[idx].y = static_cast<float>(msg->measured_face_position.y());
+    tar_position_[idx].z = static_cast<float>(msg->measured_face_position.z());
+    tar_position_[idx].yaw = static_cast<float>(msg->measured_face_yaw);
+    tmp_yaws_[idx] = tar_position_[idx].yaw;
+    min_yaw_in_cycle_ = std::min(min_yaw_in_cycle_, tar_position_[idx].yaw);
+    max_yaw_in_cycle_ = std::max(max_yaw_in_cycle_, tar_position_[idx].yaw);
   }
 }
 
@@ -298,9 +326,97 @@ void SolveTrajectory::FireLogicDefault(float& pitch, float& yaw, float& aim_x,
   yaw = y;
 }
 
+int SolveTrajectory::SelectSpLikeAimArmor(Target* msg)
+{
+  const int armor_num = std::max(1, std::min(4, msg->armors_num));
+  const double camera_facing_yaw =
+      std::remainder(std::atan2(msg->position.y(), msg->position.x()) +
+                         static_cast<double>(PI),
+                     2.0 * static_cast<double>(PI));
+  std::vector<double> delta_angle_list;
+  delta_angle_list.reserve(static_cast<std::size_t>(armor_num));
+  for (int i = 0; i < armor_num; ++i)
+  {
+    delta_angle_list.emplace_back(
+        std::remainder(static_cast<double>(tmp_yaws_[i]) - camera_facing_yaw,
+                       2.0 * static_cast<double>(PI)));
+  }
+
+  if (std::abs(msg->radius_1) <= 2.0 && msg->id != ArmorNumber::OUTPOST)
+  {
+    std::vector<int> candidate_indices;
+    for (int i = 0; i < armor_num; ++i)
+    {
+      if (std::abs(delta_angle_list[i]) <= 60.0 / 57.3)
+      {
+        candidate_indices.push_back(i);
+      }
+    }
+    if (candidate_indices.empty())
+    {
+      return -1;
+    }
+    if (candidate_indices.size() > 1)
+    {
+      const int id0 = candidate_indices[0];
+      const int id1 = candidate_indices[1];
+      if (lock_id_ != id0 && lock_id_ != id1)
+      {
+        lock_id_ = std::abs(delta_angle_list[id0]) <
+                           std::abs(delta_angle_list[id1])
+                       ? id0
+                       : id1;
+      }
+      return lock_id_;
+    }
+    lock_id_ = -1;
+    return candidate_indices[0];
+  }
+
+  const double coming_angle =
+      msg->id == ArmorNumber::OUTPOST ? 70.0 / 57.3 : 55.0 / 57.3;
+  const double leaving_angle =
+      msg->id == ArmorNumber::OUTPOST ? 30.0 / 57.3 : 20.0 / 57.3;
+  for (int i = 0; i < armor_num; ++i)
+  {
+    if (std::abs(delta_angle_list[i]) > coming_angle)
+    {
+      continue;
+    }
+    if (msg->v_yaw > 0.0 && delta_angle_list[i] < leaving_angle)
+    {
+      return i;
+    }
+    if (msg->v_yaw < 0.0 && delta_angle_list[i] > -leaving_angle)
+    {
+      return i;
+    }
+  }
+  return -1;
+}
+
 void SolveTrajectory::AutoSolveTrajectory(float& pitch, float& yaw, float& aim_x,
                                           float& aim_y, float& aim_z, Target* msg)
 {
-  // 当前策略：优先使用“顶部优先”逻辑
-  FireLogicIsTop(pitch, yaw, aim_x, aim_y, aim_z, msg);
+  tar_yaw_ = static_cast<float>(msg->yaw);
+  const float time_delay =
+      static_cast<float>(bias_time_) / 1000.0f + static_cast<float>(fly_time_);
+  tar_yaw_ += static_cast<float>(msg->v_yaw) * time_delay;
+  CalculateArmorPosition(msg, /*use_1=*/false,
+                         /*use_average_radius=*/msg->id == ArmorNumber::OUTPOST);
+  const int idx = SelectSpLikeAimArmor(msg);
+  if (idx < 0)
+  {
+    pitch = std::numeric_limits<float>::quiet_NaN();
+    yaw = std::numeric_limits<float>::quiet_NaN();
+    aim_x = aim_y = aim_z = 0.0f;
+    return;
+  }
+  const auto [p, y] =
+      CalculatePitchAndYaw(idx, msg, time_delay, s_bias_, z_bias_, current_v_,
+                           /*use_target_center_for_yaw=*/false, aim_x, aim_y, aim_z);
+  pitch = p;
+  yaw = y;
+
+  XR_LOG_DEBUG("SolveTrajectory SP-like idx=%d pitch=%f yaw=%f", idx, pitch, yaw);
 }

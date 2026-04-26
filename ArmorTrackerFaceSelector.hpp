@@ -10,58 +10,11 @@
 #include <Eigen/Eigen>
 #include <opencv2/imgproc.hpp>
 
+#include "ArmorTrackerCommon.hpp"
 #include "armor.hpp"
-#include "cycle_value.hpp"
-#include "logger.hpp"
-#include "transform.hpp"
 
 namespace armor_tracker
 {
-// 选面逻辑内部也需要反解 yaw，这里单独保留一套纯头文件工具函数，
-// 避免再把几何判定塞回 ArmorTracker 主类。
-inline double UnwrapYawNear(double yaw, double reference_yaw)
-{
-  const double delta =
-      LibXR::CycleValue<double>(yaw) - LibXR::CycleValue<double>(reference_yaw);
-  return reference_yaw + delta;
-}
-
-inline double QuaternionToYaw(const LibXR::Quaternion<double>& q)
-{
-  LibXR::EulerAngle<double> eulr =
-      LibXR::RotationMatrix<double>(q.ToRotationMatrix()).ToEulerAngle();
-  return eulr.Yaw();
-}
-
-inline double OrientationToYawNear(const LibXR::Quaternion<double>& q, double reference_yaw)
-{
-  return UnwrapYawNear(QuaternionToYaw(q), reference_yaw);
-}
-
-inline double AngularDiffAbs(double lhs, double rhs)
-{
-  return std::abs(LibXR::CycleValue<double>(lhs) - LibXR::CycleValue<double>(rhs));
-}
-
-inline void LogImpossibleYawDiff(const char* tag, std::size_t armor_index, int face_index,
-                                 double measured_yaw, double predicted_yaw,
-                                 double yaw_diff)
-{
-  if (!(std::isfinite(yaw_diff)) || yaw_diff <= M_PI + 1e-3)
-  {
-    return;
-  }
-  const double wrapped_measured = LibXR::CycleValue<double>(measured_yaw);
-  const double wrapped_predicted = LibXR::CycleValue<double>(predicted_yaw);
-  XR_LOG_ERROR(
-      "Impossible yaw diff[%s]: armor=%zu face=%d measured=%.6f predicted=%.6f wrapped_measured=%.6f wrapped_predicted=%.6f yaw_diff=%.6f direct_cycle_sub=%.6f raw_sub=%.6f",
-      tag, armor_index, face_index, measured_yaw, predicted_yaw, wrapped_measured,
-      wrapped_predicted, yaw_diff,
-      std::abs(LibXR::CycleValue<double>(measured_yaw) -
-               LibXR::CycleValue<double>(predicted_yaw)),
-      std::abs(measured_yaw - predicted_yaw));
-}
-
 inline double FaceSwitchPenalty(int face_index)
 {
   if (face_index == 0)
@@ -69,13 +22,6 @@ inline double FaceSwitchPenalty(int face_index)
     return 0.0;
   }
   return face_index == 2 ? 0.45 : 0.20;
-}
-
-inline double ArmorImageArea(const ArmorDetectorResult& armor)
-{
-  return std::max(
-      1.0, std::abs(cv::contourArea(std::vector<cv::Point2f>(
-               armor.points.begin(), armor.points.end()))));
 }
 
 struct FaceSelectionPolicy
@@ -190,6 +136,18 @@ struct FaceSelectionDebugSnapshot
   std::array<FaceSelectionDebugItem, kMaxItems> items{};
 };
 
+enum class FaceSelectionAcceptedMode : std::uint8_t
+{
+  NONE = 0,
+  STRICT_SWITCH = 1,
+  RELAXED_SWITCH = 2,
+  ID_REBIND_SWITCH = 3,
+  ID_HANDOVER_SWITCH = 4,
+  STRICT_SAME_FACE = 5,
+  RELAXED_SAME_FACE = 6,
+  ID_ASSISTED_SAME_FACE = 7,
+};
+
 struct FaceSelectionResult
 {
   // 选面器的输出分两层：
@@ -222,7 +180,7 @@ struct FaceSelectionResult
   bool switch_blocked_by_id_mismatch = false;
   bool allow_face_switch = false;
 
-  uint8_t accepted_mode = 0;
+  FaceSelectionAcceptedMode accepted_mode = FaceSelectionAcceptedMode::NONE;
   double info_position_diff = DBL_MAX;
   double info_yaw_diff = DBL_MAX;
 };
@@ -427,18 +385,15 @@ FaceSelectionResult SelectFaceMatch(
             area_ratio_log);
         continue;
       }
+      double dz_mismatch_penalty = 0.0;
       if (!policy.symmetric_geometry_enabled && tracked.tracked_armors_num == 4 &&
           face_index % 2 == 1 && tracked.dz_abs_ref > 0.02)
       {
-        const double measured_dz_abs = std::abs(get_predicted_position(0).z() - position_vec.z());
-        constexpr double kDzConsistencyTol = 0.03;
-        if (std::abs(measured_dz_abs - tracked.dz_abs_ref) >= kDzConsistencyTol)
-        {
-          XR_LOG_DEBUG(
-              "Tracker reject odd face by dz: armor=%zu face=%d measured=%.3f ref=%.3f",
-              armor_index, face_index, measured_dz_abs, tracked.dz_abs_ref);
-          continue;
-        }
+        const double measured_dz_abs =
+            std::abs(get_predicted_position(0).z() - position_vec.z());
+        const double dz_error =
+            std::abs(measured_dz_abs - tracked.dz_abs_ref);
+        dz_mismatch_penalty = std::min(dz_error / 0.05, 0.35);
       }
 
       const double position_score =
@@ -456,14 +411,14 @@ FaceSelectionResult SelectFaceMatch(
               : 0.0;
       const double number_penalty = same_number ? 0.0 : 1.5;
       const double persistent_track_bonus =
-          (same_persistent_track && face_index == 0) ? 0.45 : 0.0;
+          (same_persistent_track && face_index == 0) ? 0.25 : 0.0;
       const double confirmed_switch_bonus =
-          (policy.id_assist_enabled && face_index > 0 && confirmed_image_track) ? 0.08
+          (policy.id_assist_enabled && face_index > 0 && confirmed_image_track) ? 0.16
                                                                                 : 0.0;
       const double score =
           position_score + 0.40 * yaw_score + FaceSwitchPenalty(face_index) +
           number_penalty - view_bonus + 0.35 * image_score +
-          0.20 * area_ratio_score - persistent_track_bonus -
+          0.20 * area_ratio_score + dz_mismatch_penalty - persistent_track_bonus -
           confirmed_switch_bonus;
 
       uint8_t debug_index = FaceSelectionDebugSnapshot::kMaxItems;
@@ -539,10 +494,6 @@ FaceSelectionResult SelectFaceMatch(
   const double relaxed_face_switch_distance = policy.max_match_distance * 1.25;
   const double relaxed_face_switch_yaw_diff =
       std::max(policy.max_match_yaw_diff * 1.2, policy.max_match_yaw_diff + 0.1);
-  const double id_assisted_rebind_distance =
-      std::min(relaxed_face_switch_distance, policy.max_match_distance * 1.30);
-  const double id_assisted_rebind_yaw_diff =
-      std::min(relaxed_face_switch_yaw_diff, policy.max_match_yaw_diff * 1.10);
   const double face_switch_position_tie_margin = 0.01;
 
   // 第二阶段：在“同面保持”和“切面”之间做最终决策。
@@ -597,6 +548,9 @@ FaceSelectionResult SelectFaceMatch(
 
   const double id_assisted_same_face_hold_distance =
       std::min(policy.max_match_distance * 0.45, 0.20);
+  const double id_assisted_same_face_hold_yaw_diff =
+      std::min(id_assisted_same_face_yaw_diff,
+               policy.face_switch_yaw_deadzone + 0.25);
   result.id_assisted_same_face_hold =
       policy.id_assist_enabled && result.best_same_face_candidate.face_index == 0 &&
       result.best_same_face_candidate.same_persistent_track &&
@@ -604,7 +558,9 @@ FaceSelectionResult SelectFaceMatch(
       result.best_same_face_candidate.image_center_diff < 24.0 &&
       result.best_same_face_candidate.area_ratio_log < 0.18 &&
       result.best_same_face_candidate.position_diff <
-          id_assisted_same_face_hold_distance;
+          id_assisted_same_face_hold_distance &&
+      result.best_same_face_candidate.yaw_diff <
+          id_assisted_same_face_hold_yaw_diff;
   result.matched_same_face =
       result.strict_same_face_match || result.relaxed_same_face_match ||
       result.id_assisted_same_face_match || result.id_assisted_same_face_hold;
@@ -619,28 +575,10 @@ FaceSelectionResult SelectFaceMatch(
       result.best_switch_candidate.position_diff < relaxed_face_switch_distance &&
       result.best_switch_candidate.yaw_diff < relaxed_face_switch_yaw_diff;
 
-  const bool persistent_track_missing_this_frame =
-      policy.id_assist_enabled && tracked.tracked_face_track_id_valid &&
-      !result.observed_persistent_track_this_frame;
-  result.id_assisted_face_rebind_match =
-      persistent_track_missing_this_frame &&
-      result.best_switch_candidate.face_index > 0 &&
-      result.best_switch_candidate.confirmed_image_track &&
-      result.best_switch_candidate.position_diff < id_assisted_rebind_distance &&
-      result.best_switch_candidate.yaw_diff < id_assisted_rebind_yaw_diff;
-
-  result.id_assisted_face_handover_match =
-      result.best_switch_candidate.face_index > 0 &&
-      result.best_switch_candidate.confirmed_image_track &&
-      result.best_same_face_candidate.face_index == 0 &&
-      result.best_same_face_candidate.same_persistent_track &&
-      result.best_same_face_candidate.position_diff >
-          relaxed_same_face_distance * 1.5 &&
-      result.best_switch_candidate.position_diff < id_assisted_rebind_distance &&
-      result.best_switch_candidate.yaw_diff < id_assisted_rebind_yaw_diff &&
-      result.best_switch_candidate.position_diff +
-              policy.face_switch_position_deadzone <
-          result.best_same_face_candidate.position_diff;
+  // 图像 track id 只允许增强同面保持，不能单独触发跨面切换。
+  // 两块同编号装甲板在图像上接近或交叉时，ID rebind 会把车体 yaw 拉到错误面。
+  result.id_assisted_face_rebind_match = false;
+  result.id_assisted_face_handover_match = false;
   result.matched_switch_face =
       result.strict_face_switch_match || result.relaxed_face_switch_match ||
       result.id_assisted_face_rebind_match ||
@@ -657,7 +595,9 @@ FaceSelectionResult SelectFaceMatch(
       result.matched_switch_face && result.best_same_face_candidate.face_index == 0 &&
       result.best_switch_candidate.position_diff +
               policy.face_switch_position_deadzone <
-          result.best_same_face_candidate.position_diff;
+          result.best_same_face_candidate.position_diff &&
+      result.best_switch_candidate.yaw_diff <
+          result.best_same_face_candidate.yaw_diff + policy.face_switch_yaw_deadzone;
   const bool switch_has_clear_yaw_advantage =
       result.matched_switch_face && result.best_same_face_candidate.face_index == 0 &&
       result.best_switch_candidate.position_diff <
@@ -666,8 +606,10 @@ FaceSelectionResult SelectFaceMatch(
       result.best_switch_candidate.yaw_diff + policy.face_switch_yaw_deadzone <
           result.best_same_face_candidate.yaw_diff;
 
+  // 切面冷却是对“连续改写车体面身份”的保护，不应只在同面候选存在时生效。
+  // 否则换面后的下一帧如果同面暂时匹配不上，selector 会继续连跳到另一面。
   result.switch_blocked_by_timeout =
-      tracked.face_switch_cooldown_remaining > 1e-6 && result.matched_same_face;
+      tracked.face_switch_cooldown_remaining > 1e-6 && result.matched_switch_face;
   result.allow_face_switch =
       result.matched_switch_face && !result.switch_blocked_by_timeout &&
       !result.switch_blocked_by_id_mismatch &&
@@ -688,10 +630,12 @@ FaceSelectionResult SelectFaceMatch(
     result.has_selected_candidate = true;
     result.accepted_mode =
         result.strict_face_switch_match
-            ? 1
+            ? FaceSelectionAcceptedMode::STRICT_SWITCH
             : (result.id_assisted_face_rebind_match
-                   ? 5
-                   : (result.id_assisted_face_handover_match ? 6 : 3));
+                   ? FaceSelectionAcceptedMode::ID_REBIND_SWITCH
+                   : (result.id_assisted_face_handover_match
+                          ? FaceSelectionAcceptedMode::ID_HANDOVER_SWITCH
+                          : FaceSelectionAcceptedMode::RELAXED_SWITCH));
   }
   else if (result.matched_same_face)
   {
@@ -699,8 +643,10 @@ FaceSelectionResult SelectFaceMatch(
     result.has_selected_candidate = true;
     result.accepted_mode =
         result.strict_same_face_match
-            ? 1
-            : (result.id_assisted_same_face_match ? 4 : 2);
+            ? FaceSelectionAcceptedMode::STRICT_SAME_FACE
+            : (result.id_assisted_same_face_match
+                   ? FaceSelectionAcceptedMode::ID_ASSISTED_SAME_FACE
+                   : FaceSelectionAcceptedMode::RELAXED_SAME_FACE);
   }
 
   if (result.has_selected_candidate)

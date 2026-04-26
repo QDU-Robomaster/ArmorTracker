@@ -19,7 +19,6 @@ struct ObserverPolicy
 {
   bool single_armor_mode = false;
   bool symmetric_geometry_enabled = false;
-  bool face_switch_recenter_enabled = true;
   double max_match_distance = 0.15;
   double max_match_yaw_diff = 1.0;
   double initial_radius = 0.26;
@@ -30,6 +29,7 @@ struct ObserverRuntime
   ArmorNumber tracked_id = ArmorNumber::INVALID;
   ArmorType tracked_armor_type = ArmorType::INVALID;
   int tracked_armors_num = 4;
+  int tracked_face_index = 0;
   bool tracked_face_track_id_valid = false;
   uint16_t tracked_face_track_id = 0;
   std::array<bool, 4> face_track_id_valid{};
@@ -47,6 +47,7 @@ inline void UpdateArmorsNum(ObserverRuntime& runtime,
   if (policy.single_armor_mode)
   {
     runtime.tracked_armors_num = 1;
+    runtime.tracked_face_index = 0;
     return;
   }
   if (runtime.tracked_id == ArmorNumber::OUTPOST)
@@ -57,6 +58,15 @@ inline void UpdateArmorsNum(ObserverRuntime& runtime,
   {
     runtime.tracked_armors_num = 4;
   }
+  const int armor_count = std::max(1, runtime.tracked_armors_num);
+  runtime.tracked_face_index =
+      ((runtime.tracked_face_index % armor_count) + armor_count) % armor_count;
+}
+
+inline int NormalizeFaceIndex(int face_index, int armor_count)
+{
+  const int bounded_count = std::max(1, armor_count);
+  return ((face_index % bounded_count) + bounded_count) % bounded_count;
 }
 
 inline double OrientationToYaw(const LibXR::Quaternion<double>& q,
@@ -76,6 +86,26 @@ inline double GetArmorYawFromState(const Eigen::VectorXd& state,
   return state(6) - angle_step * face_index;
 }
 
+inline double GetArmorSecondRadiusFromState(const Eigen::VectorXd& state,
+                                            const ObserverPolicy& policy)
+{
+  if (policy.symmetric_geometry_enabled)
+  {
+    return state(8);
+  }
+  return state(8) + state(9);
+}
+
+inline double GetArmorDzFromState(const Eigen::VectorXd& state,
+                                  const ObserverPolicy& policy)
+{
+  if (policy.symmetric_geometry_enabled)
+  {
+    return 0.0;
+  }
+  return state(10);
+}
+
 inline Eigen::Vector3d GetArmorPositionFromState(const Eigen::VectorXd& state,
                                                  const ObserverRuntime& runtime,
                                                  const ObserverPolicy& policy,
@@ -90,8 +120,8 @@ inline Eigen::Vector3d GetArmorPositionFromState(const Eigen::VectorXd& state,
   if (!policy.symmetric_geometry_enabled && runtime.tracked_armors_num == 4 &&
       face_index % 2 == 1)
   {
-    r = runtime.another_r;
-    za = state(4) + runtime.dz;
+    r = GetArmorSecondRadiusFromState(state, policy);
+    za = state(4) + GetArmorDzFromState(state, policy);
   }
 
   const double xa = xc - r * std::cos(yaw);
@@ -109,229 +139,44 @@ inline void InitEkfState(Eigen::VectorXd& state, ObserverRuntime& runtime,
   runtime.last_yaw = 0.0;
   const double yaw = OrientationToYaw(armor.pose.rotation, runtime);
 
-  state = Eigen::VectorXd::Zero(9);
+  state = Eigen::VectorXd::Zero(11);
   const double r = policy.initial_radius;
   const double xc = xa + r * std::cos(yaw);
   const double yc = ya + r * std::sin(yaw);
   runtime.dz = 0.0;
   runtime.dz_abs_ref = 0.0;
   runtime.another_r = r;
+  runtime.tracked_face_index = 0;
   runtime.face_switch_cooldown_remaining = 0.0;
-  state << xc, 0, yc, 0, za, 0, yaw, 0, r;
+  state << xc, 0, yc, 0, za, 0, yaw, 0, r, 0, 0;
 }
 
-inline void UpdateDzReference(ObserverRuntime& runtime,
-                              const ObserverPolicy& policy,
-                              const ArmorDetectorResults& armors_msg,
-                              const ArmorDetectorResult& anchor)
+inline void SyncDzReferenceFromState(ObserverRuntime& runtime)
 {
-  if (policy.symmetric_geometry_enabled || runtime.tracked_armors_num != 4)
-  {
-    return;
-  }
+  runtime.dz_abs_ref = std::abs(runtime.dz);
+}
 
-  double min_z = DBL_MAX;
-  double max_z = -DBL_MAX;
-  int count = 0;
-  for (const auto& armor : armors_msg)
-  {
-    if (anchor.number != ArmorNumber::INVALID && armor.number != anchor.number)
-    {
-      continue;
-    }
-    if (anchor.type != ArmorType::INVALID && armor.type != anchor.type)
-    {
-      continue;
-    }
-    const double z = armor.pose.translation.z();
-    if (!std::isfinite(z))
-    {
-      continue;
-    }
-    min_z = std::min(min_z, z);
-    max_z = std::max(max_z, z);
-    ++count;
-  }
-
-  if (count < 2)
-  {
-    return;
-  }
-
-  const double measured_dz_abs = max_z - min_z;
-  if (!(measured_dz_abs > 0.02) || !(measured_dz_abs < 0.20))
-  {
-    return;
-  }
-
-  if (runtime.dz_abs_ref <= 1e-6)
-  {
-    runtime.dz_abs_ref = measured_dz_abs;
-  }
-  else
-  {
-    runtime.dz_abs_ref = 0.8 * runtime.dz_abs_ref + 0.2 * measured_dz_abs;
-  }
-
-  const double z_mid = 0.5 * (min_z + max_z);
-  const double anchor_z = anchor.pose.translation.z();
-  constexpr double kMidTol = 0.005;
-  if (anchor_z > z_mid + kMidTol)
-  {
-    runtime.dz = -runtime.dz_abs_ref;
-  }
-  else if (anchor_z < z_mid - kMidTol)
-  {
-    runtime.dz = runtime.dz_abs_ref;
-  }
-  else if (std::abs(runtime.dz) > 1e-6)
-  {
-    runtime.dz = std::copysign(runtime.dz_abs_ref, runtime.dz);
-  }
+inline int LocalFaceToCanonicalFace(const ObserverRuntime& runtime, int face_index)
+{
+  return NormalizeFaceIndex(runtime.tracked_face_index + face_index,
+                            std::max(1, runtime.tracked_armors_num));
 }
 
 inline void SwitchTrackedFace(ObserverRuntime& runtime, Eigen::VectorXd& state,
                               const ObserverPolicy& policy, int face_index,
-                              const ArmorDetectorResult& current_armor,
                               double measured_yaw)
 {
+  (void)state;
   if (face_index == 0)
   {
+    runtime.last_yaw = measured_yaw;
     return;
   }
 
-  const double yaw = measured_yaw;
-  runtime.last_yaw = measured_yaw;
-  state(6) = yaw;
   UpdateArmorsNum(runtime, policy);
-
-  if (runtime.tracked_armors_num == 4)
-  {
-    if (policy.symmetric_geometry_enabled)
-    {
-      state(4) = current_armor.pose.translation.z();
-      runtime.another_r = state(8);
-      runtime.dz = 0.0;
-      runtime.dz_abs_ref = 0.0;
-    }
-    else if (face_index % 2 == 1)
-    {
-      const double measured_dz = state(4) - current_armor.pose.translation.z();
-      const double measured_dz_abs = std::abs(measured_dz);
-      if (measured_dz_abs > 0.02 && measured_dz_abs < 0.20)
-      {
-        if (runtime.dz_abs_ref <= 1e-6)
-        {
-          runtime.dz_abs_ref = measured_dz_abs;
-        }
-        else if (std::abs(measured_dz_abs - runtime.dz_abs_ref) < 0.03)
-        {
-          runtime.dz_abs_ref = 0.8 * runtime.dz_abs_ref + 0.2 * measured_dz_abs;
-        }
-      }
-      runtime.dz =
-          (runtime.dz_abs_ref > 0.02)
-              ? std::copysign(runtime.dz_abs_ref, measured_dz)
-              : measured_dz;
-      state(4) = current_armor.pose.translation.z();
-      std::swap(state(8), runtime.another_r);
-    }
-    else
-    {
-      state(4) = current_armor.pose.translation.z();
-      if (runtime.dz_abs_ref > 0.02 && std::abs(runtime.dz) > 1e-6)
-      {
-        runtime.dz = std::copysign(runtime.dz_abs_ref, runtime.dz);
-      }
-    }
-  }
-  else
-  {
-    state(4) = current_armor.pose.translation.z();
-  }
-
-  const auto p = current_armor.pose.translation;
-  const Eigen::Vector3d current_p(p.x(), p.y(), p.z());
-  const Eigen::Vector3d infer_p =
-      GetArmorPositionFromState(state, runtime, policy, 0);
-  if (policy.face_switch_recenter_enabled)
-  {
-    const double recenter_error = (current_p - infer_p).norm();
-    const bool large_recenter_error = recenter_error > policy.max_match_distance;
-    const double r = state(8);
-    state(0) = p.x() + r * std::cos(yaw);
-    state(2) = p.y() + r * std::sin(yaw);
-    state(4) = p.z();
-    if (large_recenter_error)
-    {
-      state(1) = 0;
-      state(3) = 0;
-      state(5) = 0;
-    }
-    XR_LOG_DEBUG("Tracker face switch recentered state: err=%.3f reset_vel=%d",
-                 recenter_error, large_recenter_error ? 1 : 0);
-  }
-}
-
-inline void HandleArmorJump(ObserverRuntime& runtime, Eigen::VectorXd& state,
-                            const ObserverPolicy& policy,
-                            const ArmorDetectorResult& current_armor,
-                            double measured_yaw)
-{
-  const double yaw = measured_yaw;
+  runtime.tracked_face_index =
+      LocalFaceToCanonicalFace(runtime, face_index);
   runtime.last_yaw = measured_yaw;
-  state(6) = yaw;
-  UpdateArmorsNum(runtime, policy);
-
-  if (runtime.tracked_armors_num == 4)
-  {
-    if (policy.symmetric_geometry_enabled)
-    {
-      state(4) = current_armor.pose.translation.z();
-      runtime.another_r = state(8);
-      runtime.dz = 0.0;
-      runtime.dz_abs_ref = 0.0;
-    }
-    else
-    {
-      const double measured_dz = state(4) - current_armor.pose.translation.z();
-      const double measured_dz_abs = std::abs(measured_dz);
-      if (measured_dz_abs > 0.02 && measured_dz_abs < 0.20)
-      {
-        if (runtime.dz_abs_ref <= 1e-6)
-        {
-          runtime.dz_abs_ref = measured_dz_abs;
-        }
-        else if (std::abs(measured_dz_abs - runtime.dz_abs_ref) < 0.03)
-        {
-          runtime.dz_abs_ref = 0.8 * runtime.dz_abs_ref + 0.2 * measured_dz_abs;
-        }
-      }
-      runtime.dz =
-          (runtime.dz_abs_ref > 0.02)
-              ? std::copysign(runtime.dz_abs_ref, measured_dz)
-              : measured_dz;
-      state(4) = current_armor.pose.translation.z();
-      std::swap(state(8), runtime.another_r);
-    }
-  }
-  XR_LOG_WARN("Armor jump!");
-
-  const auto p = current_armor.pose.translation;
-  const Eigen::Vector3d current_p(p.x(), p.y(), p.z());
-  const Eigen::Vector3d infer_p =
-      GetArmorPositionFromState(state, runtime, policy, 0);
-  if ((current_p - infer_p).norm() > policy.max_match_distance)
-  {
-    const double r = state(8);
-    state(0) = p.x() + r * std::cos(yaw);
-    state(1) = 0;
-    state(2) = p.y() + r * std::sin(yaw);
-    state(3) = 0;
-    state(4) = p.z();
-    state(5) = 0;
-    XR_LOG_ERROR("Reset State!");
-  }
 }
 
 template <typename TrackIdGetter, typename TrackConfirmedGetter>
@@ -341,6 +186,10 @@ bool FuseMultiArmorObservation(ObserverRuntime& runtime, Eigen::VectorXd& state,
                                TrackIdGetter&& get_detection_track_id,
                                TrackConfirmedGetter&& is_detection_track_confirmed)
 {
+  runtime.another_r = GetArmorSecondRadiusFromState(state, policy);
+  runtime.dz = GetArmorDzFromState(state, policy);
+  runtime.dz_abs_ref = std::abs(runtime.dz);
+
   if (runtime.tracked_armors_num != 4 || armors_msg.size() < 2 ||
       runtime.tracked_id == ArmorNumber::INVALID)
   {
@@ -440,16 +289,6 @@ bool FuseMultiArmorObservation(ObserverRuntime& runtime, Eigen::VectorXd& state,
       if (position_diff >= max_position_diff || yaw_diff >= max_yaw_diff)
       {
         continue;
-      }
-      if (!policy.symmetric_geometry_enabled && face_index % 2 == 1 &&
-          runtime.dz_abs_ref > 0.02)
-      {
-        const double measured_dz_abs = std::abs(state(4) - position_vec.z());
-        constexpr double kDzConsistencyTol = 0.03;
-        if (std::abs(measured_dz_abs - runtime.dz_abs_ref) >= kDzConsistencyTol)
-        {
-          continue;
-        }
       }
       candidates.push_back({armor_index, face_index, armor, measured_yaw,
                             position_diff, yaw_diff, image_track_id,
@@ -629,7 +468,7 @@ bool FuseMultiArmorObservation(ObserverRuntime& runtime, Eigen::VectorXd& state,
     {
       A.row(row).setZero();
       A(row, odd_col) = kRadiusPriorWeight;
-      b(row) = kRadiusPriorWeight * runtime.another_r;
+      b(row) = kRadiusPriorWeight * GetArmorSecondRadiusFromState(state, policy);
       ++row;
     }
   }
@@ -652,7 +491,8 @@ bool FuseMultiArmorObservation(ObserverRuntime& runtime, Eigen::VectorXd& state,
   const double fused_x = sol(0);
   const double fused_y = sol(1);
   const double fused_r_even = have_even_face ? sol(even_col) : state(8);
-  const double fused_r_odd = have_odd_face ? sol(odd_col) : runtime.another_r;
+  const double fused_r_odd =
+      have_odd_face ? sol(odd_col) : GetArmorSecondRadiusFromState(state, policy);
   if (!std::isfinite(fused_x) || !std::isfinite(fused_y) ||
       !std::isfinite(fused_r_even) || !std::isfinite(fused_r_odd) ||
       fused_r_even < 0.05 || fused_r_even > 0.45 || fused_r_odd < 0.05 ||
@@ -664,18 +504,28 @@ bool FuseMultiArmorObservation(ObserverRuntime& runtime, Eigen::VectorXd& state,
   const double alpha = valid_face_count >= 3 ? 0.35 : 0.12;
   state(0) = (1.0 - alpha) * state(0) + alpha * fused_x;
   state(2) = (1.0 - alpha) * state(2) + alpha * fused_y;
+
+  double radius_even = state(8);
+  double radius_odd = GetArmorSecondRadiusFromState(state, policy);
   if (have_even_face)
   {
-    state(8) = (1.0 - alpha) * state(8) + alpha * fused_r_even;
+    radius_even = (1.0 - alpha) * radius_even + alpha * fused_r_even;
   }
   if (have_odd_face)
   {
-    runtime.another_r = (1.0 - alpha) * runtime.another_r + alpha * fused_r_odd;
+    radius_odd = (1.0 - alpha) * radius_odd + alpha * fused_r_odd;
   }
+  state(8) = radius_even;
+  state(9) = policy.symmetric_geometry_enabled ? 0.0 : (radius_odd - radius_even);
+  runtime.another_r = radius_odd;
+  runtime.dz = GetArmorDzFromState(state, policy);
+  runtime.dz_abs_ref = std::abs(runtime.dz);
 
   XR_LOG_DEBUG(
       "Tracker multi-armor fuse: faces=%d rmse=%.3f center=(%.3f, %.3f) r1=%.3f r2=%.3f",
       valid_face_count, rmse, state(0), state(2), state(8), runtime.another_r);
   return true;
 }
+
+/* Old observer implementation intentionally removed below. */
 }  // namespace armor_tracker

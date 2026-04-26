@@ -3,6 +3,7 @@
 
 #include <Eigen/Dense>
 #include <functional>
+#include <initializer_list>
 
 class ExtendedKalmanFilter
 {
@@ -17,7 +18,9 @@ class ExtendedKalmanFilter
     V_Z_ARMOR = 5,
     YAW = 6,
     V_YAW = 7,
-    ROBOT_R = 8
+    ROBOT_R = 8,
+    DELTA_R = 9,
+    DELTA_Z = 10
   };
   ExtendedKalmanFilter() = default;
 
@@ -38,6 +41,7 @@ class ExtendedKalmanFilter
 
   // Update the estimated state based on measurement
   Eigen::MatrixXd Update(const Eigen::VectorXd& z);
+  void DecorrelatePosterior(std::initializer_list<int> state_indices);
 
  private:
   // Process nonlinear vector function
