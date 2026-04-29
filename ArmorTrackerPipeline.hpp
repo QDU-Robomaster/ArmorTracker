@@ -549,41 +549,12 @@ void ArmorTracker<CameraInfoV>::ArmorsCallback(const DetectionMessage& message)
   }
 
   ArmorDetectorResults armors_msg = message.results;
-  const LibXR::Transform<double> raw_camera_pose_world =
+  const LibXR::Transform<double> camera_pose_world =
       ArmorTrackerCameraRotationToTrackerWorldPose(
-          armor_tracker_detail::AdjustedPackedCameraRotation(
-              source_frame.imu->rotation_wxyz),
+          armor_tracker_detail::PackedCameraRotation(source_frame.imu->rotation_wxyz),
           armor_tracker_detail::PackedCameraTranslation(
               source_frame.imu->translation_xyz),
           io_.gimbal_to_camera_transform_static);
-  const std::size_t camera_pose_delay_frames =
-      armor_tracker_detail::SpCameraPoseDelayFrames();
-  const double camera_pose_phase_alpha =
-      armor_tracker_detail::SpCameraPosePhaseAlpha();
-  const bool camera_pose_phase_enabled =
-      std::abs(camera_pose_phase_alpha) > 1e-9;
-  const std::size_t camera_pose_history_limit =
-      camera_pose_delay_frames + (camera_pose_phase_enabled ? 2U : 1U);
-  io_.camera_pose_history.push_back(raw_camera_pose_world);
-  while (io_.camera_pose_history.size() > camera_pose_history_limit)
-  {
-    io_.camera_pose_history.pop_front();
-  }
-  LibXR::Transform<double> camera_pose_world = raw_camera_pose_world;
-  if (!io_.camera_pose_history.empty())
-  {
-    const std::size_t delayed_index =
-        io_.camera_pose_history.size() > camera_pose_delay_frames
-            ? io_.camera_pose_history.size() - 1U - camera_pose_delay_frames
-            : 0U;
-    camera_pose_world = io_.camera_pose_history[delayed_index];
-    if (camera_pose_phase_enabled && delayed_index > 0U)
-    {
-      camera_pose_world = armor_tracker_detail::InterpolateCameraPosePhase(
-          camera_pose_world, io_.camera_pose_history[delayed_index - 1U],
-          camera_pose_phase_alpha);
-    }
-  }
   io_.current_camera_pose = camera_pose_world;
   io_.current_camera_pose_valid = true;
 

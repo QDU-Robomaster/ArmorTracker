@@ -4,7 +4,6 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdlib>
-#include <iostream>
 #include <limits>
 #include <utility>
 
@@ -328,8 +327,6 @@ void SolveTrajectory::FireLogicDefault(float& pitch, float& yaw, float& aim_x,
 
   CalculateArmorPosition(msg, /*use_1=*/false, /*use_average_radius=*/false);
   const int IDX = SelectArmor(msg, /*select_by_min_yaw=*/false);
-
-  std::cout << "selected idx: " << IDX << '\n';
 
   const auto [p, y] =
       CalculatePitchAndYaw(IDX, msg, TIME_DELAY, s_bias_, z_bias_, current_v_,
