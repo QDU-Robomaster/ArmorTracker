@@ -2,6 +2,7 @@
 
 #include <Eigen/Dense>
 #include <cmath>
+#include <cstdint>
 #include <functional>
 #include <limits>
 #include <utility>
@@ -71,6 +72,7 @@ class SolveTrajectory
    */
   struct Target
   {
+    uint64_t image_timestamp_us{};          ///< 图像传感器时间戳 [us]
     bool tracking;                         ///< 是否正在追踪
     ArmorNumber id;                        ///< 目标ID（来自 armor.hpp）
     int armors_num;                        ///< 装甲板数量（3 或 4）
@@ -81,6 +83,11 @@ class SolveTrajectory
     double radius_1;                       ///< 旋转半径1 [m]
     double radius_2;                       ///< 旋转半径2 [m]
     double dz;                             ///< 竖直偏差（保留）
+    bool measured_face_valid{false};       ///< 当前帧可见面锚点是否有效
+    int measured_face_index{-1};           ///< 当前帧可见面索引
+    Eigen::Matrix<double, 3, 1> measured_face_position =
+        Eigen::Matrix<double, 3, 1>::Zero();  ///< 当前帧可见面世界坐标
+    double measured_face_yaw{};                ///< 当前帧可见面 yaw [rad]
   };
 
   /**
@@ -196,6 +203,8 @@ class SolveTrajectory
   void FireLogicDefault(float& pitch, float& yaw, float& aim_x, float& aim_y,
                         float& aim_z, Target* msg);
 
+  int SelectSpLikeAimArmor(Target* msg);
+
   /**
    * @brief 自动解算弹道（根据最优决策流转到具体逻辑）
    * @param[out] pitch pitch [rad]
@@ -222,6 +231,7 @@ class SolveTrajectory
   float z_bias_;   ///< 枪口垂直偏置 [m]
 
   float tar_yaw_{};  ///< 当前目标 yaw（供内部计算）
+  int lock_id_{-1};
 
   TargetPostion tar_position_[4]{};  ///< 记录 3/4 块装甲板的位置
   std::vector<float> tmp_yaws_;      ///< 对应各装甲板的 yaw（一个周期内）

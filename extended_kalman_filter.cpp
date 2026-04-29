@@ -1,5 +1,7 @@
 #include "extended_kalman_filter.hpp"
 
+#include <array>
+
 /*
 f:过程函数
 h:观测函数
@@ -27,7 +29,11 @@ ExtendedKalmanFilter::ExtendedKalmanFilter(const VecVecFunc& f, const VecVecFunc
 {
 }
 
-void ExtendedKalmanFilter::SetState(const Eigen::VectorXd& x0) { x_post_ = x0; }
+void ExtendedKalmanFilter::SetState(const Eigen::VectorXd& x0)
+{
+  x_post_ = x0;
+  x_pri_ = x0;
+}
 
 Eigen::MatrixXd ExtendedKalmanFilter::Predict()
 {
@@ -49,8 +55,46 @@ Eigen::MatrixXd ExtendedKalmanFilter::Update(const Eigen::VectorXd& z)
 
   m_k_ = p_pri_ * m_h_.transpose() *
          (m_h_ * p_pri_ * m_h_.transpose() + m_r_).inverse();  // inverse计算逆矩阵
-  x_post_ = x_pri_ + m_k_ * (z - h_(x_pri_));
-  p_post_ = (i_ - m_k_ * m_h_) * p_pri_;
+
+  const Eigen::VectorXd innovation = z - h_(x_pri_);
+  const Eigen::MatrixXd correction = i_ - m_k_ * m_h_;
+  x_post_ = x_pri_ + m_k_ * innovation;
+  p_post_ = correction * p_pri_ * correction.transpose() + m_k_ * m_r_ * m_k_.transpose();
 
   return x_post_;
+}
+
+void ExtendedKalmanFilter::DecorrelatePosterior(
+    std::initializer_list<int> state_indices)
+{
+  std::array<bool, 64> selected{};
+  if (n_ > static_cast<int>(selected.size()))
+  {
+    return;
+  }
+
+  for (const int state_index : state_indices)
+  {
+    if (state_index >= 0 && state_index < n_)
+    {
+      selected[static_cast<std::size_t>(state_index)] = true;
+    }
+  }
+
+  for (int row = 0; row < n_; ++row)
+  {
+    if (!selected[static_cast<std::size_t>(row)])
+    {
+      continue;
+    }
+    for (int col = 0; col < n_; ++col)
+    {
+      if (selected[static_cast<std::size_t>(col)])
+      {
+        continue;
+      }
+      p_post_(row, col) = 0.0;
+      p_post_(col, row) = 0.0;
+    }
+  }
 }
