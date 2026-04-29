@@ -578,8 +578,6 @@ void ArmorTracker<CameraInfoV>::ArmorsCallback(const DetectionMessage& message)
           }),
       armors_msg.end());
 
-  UpdateImageIdTracks(armors_msg, image_timestamp_us);
-
   // 构造消息
   TrackerInfo info_msg{};
   SolveTrajectory::Target target_msg{};
@@ -589,6 +587,34 @@ void ArmorTracker<CameraInfoV>::ArmorsCallback(const DetectionMessage& message)
   target_msg.id = ArmorNumber::INVALID;
 
   auto time = LibXR::Timebase::GetMicroseconds();
+  // 同步图像时间戳是 tracker 的运动模型基准；只有没有有效传感器时间时才退回进程时间。
+  if (image_timestamp_us > 0 && time_.last_image_timestamp_us > 0 &&
+      image_timestamp_us > time_.last_image_timestamp_us)
+  {
+    time_.dt = static_cast<double>(image_timestamp_us - time_.last_image_timestamp_us) /
+               1000000.0;
+  }
+  else
+  {
+    time_.dt = (time - time_.last_time).ToSecond();
+  }
+  if (time_.dt <= 0)
+  {
+    time_.dt = 1.0 / 100.0;
+  }
+  const double max_dt_before_reset =
+      std::max(cfg_.thresholds.lost_time_thres, 0.15);
+  if (rt_.state != State::LOST && time_.dt > max_dt_before_reset)
+  {
+    // 大跳变说明旧 EKF 和装甲面绑定已经跨过长阻塞/暂停，继续外推只会污染后级。
+    XR_LOG_WARN("ArmorTracker large dt %.3f s, reset tracker state", time_.dt);
+    rt_ = TrackRuntime{};
+    rt_.tracking_thres = cfg_.thresholds.tracking_thres;
+    image_tracker_.Reset();
+    time_.dt = 1.0 / 100.0;
+  }
+
+  UpdateImageIdTracks(armors_msg, image_timestamp_us);
 
   // 跟踪更新
   if (rt_.state == State::LOST)
@@ -598,29 +624,6 @@ void ArmorTracker<CameraInfoV>::ArmorsCallback(const DetectionMessage& message)
   }
   else
   {
-    // 优先使用图像时间戳，避免 Webots 低流速时 wall clock 与 sim time 脱钩。
-    if (image_timestamp_us > 0 && time_.last_image_timestamp_us > 0 &&
-        image_timestamp_us > time_.last_image_timestamp_us)
-    {
-      time_.dt = static_cast<double>(image_timestamp_us - time_.last_image_timestamp_us) /
-                 1000000.0;
-    }
-    else
-    {
-      time_.dt = (time - time_.last_time).ToSecond();
-    }
-    if (time_.dt <= 0)
-    {
-      time_.dt = 1.0 / 100.0;
-    }
-    const double max_dt_before_reset =
-        std::max(cfg_.thresholds.lost_time_thres, 0.15);
-    if (time_.dt > max_dt_before_reset)
-    {
-      XR_LOG_WARN("ArmorTracker large dt %.3f s, clamp to default frame step",
-                  time_.dt);
-      time_.dt = 1.0 / 100.0;
-    }
     rt_.lost_thres = static_cast<int>(cfg_.thresholds.lost_time_thres / time_.dt);
     if (rt_.lost_thres < 1)
     {

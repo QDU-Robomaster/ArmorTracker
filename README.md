@@ -41,6 +41,10 @@ Webots 验证时如果 tracker 一直停在 `LOST`，先检查配置里的空间
 `max_z_position: 1.0` 的默认烟测阈值，放宽到 `30.0` 后 tracker 能稳定进入 `TRACKING`，各输出 topic
 按图像频率发布。接入 Aimer 后，`tracker/send` 和 `tracker/target_eulr` 应只由 Aimer 发布，避免命令双写。
 
+tracker 以同步图像的传感器时间戳计算 `dt`。如果进程启动、调试录像、Webots 暂停等情况造成相邻图像时间戳
+出现大跳变，模块会丢弃旧 EKF / 装甲面绑定 / 图像域短时跟踪状态，并从当前帧重新进入 `DETECTING`。这种帧只
+发布调试数据，不发布有效 `tracking` 目标，避免启动瞬态或长时间阻塞后的旧状态污染后级模块。
+
 ## 当前 SP 默认参数
 
 固定云台 1000 帧 Webots 重复验证后，SP 模型保留两个默认值：
