@@ -4,7 +4,7 @@ on:
   push:
   pull_request:
   schedule:
-    - cron: '0 3 1 * *'  # 每月1日凌晨3点（UTC）自动触发
+    - cron: '0 3 1 * *'
 
 jobs:
   build:
@@ -31,7 +31,7 @@ jobs:
 
           int main() {
               LibXR::PlatformInit();
-              LibXR::STDIO::Printf("This is XRobot Module Template Test\n");
+              LibXR::STDIO::Printf<"This is XRobot Module Template Test\n">();
               LibXR::HardwareContainer hw;
               XRobotMain(hw);
               return 0;
@@ -41,17 +41,30 @@ jobs:
       - name: Create minimal CMakeLists.txt
         run: |
           cat > CMakeLists.txt <<'EOF'
+          cmake_minimum_required(VERSION 3.10)
           project(xrobot_mod_test CXX)
-          set(CMAKE_CXX_STANDARD 17)
+          set(CMAKE_CXX_STANDARD 20)
+          set(CMAKE_CXX_STANDARD_REQUIRED ON)
           add_executable(xr_test main.cpp)
           set(XROBOT_MODULES_DIR ${CMAKE_CURRENT_SOURCE_DIR}/Modules/)
+          set(WEBOTS_HOME /usr/local/webots)
+          set(LIBXR_PRINT_FLOAT_ENABLE_DOUBLE ON CACHE BOOL "" FORCE)
+          set(LIBXR_PRINT_INTEGER_ENABLE_64BIT ON CACHE BOOL "" FORCE)
           add_subdirectory(libxr)
-          target_include_directories(xr_test PUBLIC $<TARGET_PROPERTY:xr,INTERFACE_INCLUDE_DIRECTORIES> ${CMAKE_SOURCE_DIR}/User)
+          set_property(TARGET xr PROPERTY CXX_STANDARD 20)
+          set_property(TARGET xr PROPERTY CXX_STANDARD_REQUIRED ON)
+          target_include_directories(
+            xr_test
+            PUBLIC $<TARGET_PROPERTY:xr,INTERFACE_INCLUDE_DIRECTORIES>
+                   ${CMAKE_SOURCE_DIR}/User
+          )
           target_link_libraries(xr_test PUBLIC xr)
           EOF
 
       - name: Pull libxr to ./libxr
-        run: git clone --depth=1 https://github.com/Jiu-xiao/libxr ./libxr
+        run: |
+          git clone --depth=1 --branch master \
+            https://github.com/Jiu-xiao/libxr ./libxr
 
       - name: Setup Python & Install deps
         run: |
@@ -64,35 +77,158 @@ jobs:
         run: |
           echo "$HOME/.local/bin" >> $GITHUB_PATH
 
-      - name: Install xrobot toolchain (assumes pyproject/tar.gz/pip install .)
+      - name: Install xrobot toolchain
         run: |
           pip3 install xrobot libxr
 
-      - name: Run xrobot_setup
+      - name: Register module sources
         run: |
-          xrobot_src_man add-source https://qdu-robomaster.github.io/qdu-future-modules/index.yaml && xrobot_src_man add-source https://xrobot-org.github.io/xrobot-modules/index.yaml && xrobot_setup || true
+          xrobot_src_man add-source https://qdu-robomaster.github.io/qdu-future-modules/index.yaml
+          xrobot_src_man add-source https://xrobot-org.github.io/xrobot-modules/index.yaml
 
-      - name: Run xrobot_init_mod
+      - name: Register dependency repos
+        run: |
+          rm -f Modules/modules.yaml
+          xrobot_add_mod xrobot-org/BlinkLED@master
+          xrobot_add_mod qdu-future/CameraBase@master
+          xrobot_add_mod qdu-future/WebotsCamera@master
+          xrobot_add_mod qdu-future/CameraFrameSync@master
+          xrobot_add_mod qdu-future/ArmorDetector@master
+          cat Modules/modules.yaml
+
+      - name: Sync dependency repos
         run: |
           xrobot_init_mod
 
-      - name: Add BlinkLED module
+      - name: Create test module config
         run: |
-          xrobot_add_mod ${{ env.XR_MODULE_NAME }} && xrobot_add_mod qdu-future/ArmorDetector && cat User/xrobot.yaml
+          cat > tracker_ci.yaml <<'EOF'
+          constexpr_namespace: ProjectConstexpr
 
-      - name: Add this repo module
-        run: |
-          xrobot_add_mod ${{ env.XR_MODULE_NAME }} && cat User/xrobot.yaml
+          constexprs:
+            MainCameraInfo:
+              type: CameraTypes::CameraInfo
+              value:
+                width: 1280
+                height: 720
+                step: 3840
+                encoding: CameraTypes::Encoding::BGR8
+                camera_matrix: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+                distortion_model: CameraTypes::DistortionModel::PLUMB_BOB
+                distortion_coefficients: [0.0, 0.0, 0.0, 0.0, 0.0]
+                rectification_matrix: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+                projection_matrix: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
-      - name: Generate main again
+          modules:
+            - id: BlinkLED_0
+              name: BlinkLED
+              constructor_args:
+                blink_cycle: 250
+
+            - id: camera
+              name: WebotsCamera
+              template_args:
+                Info: {constexpr: MainCameraInfo}
+              constructor_args:
+                runtime:
+                  device_name: camera
+                  fps: 30
+                  exposure: 1.0
+                  gain: 0.0
+                  pose_def_name: camera
+
+            - id: camera_frame_sync
+              name: CameraFrameSync
+              template_args:
+                Info: {constexpr: MainCameraInfo}
+              constructor_args:
+                camera: '@camera'
+
+            - id: ArmorDetector_0
+              name: ArmorDetector
+              template_args:
+                Info: {constexpr: MainCameraInfo}
+              constructor_args:
+                cfg:
+                  detect_color: 1
+                  traditional:
+                    threshold: 150.0
+                    max_angle_error_deg: 45.0
+                    min_lightbar_ratio: 1.5
+                    max_lightbar_ratio: 20.0
+                    min_lightbar_length: 8.0
+                  yolo:
+                    use_roi: false
+                    roi_x: 420
+                    roi_y: 50
+                    roi_width: 600
+                    roi_height: 600
+                    use_traditional_refine: true
+                    score_threshold: 0.7
+                    nms_threshold: 0.3
+                    min_confidence: 0.8
+                  debug:
+                    preview: false
+                    show_binary: false
+                    wait_key_ms: 1
+                    overlay_scale: 0.75
+                sync: '@camera_frame_sync'
+
+            - id: ArmorTracker_0
+              name: ArmorTracker
+              template_args:
+                Info: {constexpr: MainCameraInfo}
+              constructor_args:
+                cfg:
+                  limits:
+                    max_armor_distance: 10.0
+                    max_z_position: 1.0
+                  match:
+                    max_match_distance: 0.15
+                    max_match_yaw_diff: 1.0
+                  thresholds:
+                    tracking_thres: 5
+                    lost_time_thres: 0.3
+                  solver:
+                    k: 0.092
+                    bias_time: 100
+                    s_bias: 0.19133
+                    z_bias: 0.21265
+                    calculate_mode: {expr: SolveTrajectory::CalculateMode::NORMAL}
+                    table_config:
+                      max_x: 13.0
+                      min_x: 0.0
+                      max_y: 1.0
+                      min_y: -1.0
+                      resolution: 0.01
+                      filename: {string: table.bin}
+                  ekf:
+                    sigma2_q_xyz: 20.0
+                    sigma2_q_yaw: 100.0
+                    sigma2_q_r: 800
+                  geometry:
+                    initial_radius: 0.26
+                    min_radius: 0.12
+                    max_radius: 0.4
+                  noise:
+                    r_xyz_factor: 0.05
+                    r_yaw: 0.02
+                  frames:
+                    rotation: [1.0, 0.0, 0.0, 0.0]
+                    translation: [0.0, 0.0, 0.0]
+                sync: '@camera_frame_sync'
+          EOF
+          cat tracker_ci.yaml
+
+      - name: Generate main
         run: |
-          xrobot_setup
+          xrobot_gen_main --config tracker_ci.yaml --output User/xrobot_main.hpp
 
       - name: Build
         run: |
           mkdir -p build
           cd build
-          cmake ..
+          cmake .. -DOpenVINO_DIR=/opt/intel/openvino_2025.4.0/runtime/cmake
           make
 
       - name: Create Tag via GitHub API
@@ -111,10 +247,8 @@ jobs:
             const SS = String(date.getUTCSeconds()).padStart(2, '0');
             const tagName = `${tagPrefix}${yyyy}${mm}${dd}-${HH}${MM}${SS}`;
 
-            // 获取当前 commit sha
             const sha = process.env.GITHUB_SHA;
 
-            // 创建 tag reference
             await github.rest.git.createRef({
               owner: context.repo.owner,
               repo: context.repo.repo,
