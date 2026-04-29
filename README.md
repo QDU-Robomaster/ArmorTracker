@@ -40,3 +40,16 @@ tracker 日志会输出 `double` 观测量和 `uint64_t` 图像时间戳，模�
 Webots 验证时如果 tracker 一直停在 `LOST`，先检查配置里的空间过滤阈值。当前验证世界中目标位姿会超过
 `max_z_position: 1.0` 的默认烟测阈值，放宽到 `30.0` 后 tracker 能稳定进入 `TRACKING`，各输出 topic
 按图像频率发布。接入 Aimer 后，`tracker/send` 和 `tracker/target_eulr` 应只由 Aimer 发布，避免命令双写。
+
+tracker 以同步图像的传感器时间戳计算 `dt`。如果进程启动、调试录像、Webots 暂停等情况造成相邻图像时间戳
+出现大跳变，模块会丢弃旧 EKF / 装甲面绑定 / 图像域短时跟踪状态，并从当前帧重新进入 `DETECTING`。这种帧只
+发布调试数据，不发布有效 `tracking` 目标，避免启动瞬态或长时间阻塞后的旧状态污染后级模块。
+
+## 当前 SP 默认参数
+
+固定云台 1000 帧 Webots 重复验证后，SP 模型保留两个默认值：
+
+- `XR_TRACKER_SP_Q_XYZ=300`：位置过程噪声，允许同步稳定后更快吃进传感器侧更新。
+- `XR_TRACKER_SP_PAIR_DZ_ALPHA=0.40`：双装甲高低差软融合权重，只修正 `Z_ARMOR / DELTA_Z`，不恢复双装甲连续全状态更新。
+
+两者仍可通过同名环境变量覆盖，用于现场继续做数据驱动调参；默认不启用 canonical 初始化、固定输出外推、强制测量锚定、多装甲全车融合或 direct XYZ 更新。
