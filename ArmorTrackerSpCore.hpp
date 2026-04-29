@@ -212,30 +212,13 @@ ArmorTracker<CameraInfoV>::SpMatchArmorToFace(const ArmorDetectorResult& armor,
   const Eigen::Vector3d pred_xyz = SpArmorPosition(state, face_index);
   const Eigen::Vector3d pred_ypd = SpXyzToYpd(pred_xyz);
   const double pred_yaw = GetArmorYawFromState(state, face_index);
-  Eigen::Vector3d armor_xyz(armor.pose.translation.x(),
-                            armor.pose.translation.y(),
-                            armor.pose.translation.z());
-  double measured_yaw = SpDetectorYawNear(armor, pred_yaw);
+  const Eigen::Vector3d armor_xyz(armor.pose.translation.x(),
+                                  armor.pose.translation.y(),
+                                  armor.pose.translation.z());
+  const double measured_yaw = SpDetectorYawNear(armor.pose.rotation, pred_yaw);
 
   SpArmorMatch match{};
   match.id = face_index;
-  if (armor_tracker_detail::FaceConstrainedProjectionEnabled() &&
-      io_.current_camera_pose_valid)
-  {
-    const armor_tracker_detail::FaceConstrainedProjectionResult projection =
-        armor_tracker_detail::SolveFaceConstrainedProjection(
-            armor, kCameraInfo, io_.current_camera_pose, pred_yaw);
-    if (projection.valid &&
-        projection.reprojection_rmse_px <=
-            armor_tracker_detail::FaceConstrainedProjectionMaxReprojectionPx())
-    {
-      armor_xyz = projection.world_position;
-      measured_yaw = projection.sp_yaw_rad;
-      match.constrained_projection_valid = true;
-      match.constrained_projection_xyz = projection.world_position;
-      match.constrained_projection_rmse_px = projection.reprojection_rmse_px;
-    }
-  }
   const Eigen::Vector3d armor_ypd = SpXyzToYpd(armor_xyz);
   match.yaw_error = std::abs(SpLimitRad(armor_ypd.x() - pred_ypd.x()));
   match.pitch_error = std::abs(SpLimitRad(armor_ypd.y() - pred_ypd.y()));
@@ -248,24 +231,7 @@ ArmorTracker<CameraInfoV>::SpMatchArmorToFace(const ArmorDetectorResult& armor,
                 match.distance_error / kMatchDistanceScale +
                 match.angle_error / kMatchAngleScale +
                 match.xyz_error / kMatchPositionScale;
-  if (match.constrained_projection_valid)
-  {
-    match.score += match.constrained_projection_rmse_px *
-                   armor_tracker_detail::FaceConstrainedProjectionScoreWeight();
-  }
   return match;
-}
-
-template <CameraTypes::CameraInfo CameraInfoV>
-Eigen::Vector3d ArmorTracker<CameraInfoV>::SpMatchMeasurementPosition(
-    const ArmorDetectorResult& armor, const SpArmorMatch& match) const
-{
-  if (match.constrained_projection_valid)
-  {
-    return match.constrained_projection_xyz;
-  }
-  return {armor.pose.translation.x(), armor.pose.translation.y(),
-          armor.pose.translation.z()};
 }
 
 template <CameraTypes::CameraInfo CameraInfoV>
@@ -768,12 +734,12 @@ bool ArmorTracker<CameraInfoV>::SpResolvePairMatch(
 
       auto estimate_center = [this, angle_step, armor_count](
                                  const SpPairObservation& observation,
-                                 const SpArmorMatch& match,
                                  const Eigen::VectorXd& candidate_state,
                                  int face_index)
       {
-        const Eigen::Vector3d measured_xyz =
-            SpMatchMeasurementPosition(observation.armor, match);
+        const Eigen::Vector3d measured_xyz(observation.armor.pose.translation.x(),
+                                           observation.armor.pose.translation.y(),
+                                           observation.armor.pose.translation.z());
         const bool use_length_height =
             armor_count == 4 && (face_index == 1 || face_index == 3);
         const double radius =
@@ -794,9 +760,9 @@ bool ArmorTracker<CameraInfoV>::SpResolvePairMatch(
       const SpArmorMatch right_match =
           SpMatchArmorToFace(right->armor, candidate, right_face);
       const Eigen::Vector3d left_center =
-          estimate_center(*left, left_match, candidate, left_face);
+          estimate_center(*left, candidate, left_face);
       const Eigen::Vector3d right_center =
-          estimate_center(*right, right_match, candidate, right_face);
+          estimate_center(*right, candidate, right_face);
       const double center_split = (left_center - right_center).norm();
       if (center_split > kPairMaxCenterSplit)
       {
@@ -904,38 +870,39 @@ void ArmorTracker<CameraInfoV>::SpUpdatePair(const SpPairMatch& pair_match)
   const double pair_recenter_alpha = SpPairRecenterAlpha();
   if (pair_recenter_alpha > 0.0 && rt_.tracked_armors_num == ArmorsNum::NORMAL_4)
   {
-    const int armor_count =
-        std::max(1, static_cast<int>(rt_.tracked_armors_num));
+    const int armor_count = std::max(1, static_cast<int>(rt_.tracked_armors_num));
     const double angle_step = 2.0 * M_PI / armor_count;
-      const auto estimate_center =
-          [this, armor_count, angle_step](const SpPairObservation& observation,
-                                          const SpArmorMatch& match,
-                                          int face_index)
+    const auto estimate_center =
+        [this, armor_count, angle_step](const SpPairObservation& observation,
+                                        double measured_yaw, int face_index)
     {
-      const Eigen::Vector3d measured_xyz =
-          SpMatchMeasurementPosition(observation.armor, match);
+      const Eigen::Vector3d measured_xyz(observation.armor.pose.translation.x(),
+                                         observation.armor.pose.translation.y(),
+                                         observation.armor.pose.translation.z());
       const bool odd_face = armor_count == 4 && (face_index == 1 || face_index == 3);
       const double radius =
           ekf_.state(ExtendedKalmanFilter::ROBOT_R) +
           (odd_face ? ekf_.state(ExtendedKalmanFilter::DELTA_R) : 0.0);
       const double yaw0 = armor_tracker::UnwrapYawNear(
-          match.measured_yaw - face_index * angle_step,
+          measured_yaw - face_index * angle_step,
           ekf_.state(ExtendedKalmanFilter::YAW));
       const double z_offset =
           odd_face ? ekf_.state(ExtendedKalmanFilter::DELTA_Z) : 0.0;
       return std::pair<Eigen::Vector3d, double>(
           Eigen::Vector3d(measured_xyz.x() -
-                              radius * std::cos(match.measured_yaw),
+                              radius * std::cos(measured_yaw),
                           measured_xyz.y() -
-                              radius * std::sin(match.measured_yaw),
+                              radius * std::sin(measured_yaw),
                           measured_xyz.z() - z_offset),
           yaw0);
     };
 
     const auto left_anchor =
-        estimate_center(pair_match.left, pair_match.left_match, pair_match.left_face);
+        estimate_center(pair_match.left, pair_match.left_match.measured_yaw,
+                        pair_match.left_face);
     const auto right_anchor =
-        estimate_center(pair_match.right, pair_match.right_match, pair_match.right_face);
+        estimate_center(pair_match.right, pair_match.right_match.measured_yaw,
+                        pair_match.right_face);
     const Eigen::Vector3d center_anchor =
         0.5 * (left_anchor.first + right_anchor.first);
     const double yaw_anchor = SpLimitRad(
@@ -971,9 +938,10 @@ void ArmorTracker<CameraInfoV>::SpUpdatePair(const SpPairMatch& pair_match)
   ekf_.covariance(dz_index, dz_index) = variance;
   rt_.sp_pair_delta_z_valid = true;
   ekf_.measurement_face_index = pair_match.tracked_face;
-  const Eigen::Vector3d tracked_xyz =
-      SpMatchMeasurementPosition(pair_match.tracked_armor,
-                                 pair_match.tracked_match);
+  const Eigen::Vector3d tracked_xyz(
+      pair_match.tracked_armor.pose.translation.x(),
+      pair_match.tracked_armor.pose.translation.y(),
+      pair_match.tracked_armor.pose.translation.z());
   ekf_.measurement = Eigen::Vector4d(tracked_xyz.x(), tracked_xyz.y(),
                                      tracked_xyz.z(),
                                      pair_match.tracked_match.measured_yaw);
@@ -989,7 +957,7 @@ void ArmorTracker<CameraInfoV>::SpPredict()
   f(ExtendedKalmanFilter::Z_ARMOR, ExtendedKalmanFilter::V_Z_ARMOR) = dt;
   f(ExtendedKalmanFilter::YAW, ExtendedKalmanFilter::V_YAW) = dt;
 
-  double linear_variance = 100.0;
+  double linear_variance = 300.0;
   double angular_variance = 400.0;
   if (rt_.tracked_id == ArmorNumber::OUTPOST)
   {
@@ -1046,7 +1014,9 @@ void ArmorTracker<CameraInfoV>::SpUpdate(const ArmorDetectorResult& armor,
                                          const SpArmorMatch& match,
                                          bool freeze_delta_z)
 {
-  const Eigen::Vector3d armor_xyz = SpMatchMeasurementPosition(armor, match);
+  const Eigen::Vector3d armor_xyz(armor.pose.translation.x(),
+                                  armor.pose.translation.y(),
+                                  armor.pose.translation.z());
   const double base_z_before_update = ekf_.state(ExtendedKalmanFilter::Z_ARMOR);
   const Eigen::Vector3d armor_ypd = SpXyzToYpd(armor_xyz);
   Eigen::MatrixXd h = SpObservationJacobian(ekf_.state, match.id);

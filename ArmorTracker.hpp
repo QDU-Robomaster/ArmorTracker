@@ -75,7 +75,6 @@ depends:
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
-#include <deque>
 #include <fstream>
 #include <limits>
 #include <memory>
@@ -112,6 +111,7 @@ namespace cv
 class Mat;
 }
 
+// Aimer 继续复用这个消息结构发布 tracker/send；tracker 本身不再发布命令 topic。
 struct ArmorTrackerSend
 {
   bool is_fire{};
@@ -392,13 +392,7 @@ class ArmorTracker : public LibXR::Application
     double angle_error = 0.0;
     double xyz_error = 0.0;
     double measured_yaw = 0.0;
-    bool constrained_projection_valid = false;
-    Eigen::Vector3d constrained_projection_xyz = Eigen::Vector3d::Zero();
-    double constrained_projection_rmse_px = 0.0;
   };
-
-  Eigen::Vector3d SpMatchMeasurementPosition(const ArmorDetectorResult& armor,
-                                             const SpArmorMatch& match) const;
 
   struct SpPairObservation
   {
@@ -528,19 +522,20 @@ class ArmorTracker : public LibXR::Application
     // 坐标变换
     LibXR::Transform<double> gimbal_to_camera_transform_static{};
     LibXR::Transform<double> current_camera_pose{};
-    std::deque<LibXR::Transform<double>> camera_pose_history{};
     bool current_camera_pose_valid = false;
 
-    // 发布者
+    // tracker 只发布跟踪状态和调试信息；云台命令由 Aimer 发布。
     LibXR::Topic::Domain tracker_domain = LibXR::Topic::Domain("tracker");
     LibXR::Topic info_topic = LibXR::Topic("info", sizeof(TrackerInfo), &tracker_domain);
     LibXR::Topic target_topic =
         LibXR::Topic("target", sizeof(SolveTrajectory::Target), &tracker_domain);
+    // 兼容当前 BSP 的 SharedTopic 注册顺序；这些 topic 的数据由 Aimer 发布。
     LibXR::Topic target_eulr_topic =
         LibXR::Topic("target_eulr", sizeof(LibXR::EulerAngle<float>), &tracker_domain);
     LibXR::Topic fire_notify_topic =
         LibXR::Topic("fire_notify", sizeof(uint8_t), &tracker_domain);
-    LibXR::Topic send_topic = LibXR::Topic("send", sizeof(Send), &tracker_domain);
+    LibXR::Topic send_topic =
+        LibXR::Topic("send", sizeof(ArmorTrackerSend), &tracker_domain);
     LibXR::Topic ekf_points_topic =
         LibXR::Topic("ekf_points", sizeof(EkfPointsMsg), &tracker_domain);
     LibXR::Topic candidate_debug_topic =
