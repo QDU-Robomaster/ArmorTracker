@@ -53,6 +53,7 @@ constructor_args:
       enable_pair_dz: false
       measurement_recenter_alpha: 1.0
       quality_recenter: false
+      enable_multi_armor_fuse: true
   sync: '@camera_frame_sync'
 template_args:
   - Info:
@@ -204,6 +205,7 @@ class ArmorTracker : public LibXR::Application
       bool enable_pair_dz = false;               // 双装甲高低差软融合
       double measurement_recenter_alpha = 1.0;  // 单装甲测量重定位权重
       bool quality_recenter = false;             // 按匹配质量调节重定位权重
+      bool enable_multi_armor_fuse = true;       // 多可见装甲板在线估计车体几何
     } sp;
   };
 
@@ -444,7 +446,7 @@ class ArmorTracker : public LibXR::Application
   static bool SpIsBalanceArmor(const ArmorDetectorResult& armor);
   static int SpArmorCountFor(const ArmorDetectorResult& armor);
   double SpInitialRadiusFor(const ArmorDetectorResult& armor) const;
-  static Eigen::VectorXd SpInitialP0DiagFor(const ArmorDetectorResult& armor);
+  Eigen::VectorXd SpInitialP0DiagFor(const ArmorDetectorResult& armor) const;
   Eigen::Vector3d SpArmorPosition(const Eigen::VectorXd& state, int id) const;
   Eigen::MatrixXd SpObservationJacobian(const Eigen::VectorXd& state, int id) const;
   SpArmorMatch SpMatchArmorToFace(const ArmorDetectorResult& armor,
@@ -463,6 +465,7 @@ class ArmorTracker : public LibXR::Application
                 bool freeze_delta_z);
   bool SpStateDiverged() const;
   bool SpPairDeltaZEnabled() const;
+  bool SpMultiArmorFuseEnabled() const;
   double SpMeasurementRecenterAlpha() const;
   bool SpMeasurementRecenterQualityEnabled() const;
   // ====================== 内部聚合成员（类内聚合） ======================
@@ -656,6 +659,21 @@ bool ArmorTracker<CameraInfoV>::SpPairDeltaZEnabled() const
     return true;
   }
   return cfg_.sp.enable_pair_dz;
+}
+
+template <CameraTypes::CameraInfo CameraInfoV>
+bool ArmorTracker<CameraInfoV>::SpMultiArmorFuseEnabled() const
+{
+  if (SingleArmorModeEnabled() ||
+      armor_tracker_detail::EnvFlagEnabled("XR_TRACKER_DISABLE_MULTI_FUSE"))
+  {
+    return false;
+  }
+  if (armor_tracker_detail::EnvFlagEnabled("XR_TRACKER_ENABLE_MULTI_FUSE"))
+  {
+    return true;
+  }
+  return cfg_.sp.enable_multi_armor_fuse;
 }
 
 template <CameraTypes::CameraInfo CameraInfoV>

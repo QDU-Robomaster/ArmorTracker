@@ -174,8 +174,11 @@ void ArmorTracker<CameraInfoV>::Update(const ArmorDetectorResults& armors_msg,
     {
       rt_.switch_count++;
     }
-    SyncGeometryRuntimeFromState();
-    ekf_.ekf.SetState(ekf_.state);
+    if (SpMultiArmorFuseEnabled())
+    {
+      FuseMultiArmorObservation(armors_msg);
+    }
+    ClampGeometryState();
     XR_LOG_DEBUG(
         "SP pair tracker update: tracked_face=%d left_face=%d right_face=%d score=%.3f err=(left_xyz=%.3f right_xyz=%.3f left_angle=%.3f right_angle=%.3f) dz=%.4f",
         pair_match.tracked_face, pair_match.left_face, pair_match.right_face,
@@ -274,8 +277,11 @@ void ArmorTracker<CameraInfoV>::Update(const ArmorDetectorResults& armors_msg,
       {
         rt_.switch_count++;
       }
-      SyncGeometryRuntimeFromState();
-      ekf_.ekf.SetState(ekf_.state);
+      if (SpMultiArmorFuseEnabled())
+      {
+        FuseMultiArmorObservation(armors_msg);
+      }
+      ClampGeometryState();
       XR_LOG_DEBUG(
           "SP tracker update: armor=%zu num=%d type=%d face=%d score=%.3f err=(yaw=%.3f pitch=%.3f dist=%.3f angle=%.3f xyz=%.3f)",
           best_armor_index, static_cast<int>(best_armor.number),
