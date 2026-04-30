@@ -45,14 +45,14 @@ constructor_args:
       r_xyz_factor: 0.05
       r_yaw: 0.02
 
+    frames:
+      rotation: [1.0, 0.0, 0.0, 0.0]
+      translation: [0.0, 0.0, 0.0]
+
     sp:
       enable_pair_dz: false
       measurement_recenter_alpha: 1.0
       quality_recenter: false
-
-    frames:
-      rotation: [1.0, 0.0, 0.0, 0.0]
-      translation: [0.0, 0.0, 0.0]
   sync: '@camera_frame_sync'
 template_args:
   - Info:
@@ -193,18 +193,18 @@ class ArmorTracker : public LibXR::Application
       double r_yaw = 0.02;         // 观测噪声（yaw）
     } noise;
 
+    struct Frames
+    {
+      std::array<double, 4> rotation = {1.0, 0.0, 0.0, 0.0};  // 四元数 wxyz
+      std::array<double, 3> translation = {0.0, 0.0, 0.0};    // 平移 xyz [m]
+    } frames;
+
     struct SpTuning
     {
       bool enable_pair_dz = false;               // 双装甲高低差软融合
       double measurement_recenter_alpha = 1.0;  // 单装甲测量重定位权重
       bool quality_recenter = false;             // 按匹配质量调节重定位权重
     } sp;
-
-    struct Frames
-    {
-      std::array<double, 4> rotation = {1.0, 0.0, 0.0, 0.0};  // 四元数 wxyz
-      std::array<double, 3> translation = {0.0, 0.0, 0.0};    // 平移 xyz [m]
-    } frames;
   };
 
   // ====================== 公共类型 ======================
