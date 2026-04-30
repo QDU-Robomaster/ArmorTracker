@@ -4,9 +4,6 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
-#include <cstring>
-
-#include <opencv2/imgproc.hpp>
 
 #include "ArmorTrackerCommon.hpp"
 #include "CameraBase.hpp"
@@ -25,59 +22,6 @@ inline LibXR::Position<double> PackedCameraTranslation(
 {
   return LibXR::Position<double>(translation_xyz[0], translation_xyz[1],
                                  translation_xyz[2]);
-}
-
-constexpr uint32_t kArmorTrackerSyncFrameWaitTimeoutMs = 100;
-
-inline int ArmorTrackerCvTypeFromEncoding(CameraTypes::Encoding encoding)
-{
-  switch (encoding)
-  {
-    case CameraTypes::Encoding::RGB8:
-    case CameraTypes::Encoding::BGR8:
-      return CV_8UC3;
-    case CameraTypes::Encoding::RGBA8:
-    case CameraTypes::Encoding::BGRA8:
-      return CV_8UC4;
-    case CameraTypes::Encoding::MONO8:
-      return CV_8UC1;
-    default:
-      return -1;
-  }
-}
-
-inline cv::Mat ArmorTrackerConvertToBgrWithEncoding(
-    const cv::Mat& input, CameraTypes::Encoding encoding)
-{
-  switch (encoding)
-  {
-    case CameraTypes::Encoding::RGB8:
-    {
-      cv::Mat output;
-      cv::cvtColor(input, output, cv::COLOR_RGB2BGR);
-      return output;
-    }
-    case CameraTypes::Encoding::BGRA8:
-    {
-      cv::Mat output;
-      cv::cvtColor(input, output, cv::COLOR_BGRA2BGR);
-      return output;
-    }
-    case CameraTypes::Encoding::RGBA8:
-    {
-      cv::Mat output;
-      cv::cvtColor(input, output, cv::COLOR_RGBA2BGR);
-      return output;
-    }
-    case CameraTypes::Encoding::MONO8:
-    {
-      cv::Mat output;
-      cv::cvtColor(input, output, cv::COLOR_GRAY2BGR);
-      return output;
-    }
-    default:
-      return input.clone();
-  }
 }
 
 inline LibXR::Transform<double> ArmorTrackerCameraRotationToTrackerWorldPose(
@@ -151,26 +95,6 @@ inline bool ViewPriorityEnabled()
 {
   const char* env = std::getenv("XR_TRACKER_ENABLE_VIEW_PRIORITY");
   return env != nullptr && env[0] != '\0' && env[0] != '0';
-}
-
-inline bool ArmorTrackerPreviewUiAvailable()
-{
-  const char* display = std::getenv("DISPLAY");
-  const char* wayland_display = std::getenv("WAYLAND_DISPLAY");
-  if ((display != nullptr && display[0] != '\0') ||
-      (wayland_display != nullptr && wayland_display[0] != '\0'))
-  {
-    return true;
-  }
-
-  const char* qt_platform = std::getenv("QT_QPA_PLATFORM");
-  if (qt_platform == nullptr || qt_platform[0] == '\0')
-  {
-    return false;
-  }
-
-  return std::strcmp(qt_platform, "offscreen") == 0 ||
-         std::strcmp(qt_platform, "minimal") == 0;
 }
 
 inline const char* ArmorTrackerArmorsTopicName()

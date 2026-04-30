@@ -804,8 +804,7 @@ void ArmorTracker<CameraInfoV>::ArmorsCallback(const DetectionMessage& message)
 
   candidate_debug_msg_.image_timestamp_us = image_timestamp_us;
   io_.candidate_debug_topic.Publish(candidate_debug_msg_);
-  // ekf_points is a runtime data contract for truth-compare/recorder tools,
-  // not just the preview UI, so it must stay available in non-preview builds.
+  // ekf_points 是运行期数据合约，供预览、录像和 truth 对齐工具消费。
   io_.ekf_points_topic.Publish(ekf_msg_);
   io_.target_topic.Publish(target_msg);
 }
