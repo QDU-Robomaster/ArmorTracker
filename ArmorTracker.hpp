@@ -443,7 +443,7 @@ class ArmorTracker : public LibXR::Application
   static Eigen::MatrixXd SpXyzToYpdJacobian(const Eigen::Vector3d& xyz);
   static bool SpIsBalanceArmor(const ArmorDetectorResult& armor);
   static int SpArmorCountFor(const ArmorDetectorResult& armor);
-  static double SpInitialRadiusFor(const ArmorDetectorResult& armor);
+  double SpInitialRadiusFor(const ArmorDetectorResult& armor) const;
   static Eigen::VectorXd SpInitialP0DiagFor(const ArmorDetectorResult& armor);
   Eigen::Vector3d SpArmorPosition(const Eigen::VectorXd& state, int id) const;
   Eigen::MatrixXd SpObservationJacobian(const Eigen::VectorXd& state, int id) const;
