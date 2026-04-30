@@ -14,7 +14,7 @@
 namespace armor_tracker
 {
 // Observer 层只关心“整车状态如何表达、如何被装甲观测修正”。
-// 它不接触 topic、不读配置文件，也不关心 preview/debug 输出。
+// 它不接触 topic、不读配置文件，也不关心外部调试输出。
 struct ObserverPolicy
 {
   bool single_armor_mode = false;

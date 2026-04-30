@@ -167,11 +167,6 @@ jobs:
                     score_threshold: 0.7
                     nms_threshold: 0.3
                     min_confidence: 0.8
-                  debug:
-                    preview: false
-                    show_binary: false
-                    wait_key_ms: 1
-                    overlay_scale: 0.75
                 sync: '@camera_frame_sync'
 
             - id: ArmorTracker_0

@@ -450,11 +450,6 @@ class ArmorTracker : public LibXR::Application
   void SpUpdate(const ArmorDetectorResult& armor, const SpArmorMatch& match,
                 bool freeze_delta_z);
   bool SpStateDiverged() const;
-#if defined(AUTO_AIM_PREVIEW_IMAGE) && AUTO_AIM_PREVIEW_IMAGE
-  static void PreviewImageThreadFun(ArmorTracker<CameraInfoV>* self);
-  static void RenderPreviewFrame(ArmorTracker<CameraInfoV>* self, cv::Mat frame);
-#endif
-
   // ====================== 内部聚合成员（类内聚合） ======================
   struct EKFBlock
   {
@@ -552,10 +547,6 @@ class ArmorTracker : public LibXR::Application
   const char* name_ = "armor_tracker";
   LibXR::RamFS::File cmd_file_;
   std::atomic<bool> params_is_changed_{false};
-#if defined(AUTO_AIM_PREVIEW_IMAGE) && AUTO_AIM_PREVIEW_IMAGE
-  LibXR::Thread preview_image_thread_{};
-#endif
-
   EkfPointsMsg ekf_msg_;
   CandidateDebugMsg candidate_debug_msg_{};
   struct StateAuditBlock
@@ -569,8 +560,6 @@ class ArmorTracker : public LibXR::Application
 
 using armor_tracker_detail::ArmorTrackerArmorsTopicName;
 using armor_tracker_detail::ArmorTrackerCameraRotationToTrackerWorldPose;
-using armor_tracker_detail::ArmorTrackerConvertToBgrWithEncoding;
-using armor_tracker_detail::ArmorTrackerCvTypeFromEncoding;
 using armor_tracker_detail::DirectionalFaceSwitchEnabled;
 using armor_tracker_detail::FaceSwitchEnabled;
 using armor_tracker_detail::FaceSwitchPositionDeadzone;
@@ -586,7 +575,6 @@ using armor_tracker_detail::IdTrackDisappearMisses;
 using armor_tracker_detail::IdTrackDisappearTimeoutSec;
 using armor_tracker_detail::IdTrackTentativeMisses;
 using armor_tracker_detail::IdTrackTentativeTimeoutSec;
-using armor_tracker_detail::ArmorTrackerPreviewUiAvailable;
 using armor_tracker_detail::MultiArmorFuseEnabled;
 using armor_tracker_detail::OddFaceSwitchEnabled;
 using armor_tracker_detail::RelaxedFaceSwitchEnabled;
@@ -637,7 +625,6 @@ using armor_tracker_detail::SpXyzMeasurementUpdateEnabled;
 using armor_tracker_detail::SpXyzMeasurementYawVariance;
 using armor_tracker_detail::TempLostRecoveryEnabled;
 using armor_tracker_detail::ViewPriorityEnabled;
-using armor_tracker_detail::kArmorTrackerSyncFrameWaitTimeoutMs;
 using armor_tracker::AngularDiffAbs;
 using armor_tracker::LogImpossibleYawDiff;
 using armor_tracker::OrientationToYawNear;
@@ -859,11 +846,6 @@ ArmorTracker<CameraInfoV>::ArmorTracker(LibXR::HardwareContainer& hw,
     }
   }
 
-#if defined(AUTO_AIM_PREVIEW_IMAGE) && AUTO_AIM_PREVIEW_IMAGE
-  preview_image_thread_.Create(this, PreviewImageThreadFun, "TrackPreviewImg",
-                               static_cast<size_t>(1024 * 128),
-                               LibXR::Thread::Priority::LOW);
-#endif
 }
 
 template <CameraTypes::CameraInfo CameraInfoV>
