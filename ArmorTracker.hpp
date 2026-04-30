@@ -45,6 +45,11 @@ constructor_args:
       r_xyz_factor: 0.05
       r_yaw: 0.02
 
+    sp:
+      enable_pair_dz: false
+      measurement_recenter_alpha: 1.0
+      quality_recenter: false
+
     frames:
       rotation: [1.0, 0.0, 0.0, 0.0]
       translation: [0.0, 0.0, 0.0]
@@ -187,6 +192,13 @@ class ArmorTracker : public LibXR::Application
       double r_xyz_factor = 0.05;  // 观测噪声（随距离缩放）
       double r_yaw = 0.02;         // 观测噪声（yaw）
     } noise;
+
+    struct SpTuning
+    {
+      bool enable_pair_dz = false;               // 双装甲高低差软融合
+      double measurement_recenter_alpha = 1.0;  // 单装甲测量重定位权重
+      bool quality_recenter = false;             // 按匹配质量调节重定位权重
+    } sp;
 
     struct Frames
     {
@@ -450,6 +462,9 @@ class ArmorTracker : public LibXR::Application
   void SpUpdate(const ArmorDetectorResult& armor, const SpArmorMatch& match,
                 bool freeze_delta_z);
   bool SpStateDiverged() const;
+  bool SpPairDeltaZEnabled() const;
+  double SpMeasurementRecenterAlpha() const;
+  bool SpMeasurementRecenterQualityEnabled() const;
   // ====================== 内部聚合成员（类内聚合） ======================
   struct EKFBlock
   {
@@ -597,7 +612,6 @@ using armor_tracker_detail::SpPitchVarianceScale;
 using armor_tracker_detail::SpYpdArmorYawVarianceScale;
 using armor_tracker_detail::SpYpdDistanceVarianceScale;
 using armor_tracker_detail::SpPairDeltaZAlpha;
-using armor_tracker_detail::SpPairDeltaZEnabled;
 using armor_tracker_detail::SpPairDeltaZMaxAbs;
 using armor_tracker_detail::SpPairDeltaZMinHeight;
 using armor_tracker_detail::SpPairDeltaZVariance;
@@ -605,10 +619,8 @@ using armor_tracker_detail::SpPairDualUpdateEnabled;
 using armor_tracker_detail::SpPairRecenterAlpha;
 using armor_tracker_detail::SpMeasurementAnchoredOutputEnabled;
 using armor_tracker_detail::SpOutputExtrapolateSeconds;
-using armor_tracker_detail::SpMeasurementRecenterAlpha;
 using armor_tracker_detail::SpMeasurementRecenterAlphaBad;
 using armor_tracker_detail::SpMeasurementRecenterAlphaGood;
-using armor_tracker_detail::SpMeasurementRecenterQualityEnabled;
 using armor_tracker_detail::SpMeasurementRecenterScoreBad;
 using armor_tracker_detail::SpMeasurementRecenterScoreGood;
 using armor_tracker_detail::SpMeasurementRecenterXyzBad;
@@ -631,6 +643,41 @@ using armor_tracker::OrientationToYawNear;
 using armor_tracker::QuaternionToYaw;
 using armor_tracker::TimestampAbsDiff;
 using armor_tracker::UnwrapYawNear;
+
+template <CameraTypes::CameraInfo CameraInfoV>
+bool ArmorTracker<CameraInfoV>::SpPairDeltaZEnabled() const
+{
+  if (armor_tracker_detail::EnvFlagEnabled("XR_TRACKER_SP_DISABLE_PAIR_DZ"))
+  {
+    return false;
+  }
+  if (armor_tracker_detail::EnvFlagEnabled("XR_TRACKER_SP_ENABLE_PAIR_DZ"))
+  {
+    return true;
+  }
+  return cfg_.sp.enable_pair_dz;
+}
+
+template <CameraTypes::CameraInfo CameraInfoV>
+double ArmorTracker<CameraInfoV>::SpMeasurementRecenterAlpha() const
+{
+  return std::clamp(
+      armor_tracker_detail::ParseEnvDouble(
+          "XR_TRACKER_SP_MEAS_RECENTER_ALPHA",
+          cfg_.sp.measurement_recenter_alpha),
+      0.0, 1.0);
+}
+
+template <CameraTypes::CameraInfo CameraInfoV>
+bool ArmorTracker<CameraInfoV>::SpMeasurementRecenterQualityEnabled() const
+{
+  const char* env = std::getenv("XR_TRACKER_SP_QUALITY_RECENTER");
+  if (env != nullptr)
+  {
+    return env[0] != '\0' && env[0] != '0';
+  }
+  return cfg_.sp.quality_recenter;
+}
 
 // 分离出的实现块：让主头文件只保留 tracker 主流程。
 #include "ArmorTrackerDebugSupport.hpp"
