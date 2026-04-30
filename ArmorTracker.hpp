@@ -629,6 +629,8 @@ using armor_tracker_detail::SpMeasurementRecenterYawBad;
 using armor_tracker_detail::SpMeasurementRecenterYawGood;
 using armor_tracker_detail::SpMeasurementPositionAnchorAlpha;
 using armor_tracker_detail::SpMeasurementPositionAnchorXyzBad;
+using armor_tracker_detail::SpMeasurementQuality;
+using armor_tracker_detail::SpMeasurementQualityScaleMax;
 using armor_tracker_detail::SpStaticDeltaZ;
 using armor_tracker_detail::SpStaticDeltaZEnabled;
 using armor_tracker_detail::SpXyzMeasurementFullGeometryEnabled;

@@ -1026,6 +1026,16 @@ void ArmorTracker<CameraInfoV>::SpUpdate(const ArmorDetectorResult& armor,
   const double dz_variance_before_update =
       ekf_.covariance(ExtendedKalmanFilter::DELTA_Z,
                       ExtendedKalmanFilter::DELTA_Z);
+  const bool use_measurement_quality = SpMeasurementRecenterQualityEnabled();
+  const double measurement_quality =
+      use_measurement_quality
+          ? SpMeasurementQuality(match.score, match.angle_error, match.xyz_error)
+          : 1.0;
+  const double measurement_scale =
+      use_measurement_quality
+          ? 1.0 + (SpMeasurementQualityScaleMax() - 1.0) *
+                      (1.0 - measurement_quality)
+          : 1.0;
   if (freeze_delta_z && rt_.tracked_armors_num == ArmorsNum::NORMAL_4)
   {
     h.col(ExtendedKalmanFilter::DELTA_Z).setZero();
@@ -1070,11 +1080,13 @@ void ArmorTracker<CameraInfoV>::SpUpdate(const ArmorDetectorResult& armor,
 
     const double range = std::max(1e-6, armor_xyz.norm());
     const double position_sigma =
-        std::max(0.005, SpXyzMeasurementRFactor(cfg_.noise.r_xyz_factor) * range);
+        std::max(0.005, SpXyzMeasurementRFactor(cfg_.noise.r_xyz_factor) * range *
+                            measurement_scale);
     Eigen::VectorXd r_diag(4);
     r_diag << position_sigma * position_sigma,
         position_sigma * position_sigma, position_sigma * position_sigma,
-        SpXyzMeasurementYawVariance(cfg_.noise.r_yaw);
+        SpXyzMeasurementYawVariance(cfg_.noise.r_yaw) * measurement_scale *
+            measurement_scale;
 
     Eigen::VectorXd z(4);
     z << armor_xyz.x(), armor_xyz.y(), armor_xyz.z(), match.measured_yaw;
@@ -1129,12 +1141,14 @@ void ArmorTracker<CameraInfoV>::SpUpdate(const ArmorDetectorResult& armor,
 
   const double center_yaw = std::atan2(armor_xyz.y(), armor_xyz.x());
   const double delta_angle = SpLimitRad(match.measured_yaw - center_yaw);
+  const double ypd_measurement_scale2 = measurement_scale * measurement_scale;
   Eigen::VectorXd r_diag(4);
-  r_diag << 4e-3, 4e-3 * SpPitchVarianceScale(),
+  r_diag << 4e-3 * ypd_measurement_scale2,
+      4e-3 * SpPitchVarianceScale() * ypd_measurement_scale2,
       (std::log(std::abs(delta_angle) + 1.0) + 1.0) *
-          SpYpdDistanceVarianceScale(),
+          SpYpdDistanceVarianceScale() * ypd_measurement_scale2,
       (std::log(std::abs(armor_ypd.z()) + 1.0) / 200.0 + 9e-2) *
-          SpYpdArmorYawVarianceScale();
+          SpYpdArmorYawVarianceScale() * ypd_measurement_scale2;
   const Eigen::MatrixXd r = r_diag.asDiagonal();
 
   auto observe = [this, &match](const Eigen::VectorXd& state)
@@ -1201,28 +1215,13 @@ void ArmorTracker<CameraInfoV>::SpUpdate(const ArmorDetectorResult& armor,
   }
 
   double recenter_alpha = SpMeasurementRecenterAlpha();
-  if (recenter_alpha > 0.0 && SpMeasurementRecenterQualityEnabled())
+  if (recenter_alpha > 0.0 && use_measurement_quality)
   {
-    const auto quality_ramp = [](double value, double good, double bad)
-    {
-      if (bad <= good + 1e-9)
-      {
-        return value <= good ? 1.0 : 0.0;
-      }
-      return std::clamp((bad - value) / (bad - good), 0.0, 1.0);
-    };
-
-    const double quality = std::min(
-        {quality_ramp(match.score, SpMeasurementRecenterScoreGood(),
-                      SpMeasurementRecenterScoreBad()),
-         quality_ramp(match.angle_error, SpMeasurementRecenterYawGood(),
-                      SpMeasurementRecenterYawBad()),
-         quality_ramp(match.xyz_error, SpMeasurementRecenterXyzGood(),
-                      SpMeasurementRecenterXyzBad())});
     const double alpha_bad = SpMeasurementRecenterAlphaBad();
     const double alpha_good = SpMeasurementRecenterAlphaGood();
     recenter_alpha =
-        std::clamp(alpha_bad + (alpha_good - alpha_bad) * quality, 0.0, 1.0);
+        std::clamp(alpha_bad + (alpha_good - alpha_bad) * measurement_quality, 0.0,
+                   1.0);
   }
   if (recenter_alpha > 0.0 && rt_.tracked_armors_num == ArmorsNum::NORMAL_4)
   {

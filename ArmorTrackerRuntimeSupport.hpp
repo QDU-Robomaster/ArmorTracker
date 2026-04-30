@@ -430,6 +430,26 @@ inline double SpMeasurementRecenterXyzBad()
                   ParseEnvDouble("XR_TRACKER_SP_MEAS_RECENTER_XYZ_BAD", 0.10));
 }
 
+inline double SpMeasurementQualityRamp(double value, double good, double bad)
+{
+  if (bad <= good + 1e-9)
+  {
+    return value <= good ? 1.0 : 0.0;
+  }
+  return std::clamp((bad - value) / (bad - good), 0.0, 1.0);
+}
+
+inline double SpMeasurementQuality(double score, double yaw_error, double xyz_error)
+{
+  return std::min(
+      {SpMeasurementQualityRamp(score, SpMeasurementRecenterScoreGood(),
+                                SpMeasurementRecenterScoreBad()),
+       SpMeasurementQualityRamp(yaw_error, SpMeasurementRecenterYawGood(),
+                                SpMeasurementRecenterYawBad()),
+       SpMeasurementQualityRamp(xyz_error, SpMeasurementRecenterXyzGood(),
+                                SpMeasurementRecenterXyzBad())});
+}
+
 inline double SpMeasurementPositionAnchorAlpha()
 {
   return std::clamp(ParseEnvDouble("XR_TRACKER_SP_MEAS_POS_ANCHOR_ALPHA", 0.0),
@@ -457,6 +477,12 @@ inline double SpXyzMeasurementYawVariance(double default_value)
 {
   return std::max(1e-6,
                   ParseEnvDouble("XR_TRACKER_SP_XYZ_YAW_R", default_value));
+}
+
+inline double SpMeasurementQualityScaleMax()
+{
+  return std::clamp(ParseEnvDouble("XR_TRACKER_SP_QUALITY_R_SCALE_MAX", 6.0),
+                    1.0, 100.0);
 }
 
 inline bool SpXyzMeasurementFullGeometryEnabled()

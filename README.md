@@ -56,6 +56,9 @@ tracker 以同步图像的传感器时间戳计算 `dt`。如果进程启动、�
 
 - `enable_pair_dz`：允许双装甲高低差软融合。Webots 四面目标可以打开，用于约束高低面；默认关闭，避免实拍/录制数据里错误双面观测污染状态。
 - `measurement_recenter_alpha`：单装甲测量重定位权重。默认 `1.0` 保留当前主线行为；Webots 可按场景降低，避免单帧 PnP 尾巴强行拉动整车中心。
-- `quality_recenter`：按匹配质量动态调节重定位权重。Webots 可打开，用 `score / yaw / xyz` 门控削弱低质量测量。
+- `quality_recenter`：按匹配质量动态调节测量权重。Webots 可打开，用 `score / yaw / xyz` 同时削弱低质量测量的 EKF 增益和重定位权重。
+
+质量权重的最大测量噪声放大倍率由 `XR_TRACKER_SP_QUALITY_R_SCALE_MAX` 覆盖，默认 `6.0`。该倍率只在
+`quality_recenter` 开启时生效，正常默认配置仍保持旧测量噪声。
 
 这些配置仍可被同名环境变量覆盖，用于现场继续做数据驱动调参；默认不启用 canonical 初始化、固定输出外推、强制测量锚定、多装甲全车融合或 direct XYZ 更新。
