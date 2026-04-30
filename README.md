@@ -40,6 +40,8 @@ tracker 日志会输出 `double` 观测量和 `uint64_t` 图像时间戳，模�
 Webots 验证时如果 tracker 一直停在 `LOST`，先检查配置里的空间过滤阈值。当前验证世界中目标位姿会超过
 `max_z_position: 1.0` 的默认验证阈值，放宽到 `30.0` 后 tracker 能稳定进入 `TRACKING`，各输出 topic
 按图像频率发布。接入 Aimer 后，`tracker/send` 和 `tracker/target_eulr` 应只由 Aimer 发布，避免命令双写。
+`ArmorTrackerSend::image_timestamp_us` 继承 `tracker/target` 的图像传感器时间戳，用于 Aimer、Preview 或记录器把
+瞄点命令和同一帧图像对齐；它不是到达时间戳，也不参与跨传感器时钟比较。
 
 tracker 以同步图像的传感器时间戳计算 `dt`。如果进程启动、调试录像、Webots 暂停等情况造成相邻图像时间戳
 出现大跳变，模块会丢弃旧 EKF / 装甲面绑定 / 图像域短时跟踪状态，并从当前帧重新进入 `DETECTING`。这种帧只

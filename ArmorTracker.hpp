@@ -119,6 +119,7 @@ class Mat;
 // Aimer 继续复用这个消息结构发布 tracker/send；tracker 本身不再发布命令 topic。
 struct ArmorTrackerSend
 {
+  uint64_t image_timestamp_us{};
   bool is_fire{};
   LibXR::Position<double> position{};
   double v_yaw{};
