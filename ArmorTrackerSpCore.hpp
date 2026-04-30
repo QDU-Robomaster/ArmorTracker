@@ -1017,6 +1017,7 @@ void ArmorTracker<CameraInfoV>::SpUpdate(const ArmorDetectorResult& armor,
   const Eigen::Vector3d armor_xyz(armor.pose.translation.x(),
                                   armor.pose.translation.y(),
                                   armor.pose.translation.z());
+  ekf_.measurement_face_index = match.id;
   const double base_z_before_update = ekf_.state(ExtendedKalmanFilter::Z_ARMOR);
   const Eigen::Vector3d armor_ypd = SpXyzToYpd(armor_xyz);
   Eigen::MatrixXd h = SpObservationJacobian(ekf_.state, match.id);
