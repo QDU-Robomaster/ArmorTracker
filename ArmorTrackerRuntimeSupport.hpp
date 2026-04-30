@@ -317,7 +317,11 @@ inline bool SpCanonicalInitPreferPositiveDz()
 
 inline bool SpPairDeltaZEnabled()
 {
-  return !EnvFlagEnabled("XR_TRACKER_SP_DISABLE_PAIR_DZ");
+  if (EnvFlagEnabled("XR_TRACKER_SP_DISABLE_PAIR_DZ"))
+  {
+    return false;
+  }
+  return EnvFlagEnabled("XR_TRACKER_SP_ENABLE_PAIR_DZ");
 }
 
 inline double SpPairDeltaZAlpha()
@@ -364,7 +368,7 @@ inline double SpOutputExtrapolateSeconds()
 
 inline double SpMeasurementRecenterAlpha()
 {
-  return std::clamp(ParseEnvDouble("XR_TRACKER_SP_MEAS_RECENTER_ALPHA", 0.20),
+  return std::clamp(ParseEnvDouble("XR_TRACKER_SP_MEAS_RECENTER_ALPHA", 1.0),
                     0.0, 1.0);
 }
 
@@ -375,7 +379,7 @@ inline bool SpMeasurementRecenterQualityEnabled()
   {
     return env[0] != '\0' && env[0] != '0';
   }
-  return true;
+  return false;
 }
 
 inline double SpMeasurementRecenterAlphaGood()
