@@ -14,7 +14,7 @@
 - `ArmorTrackerSelectionSupport.hpp`：选面后的 face 与 image-track 绑定维护。
 - `ArmorTrackerObserver.hpp`、`ArmorTrackerObserverRuntimeSupport.hpp`：整车几何观测模型和运行时状态映射。
 - `ArmorTrackerImageTracker.hpp`：图像域短时身份跟踪，只用于辅助同一装甲板判断。
-- `ArmorTrackerDebugSupport.hpp`、`ArmorTrackerStateAuditSupport.hpp`：预览绘制和状态审计输出。
+- `ArmorTrackerDebugSupport.hpp`、`ArmorTrackerStateAuditSupport.hpp`：调试 topic 组包和状态审计输出。
 - `SolveTrajectory.*`、`TrajectoryCompensationTable.hpp`、`table.bin`：保留 `Target` 消息定义和旧弹道工具，当前 tracker 主流程不再发布弹道命令。
 - `extended_kalman_filter.*`：通用 EKF 实现。
 
