@@ -226,11 +226,8 @@ void ArmorTracker<CameraInfoV>::Update(const ArmorDetectorResults& armors_msg,
     item.armor_index = static_cast<uint8_t>(std::min<std::size_t>(best_armor_index, 255));
     item.face_index = static_cast<uint8_t>(std::max(0, best_match.id));
     item.same_number = 1;
-    const int detection_track_id = FindDetectionTrackId(best_armor_index);
-    const bool confirmed_image_track =
-        IsDetectionTrackConfirmed(best_armor_index);
-    item.image_track_id = static_cast<int16_t>(detection_track_id);
-    item.image_track_confirmed = confirmed_image_track ? 1 : 0;
+    item.image_track_id = static_cast<int16_t>(FindDetectionTrackId(best_armor_index));
+    item.image_track_confirmed = IsDetectionTrackConfirmed(best_armor_index) ? 1 : 0;
     item.same_persistent_track = 0;
     item.number = best_armor.number;
     item.type = best_armor.type;
@@ -244,19 +241,9 @@ void ArmorTracker<CameraInfoV>::Update(const ArmorDetectorResults& armors_msg,
     item.measured_yaw = static_cast<float>(best_match.measured_yaw);
     candidate_debug.best_same_face_score = static_cast<float>(best_match.score);
 
-    const bool strict_accepted =
+    const bool accepted =
         best_match.xyz_error < cfg_.match.max_match_distance &&
         best_match.angle_error < cfg_.match.max_match_yaw_diff;
-    const double temp_lost_relaxed_distance =
-        std::min(cfg_.match.max_match_distance, 0.10);
-    const double temp_lost_relaxed_yaw_diff =
-        std::min(cfg_.match.max_match_yaw_diff + 0.15, 0.65);
-    const bool temp_lost_relaxed_accepted =
-        !strict_accepted && rt_.state == State::TEMP_LOST &&
-        confirmed_image_track &&
-        best_match.xyz_error < temp_lost_relaxed_distance &&
-        best_match.angle_error < temp_lost_relaxed_yaw_diff;
-    const bool accepted = strict_accepted || temp_lost_relaxed_accepted;
     rt_.info_position_diff = best_match.xyz_error;
     rt_.info_yaw_diff = best_match.angle_error;
     if (!accepted)
@@ -273,11 +260,7 @@ void ArmorTracker<CameraInfoV>::Update(const ArmorDetectorResults& armors_msg,
     {
       matched = true;
       candidate_debug.matched = 1;
-      candidate_debug.accepted_mode =
-          temp_lost_relaxed_accepted
-              ? static_cast<uint8_t>(
-                    armor_tracker::FaceSelectionAcceptedMode::RELAXED_SAME_FACE)
-              : 1;
+      candidate_debug.accepted_mode = 1;
       candidate_debug.selected_index = 0;
       candidate_debug.same_face_matched = 1;
 
@@ -300,12 +283,11 @@ void ArmorTracker<CameraInfoV>::Update(const ArmorDetectorResults& armors_msg,
       }
       ClampGeometryState();
       XR_LOG_DEBUG(
-          "SP tracker update: armor=%zu num=%d type=%d face=%d score=%.3f err=(yaw=%.3f pitch=%.3f dist=%.3f angle=%.3f xyz=%.3f) mode=%s",
+          "SP tracker update: armor=%zu num=%d type=%d face=%d score=%.3f err=(yaw=%.3f pitch=%.3f dist=%.3f angle=%.3f xyz=%.3f)",
           best_armor_index, static_cast<int>(best_armor.number),
           static_cast<int>(best_armor.type), best_match.id, best_match.score,
           best_match.yaw_error, best_match.pitch_error, best_match.distance_error,
-          best_match.angle_error, best_match.xyz_error,
-          temp_lost_relaxed_accepted ? "temp_lost_relaxed" : "strict");
+          best_match.angle_error, best_match.xyz_error);
     }
   }
 
