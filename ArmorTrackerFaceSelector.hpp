@@ -44,7 +44,7 @@ struct FaceSelectionPolicy
   double face_switch_score_deadzone = 0.15;
   double face_switch_position_deadzone = 0.05;
   double face_switch_yaw_deadzone = 0.35;
-  double face_switch_timeout_sec = 0.08;
+  double face_switch_timeout_sec = 0.0;
   double id_assist_same_face_center_gate_px = 85.0;
   double id_assist_same_face_area_log_gate = 0.45;
   double relaxed_same_face_image_gate_px = 90.0;
@@ -348,7 +348,7 @@ FaceSelectionResult SelectFaceMatch(
       const Eigen::Vector3d predicted_position = get_predicted_position(face_index);
       const double predicted_yaw = get_predicted_yaw(face_index);
       const double measured_yaw =
-          OrientationToYawNear(armor, predicted_yaw);
+          MeasuredArmorYawNear(armor, predicted_yaw);
       const double position_diff = (predicted_position - position_vec).norm();
       const double current_yaw_diff =
           AngularDiffAbs(measured_yaw, predicted_yaw);

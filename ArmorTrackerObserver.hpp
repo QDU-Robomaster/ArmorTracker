@@ -281,7 +281,7 @@ bool FuseMultiArmorObservation(ObserverRuntime& runtime, Eigen::VectorXd& state,
       const double predicted_yaw =
           GetArmorYawFromState(state, runtime, face_index);
       const double measured_yaw =
-          OrientationToYawNear(armor, predicted_yaw);
+          MeasuredArmorYawNear(armor, predicted_yaw);
       const double position_diff = (predicted_position - position_vec).norm();
       const double yaw_diff = AngularDiffAbs(measured_yaw, predicted_yaw);
       LogImpossibleYawDiff("fuse", armor_index, face_index, measured_yaw,

@@ -353,8 +353,8 @@ class ArmorTracker : public LibXR::Application
   Eigen::Vector3d GetCameraWorldPosition();
   void AdvanceTrackerState(bool matched);
   bool ApplyFaceSelection(const armor_tracker::FaceSelectionResult& selection,
-                          const ArmorDetectorResults& armors_msg,
-                          CandidateDebugMsg& candidate_debug);
+                          CandidateDebugMsg& candidate_debug,
+                          bool freeze_delta_z);
   bool TryRecoverTempLost(const ArmorDetectorResults& armors_msg,
                           CandidateDebugMsg& candidate_debug);
   armor_tracker::ObserverPolicy BuildObserverPolicy() const;
@@ -365,10 +365,6 @@ class ArmorTracker : public LibXR::Application
   void ApplySelectedIdentity(const armor_tracker::FaceMatchCandidate& selected_candidate);
   void ApplySelectedFaceBinding(const armor_tracker::FaceMatchCandidate& selected_candidate,
                                 bool did_face_switch);
-  void ApplySelectedMeasurementUpdate(
-      const armor_tracker::FaceMatchCandidate& selected_candidate,
-      const ArmorDetectorResults& armors_msg, int observed_face_index,
-      bool recenter_before_update);
   void FillSingleArmorDebug(std::size_t selected_index, int detection_track_id,
                             bool confirmed_track, float score, float center_diff,
                             float area_log);
@@ -379,14 +375,10 @@ class ArmorTracker : public LibXR::Application
 
   // ====================== 辅助函数 ======================
   void InitEKF(const ArmorDetectorResult& a);
-  void UpdateArmorsNum();
   void SyncDzReferenceFromState();
-  void FuseMultiArmorObservation(const ArmorDetectorResults& armors_msg);
-  void SwitchTrackedFace(int face_index, double measured_yaw);
   void RecenterTrackedStateToMeasurement(const ArmorDetectorResult& armor,
                                          int observed_face_index,
                                          double measured_yaw);
-  double OrientationToYaw(const LibXR::Quaternion<double>& q);
   int LocalFaceToCanonicalFace(int local_face_index) const;
   void SyncGeometryRuntimeFromState();
   void ClampGeometryState();
@@ -443,7 +435,7 @@ class ArmorTracker : public LibXR::Application
   static Eigen::MatrixXd SpXyzToYpdJacobian(const Eigen::Vector3d& xyz);
   static bool SpIsBalanceArmor(const ArmorDetectorResult& armor);
   static int SpArmorCountFor(const ArmorDetectorResult& armor);
-  static double SpInitialRadiusFor(const ArmorDetectorResult& armor);
+  double SpInitialRadiusFor(const ArmorDetectorResult& armor) const;
   static Eigen::VectorXd SpInitialP0DiagFor(const ArmorDetectorResult& armor);
   Eigen::Vector3d SpArmorPosition(const Eigen::VectorXd& state, int id) const;
   Eigen::MatrixXd SpObservationJacobian(const Eigen::VectorXd& state, int id) const;
@@ -500,6 +492,7 @@ class ArmorTracker : public LibXR::Application
     double face_switch_cooldown_remaining = 0.0;
     int update_count = 0;
     int switch_count = 0;
+    int suspect_count = 0;
 
     ArmorNumber tracked_id = ArmorNumber::INVALID;
     ArmorDetectorResult tracked_armor{};
@@ -590,7 +583,6 @@ using armor_tracker_detail::IdTrackDisappearMisses;
 using armor_tracker_detail::IdTrackDisappearTimeoutSec;
 using armor_tracker_detail::IdTrackTentativeMisses;
 using armor_tracker_detail::IdTrackTentativeTimeoutSec;
-using armor_tracker_detail::MultiArmorFuseEnabled;
 using armor_tracker_detail::OddFaceSwitchEnabled;
 using armor_tracker_detail::RelaxedFaceSwitchEnabled;
 using armor_tracker_detail::SingleArmorAreaLogGate;

@@ -33,7 +33,8 @@ void ArmorTracker<CameraInfoV>::FillCandidateDebugFromSelection(
     const auto& src = selection.debug.items[item_index];
     auto& dst = candidate_debug.items[item_index];
     dst.armor_index = src.armor_index;
-    dst.face_index = src.face_index;
+    dst.face_index =
+        static_cast<uint8_t>(LocalFaceToCanonicalFace(src.face_index));
     dst.same_number = src.same_number;
     dst.image_track_id = src.image_track_id;
     dst.image_track_confirmed = src.image_track_confirmed;

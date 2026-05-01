@@ -128,45 +128,6 @@ void ArmorTracker<CameraInfoV>::ApplySelectedFaceBinding(
 }
 
 template <CameraTypes::CameraInfo CameraInfoV>
-void ArmorTracker<CameraInfoV>::ApplySelectedMeasurementUpdate(
-    const armor_tracker::FaceMatchCandidate& selected_candidate,
-    const ArmorDetectorResults& armors_msg, int observed_face_index,
-    bool recenter_before_update)
-{
-  rt_.last_yaw = selected_candidate.measured_yaw;
-  if (recenter_before_update)
-  {
-    RecenterTrackedStateToMeasurement(selected_candidate.armor,
-                                      observed_face_index,
-                                      selected_candidate.measured_yaw);
-  }
-  ekf_.measurement_face_index = observed_face_index;
-  ekf_.measurement_geometry_mode = recenter_before_update
-                                       ? EKFBlock::MeasurementGeometryMode::FULL_BODY
-                                       : EKFBlock::MeasurementGeometryMode::VISIBLE_FACE_ONLY;
-  const auto p = selected_candidate.armor.pose.translation;
-  ekf_.measurement =
-      Eigen::Vector4d(p.x(), p.y(), p.z(), selected_candidate.measured_yaw);
-  ekf_.state = ekf_.ekf.Update(ekf_.measurement);
-  if (recenter_before_update)
-  {
-    // 换面这一步允许几何状态被一次性重估，但不要把几何-位姿相关性带进后续单面更新。
-    ekf_.ekf.DecorrelatePosterior(
-        {ExtendedKalmanFilter::ROBOT_R, ExtendedKalmanFilter::DELTA_R,
-         ExtendedKalmanFilter::DELTA_Z});
-  }
-  ekf_.measurement_geometry_mode = EKFBlock::MeasurementGeometryMode::FULL_BODY;
-  SyncGeometryRuntimeFromState();
-  SyncDzReferenceFromState();
-  if (MultiArmorFuseEnabled())
-  {
-    FuseMultiArmorObservation(armors_msg);
-  }
-  ClampGeometryState();
-  XR_LOG_DEBUG("EKF update");
-}
-
-template <CameraTypes::CameraInfo CameraInfoV>
 armor_tracker::FaceSelectionPolicy ArmorTracker<CameraInfoV>::BuildFaceSelectionPolicy() const
 {
   armor_tracker::FaceSelectionPolicy face_policy{};
@@ -220,7 +181,7 @@ Eigen::Vector3d ArmorTracker<CameraInfoV>::GetCameraWorldPosition()
 template <CameraTypes::CameraInfo CameraInfoV>
 bool ArmorTracker<CameraInfoV>::ApplyFaceSelection(
     const armor_tracker::FaceSelectionResult& selection,
-    const ArmorDetectorResults& armors_msg, CandidateDebugMsg& candidate_debug)
+    CandidateDebugMsg& candidate_debug, bool freeze_delta_z)
 {
   rt_.info_position_diff = selection.info_position_diff;
   rt_.info_yaw_diff = selection.info_yaw_diff;
@@ -244,6 +205,8 @@ bool ArmorTracker<CameraInfoV>::ApplyFaceSelection(
   const bool did_face_switch = selected_candidate.face_index != 0;
   const int observed_face_index =
       LocalFaceToCanonicalFace(selected_candidate.face_index);
+  const SpArmorMatch sp_match =
+      SpMatchArmorToFace(selected_candidate.armor, ekf_.state, observed_face_index);
   candidate_debug.matched = 1;
   candidate_debug.accepted_mode =
       static_cast<uint8_t>(selection.accepted_mode);
@@ -251,7 +214,6 @@ bool ArmorTracker<CameraInfoV>::ApplyFaceSelection(
 
   if (did_face_switch)
   {
-    SwitchTrackedFace(selected_candidate.face_index, selected_candidate.measured_yaw);
     rt_.face_switch_cooldown_remaining = candidate_debug.face_switch_timeout_sec;
     candidate_debug.face_switch_cooldown_remaining =
         static_cast<float>(rt_.face_switch_cooldown_remaining);
@@ -259,17 +221,17 @@ bool ArmorTracker<CameraInfoV>::ApplyFaceSelection(
 
   ApplySelectedIdentity(selected_candidate);
   ApplySelectedFaceBinding(selected_candidate, did_face_switch);
-  ApplySelectedMeasurementUpdate(selected_candidate, armors_msg,
-                                 observed_face_index, did_face_switch);
+  SpUpdate(selected_candidate.armor, sp_match, freeze_delta_z);
+  rt_.tracked_armor = selected_candidate.armor;
+  rt_.tracked_armors_num =
+      static_cast<ArmorsNum>(SpArmorCountFor(selected_candidate.armor));
+  rt_.tracked_face_index = observed_face_index;
+  rt_.last_yaw = sp_match.measured_yaw;
+  rt_.info_position_diff = sp_match.xyz_error;
+  rt_.info_yaw_diff = sp_match.angle_error;
+  SyncGeometryRuntimeFromState();
+  ekf_.ekf.SetState(ekf_.state);
   return true;
-}
-
-template <CameraTypes::CameraInfo CameraInfoV>
-void ArmorTracker<CameraInfoV>::UpdateArmorsNum()
-{
-  auto runtime = BuildObserverRuntime();
-  armor_tracker::UpdateArmorsNum(runtime, BuildObserverPolicy());
-  ApplyObserverRuntime(runtime);
 }
 
 template <CameraTypes::CameraInfo CameraInfoV>
@@ -278,32 +240,6 @@ void ArmorTracker<CameraInfoV>::SyncDzReferenceFromState()
   auto runtime = BuildObserverRuntime();
   armor_tracker::SyncDzReferenceFromState(runtime);
   ApplyObserverRuntime(runtime);
-}
-
-template <CameraTypes::CameraInfo CameraInfoV>
-void ArmorTracker<CameraInfoV>::FuseMultiArmorObservation(const ArmorDetectorResults& armors_msg)
-{
-  auto runtime = BuildObserverRuntime();
-  const bool fused = armor_tracker::FuseMultiArmorObservation(
-      runtime, ekf_.state, BuildObserverPolicy(), armors_msg,
-      [this](std::size_t armor_index) { return FindDetectionTrackId(armor_index); },
-      [this](std::size_t armor_index)
-      { return IsDetectionTrackConfirmed(armor_index); });
-  ApplyObserverRuntime(runtime);
-  if (fused)
-  {
-    ekf_.ekf.SetState(ekf_.state);
-  }
-}
-
-template <CameraTypes::CameraInfo CameraInfoV>
-void ArmorTracker<CameraInfoV>::SwitchTrackedFace(int face_index, double measured_yaw)
-{
-  auto runtime = BuildObserverRuntime();
-  armor_tracker::SwitchTrackedFace(runtime, ekf_.state, BuildObserverPolicy(),
-                                   face_index, measured_yaw);
-  ApplyObserverRuntime(runtime);
-  ekf_.ekf.SetState(ekf_.state);
 }
 
 template <CameraTypes::CameraInfo CameraInfoV>
@@ -338,15 +274,6 @@ void ArmorTracker<CameraInfoV>::RecenterTrackedStateToMeasurement(
 
   ekf_.ekf.SetState(ekf_.state);
   SyncGeometryRuntimeFromState();
-}
-
-template <CameraTypes::CameraInfo CameraInfoV>
-double ArmorTracker<CameraInfoV>::OrientationToYaw(const LibXR::Quaternion<double>& q)
-{
-  auto runtime = BuildObserverRuntime();
-  const double yaw = armor_tracker::OrientationToYaw(q, runtime);
-  ApplyObserverRuntime(runtime);
-  return yaw;
 }
 
 template <CameraTypes::CameraInfo CameraInfoV>

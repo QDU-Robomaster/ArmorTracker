@@ -21,8 +21,7 @@ template <CameraTypes::CameraInfo CameraInfoV>
 double ArmorTracker<CameraInfoV>::SpDetectorYawNear(
     const LibXR::Quaternion<double>& q, double reference_yaw)
 {
-  return armor_tracker::UnwrapYawNear(
-      armor_tracker::QuaternionToYaw(q) + M_PI, reference_yaw);
+  return armor_tracker::MeasuredArmorYawNear(q, reference_yaw);
 }
 
 template <CameraTypes::CameraInfo CameraInfoV>
@@ -84,7 +83,8 @@ int ArmorTracker<CameraInfoV>::SpArmorCountFor(const ArmorDetectorResult& armor)
 }
 
 template <CameraTypes::CameraInfo CameraInfoV>
-double ArmorTracker<CameraInfoV>::SpInitialRadiusFor(const ArmorDetectorResult& armor)
+double ArmorTracker<CameraInfoV>::SpInitialRadiusFor(
+    const ArmorDetectorResult& armor) const
 {
   if (SpIsBalanceArmor(armor))
   {
@@ -98,7 +98,11 @@ double ArmorTracker<CameraInfoV>::SpInitialRadiusFor(const ArmorDetectorResult& 
   {
     return 0.3205;
   }
-  return 0.2;
+  const double min_radius =
+      std::min(cfg_.geometry.min_radius, cfg_.geometry.max_radius);
+  const double max_radius =
+      std::max(cfg_.geometry.min_radius, cfg_.geometry.max_radius);
+  return std::clamp(cfg_.geometry.initial_radius, min_radius, max_radius);
 }
 
 template <CameraTypes::CameraInfo CameraInfoV>

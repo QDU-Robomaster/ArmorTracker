@@ -68,17 +68,17 @@ void ArmorTracker<CameraInfoV>::WriteStateAuditRow(
   const auto write_candidate =
       [this](const armor_tracker::FaceMatchCandidate& candidate, bool valid)
   {
-    (void)this;
     if (!valid)
     {
       state_audit_.file << -1 << '\t' << -1 << '\t' << 0 << '\t' << 0.0 << '\t'
                         << 0.0 << '\t' << 0.0;
       return;
     }
-    state_audit_.file << candidate.face_index << '\t' << candidate.image_track_id << '\t'
+    state_audit_.file << LocalFaceToCanonicalFace(candidate.face_index) << '\t'
+                      << candidate.image_track_id << '\t'
                       << (candidate.confirmed_image_track ? 1 : 0) << '\t'
-                      << candidate.score << '\t' << candidate.position_diff << '\t'
-                      << candidate.yaw_diff;
+                      << candidate.score << '\t' << candidate.position_diff
+                      << '\t' << candidate.yaw_diff;
   };
   const armor_tracker::FaceMatchCandidate* selected_candidate =
       (selection != nullptr && selection->has_selected_candidate)
@@ -95,7 +95,8 @@ void ArmorTracker<CameraInfoV>::WriteStateAuditRow(
                     << '\t' << (selected_candidate != nullptr ? 1 : 0) << '\t';
   if (selected_candidate != nullptr)
   {
-    state_audit_.file << selected_candidate->face_index << '\t'
+    state_audit_.file << LocalFaceToCanonicalFace(selected_candidate->face_index)
+                      << '\t'
                       << selected_candidate->image_track_id << '\t'
                       << (selected_candidate->confirmed_image_track ? 1 : 0) << '\t'
                       << selected_candidate->score << '\t'

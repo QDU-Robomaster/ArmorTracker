@@ -39,16 +39,6 @@ inline bool SingleArmorModeEnabled()
   return env != nullptr && env[0] != '\0' && env[0] != '0';
 }
 
-inline bool MultiArmorFuseEnabled()
-{
-  if (SingleArmorModeEnabled())
-  {
-    return false;
-  }
-  const char* env = std::getenv("XR_TRACKER_ENABLE_MULTI_FUSE");
-  return env != nullptr && env[0] != '\0' && env[0] != '0';
-}
-
 inline bool SymmetricGeometryEnabled()
 {
   const char* env = std::getenv("XR_TRACKER_FORCE_SYMMETRIC_GEOMETRY");
@@ -174,7 +164,7 @@ inline double FaceSwitchYawDeadzone()
 inline double FaceSwitchTimeoutSec()
 {
   return std::max(0.0,
-                  ParseEnvDouble("XR_TRACKER_FACE_SWITCH_TIMEOUT_SEC", 0.08));
+                  ParseEnvDouble("XR_TRACKER_FACE_SWITCH_TIMEOUT_SEC", 0.0));
 }
 
 inline bool IdAssistEnabled()

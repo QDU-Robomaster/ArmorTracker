@@ -40,6 +40,20 @@ inline double OrientationToYawNear(const ArmorDetectorResult& armor,
   return OrientationToYawNear(armor.pose.rotation, reference_yaw);
 }
 
+inline double MeasuredArmorYawNear(const LibXR::Quaternion<double>& q,
+                                   double reference_yaw)
+{
+  // Detector 的 rotation yaw 与整车 EKF 的 face yaw 方向相反。
+  // selector、SP update 和审计都必须使用同一套 yaw 约定。
+  return UnwrapYawNear(QuaternionToYaw(q) + M_PI, reference_yaw);
+}
+
+inline double MeasuredArmorYawNear(const ArmorDetectorResult& armor,
+                                   double reference_yaw)
+{
+  return MeasuredArmorYawNear(armor.pose.rotation, reference_yaw);
+}
+
 inline double AngularDiffAbs(double lhs, double rhs)
 {
   return std::abs(LibXR::CycleValue<double>(lhs) - LibXR::CycleValue<double>(rhs));
