@@ -294,7 +294,7 @@ void ArmorTracker<CameraInfoV>::Update(const ArmorDetectorResults& armors_msg,
   candidate_debug_msg_.tracked_face_track_id =
       rt_.tracked_face_track_id_valid ? static_cast<int16_t>(rt_.tracked_face_track_id)
                                       : static_cast<int16_t>(-1);
-  WriteStateAuditRow(image_timestamp_us, ekf_prediction, nullptr, matched);
+  WriteStateAuditRow(image_timestamp_us, ekf_prediction, candidate_debug_msg_, matched);
 }
 
 template <CameraTypes::CameraInfo CameraInfoV>

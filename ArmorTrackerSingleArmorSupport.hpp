@@ -118,5 +118,5 @@ void ArmorTracker<CameraInfoV>::UpdateSingleArmorMode(
 
   rt_.measurement_valid_current_frame = matched;
   AdvanceTrackerState(matched);
-  WriteStateAuditRow(image_timestamp_us, ekf_.state, nullptr, matched);
+  WriteStateAuditRow(image_timestamp_us, ekf_.state, candidate_debug_msg_, matched);
 }

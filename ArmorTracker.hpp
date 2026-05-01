@@ -347,7 +347,7 @@ class ArmorTracker : public LibXR::Application
       const armor_tracker::FaceSelectionPolicy& face_policy) const;
   void WriteStateAuditRow(
       uint64_t image_timestamp_us, const Eigen::VectorXd& ekf_prediction,
-      const armor_tracker::FaceSelectionResult* selection, bool matched);
+      const CandidateDebugMsg& candidate_debug, bool matched);
   armor_tracker::FaceSelectionPolicy BuildFaceSelectionPolicy() const;
   armor_tracker::FaceSelectionTrackedState BuildFaceSelectionTrackedState() const;
   Eigen::Vector3d GetCameraWorldPosition();

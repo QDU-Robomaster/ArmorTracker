@@ -3,7 +3,7 @@
 template <CameraTypes::CameraInfo CameraInfoV>
 void ArmorTracker<CameraInfoV>::WriteStateAuditRow(
     uint64_t image_timestamp_us, const Eigen::VectorXd& ekf_prediction,
-    const armor_tracker::FaceSelectionResult* selection, bool matched)
+    const CandidateDebugMsg& candidate_debug, bool matched)
 {
   if (state_audit_.path.empty())
   {
@@ -65,43 +65,43 @@ void ArmorTracker<CameraInfoV>::WriteStateAuditRow(
       state_audit_.file << p.x() << '\t' << p.y() << '\t' << p.z() << '\t';
     }
   };
-  const auto write_candidate =
-      [this](const armor_tracker::FaceMatchCandidate& candidate, bool valid)
+  const auto* selected_item =
+      (matched && candidate_debug.matched != 0 &&
+       candidate_debug.selected_index < candidate_debug.count &&
+       candidate_debug.selected_index < CandidateDebugMsg::kMaxItems)
+          ? &candidate_debug.items[candidate_debug.selected_index]
+          : nullptr;
+  const auto write_item =
+      [this](const CandidateDebugItem* item)
   {
     (void)this;
-    if (!valid)
+    if (item == nullptr)
     {
       state_audit_.file << -1 << '\t' << -1 << '\t' << 0 << '\t' << 0.0 << '\t'
                         << 0.0 << '\t' << 0.0;
       return;
     }
-    state_audit_.file << candidate.face_index << '\t' << candidate.image_track_id << '\t'
-                      << (candidate.confirmed_image_track ? 1 : 0) << '\t'
-                      << candidate.score << '\t' << candidate.position_diff << '\t'
-                      << candidate.yaw_diff;
+    state_audit_.file << static_cast<int>(item->face_index) << '\t'
+                      << item->image_track_id << '\t'
+                      << static_cast<int>(item->image_track_confirmed) << '\t'
+                      << item->score << '\t' << item->position_diff << '\t'
+                      << item->yaw_diff;
   };
-  const armor_tracker::FaceMatchCandidate* selected_candidate =
-      (selection != nullptr && selection->has_selected_candidate)
-          ? &selection->selected_candidate
-          : nullptr;
 
   state_audit_.file << image_timestamp_us << '\t' << (matched ? 1 : 0) << '\t'
                     << rt_.tracked_face_index << '\t'
                     << static_cast<int>(rt_.tracked_id) << '\t'
-                    << (selection != nullptr
-                            ? static_cast<int>(selection->accepted_mode)
-                            : static_cast<int>(
-                                  armor_tracker::FaceSelectionAcceptedMode::NONE))
-                    << '\t' << (selected_candidate != nullptr ? 1 : 0) << '\t';
-  if (selected_candidate != nullptr)
+                    << static_cast<int>(candidate_debug.accepted_mode) << '\t'
+                    << (selected_item != nullptr ? 1 : 0) << '\t';
+  if (selected_item != nullptr)
   {
-    state_audit_.file << selected_candidate->face_index << '\t'
-                      << selected_candidate->image_track_id << '\t'
-                      << (selected_candidate->confirmed_image_track ? 1 : 0) << '\t'
-                      << selected_candidate->score << '\t'
-                      << selected_candidate->position_diff << '\t'
-                      << selected_candidate->yaw_diff << '\t'
-                      << selected_candidate->measured_yaw << '\t';
+    state_audit_.file << static_cast<int>(selected_item->face_index) << '\t'
+                      << selected_item->image_track_id << '\t'
+                      << static_cast<int>(selected_item->image_track_confirmed)
+                      << '\t' << selected_item->score << '\t'
+                      << selected_item->position_diff << '\t'
+                      << selected_item->yaw_diff << '\t'
+                      << selected_item->measured_yaw << '\t';
   }
   else
   {
@@ -109,28 +109,15 @@ void ArmorTracker<CameraInfoV>::WriteStateAuditRow(
                       << 0.0 << '\t' << 0.0 << '\t' << 0.0 << '\t';
   }
 
-  if (selection != nullptr)
-  {
-    write_candidate(selection->best_same_face_candidate,
-                    selection->best_same_face_candidate.face_index >= 0);
-    state_audit_.file << '\t';
-    write_candidate(selection->best_switch_candidate,
-                    selection->best_switch_candidate.face_index >= 0);
-    state_audit_.file << '\t'
-                      << (selection->matched_same_face ? 1 : 0) << '\t'
-                      << (selection->matched_switch_face ? 1 : 0) << '\t'
-                      << (selection->allow_face_switch ? 1 : 0) << '\t'
-                      << (selection->switch_blocked_by_timeout ? 1 : 0) << '\t'
-                      << (selection->switch_blocked_by_id_mismatch ? 1 : 0)
-                      << '\t';
-  }
-  else
-  {
-    write_candidate(armor_tracker::FaceMatchCandidate{}, false);
-    state_audit_.file << '\t';
-    write_candidate(armor_tracker::FaceMatchCandidate{}, false);
-    state_audit_.file << "\t0\t0\t0\t0\t0\t";
-  }
+  write_item(candidate_debug.same_face_matched != 0 ? selected_item : nullptr);
+  state_audit_.file << '\t';
+  write_item(candidate_debug.switch_face_matched != 0 ? selected_item : nullptr);
+  state_audit_.file << '\t' << static_cast<int>(candidate_debug.same_face_matched)
+                    << '\t' << static_cast<int>(candidate_debug.switch_face_matched)
+                    << '\t' << static_cast<int>(candidate_debug.switch_allowed)
+                    << '\t'
+                    << static_cast<int>(candidate_debug.switch_blocked_by_timeout)
+                    << "\t0\t";
 
   state_audit_.file << static_cast<int>(rt_.state) << '\t' << rt_.lost_count
                     << '\t' << static_cast<int>(rt_.recovery_count) << '\t';
