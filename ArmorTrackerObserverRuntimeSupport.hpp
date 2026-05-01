@@ -9,6 +9,8 @@ armor_tracker::ObserverPolicy ArmorTracker<CameraInfoV>::BuildObserverPolicy() c
   policy.max_match_distance = cfg_.match.max_match_distance;
   policy.max_match_yaw_diff = cfg_.match.max_match_yaw_diff;
   policy.initial_radius = cfg_.geometry.initial_radius;
+  policy.min_radius = cfg_.geometry.min_radius;
+  policy.max_radius = cfg_.geometry.max_radius;
   return policy;
 }
 

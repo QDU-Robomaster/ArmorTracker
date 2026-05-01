@@ -174,8 +174,11 @@ void ArmorTracker<CameraInfoV>::Update(const ArmorDetectorResults& armors_msg,
     {
       rt_.switch_count++;
     }
-    SyncGeometryRuntimeFromState();
-    ekf_.ekf.SetState(ekf_.state);
+    if (SpMultiArmorFuseEnabled())
+    {
+      FuseMultiArmorObservation(armors_msg);
+    }
+    ClampGeometryState();
     XR_LOG_DEBUG(
         "SP pair tracker update: tracked_face=%d left_face=%d right_face=%d score=%.3f err=(left_xyz=%.3f right_xyz=%.3f left_angle=%.3f right_angle=%.3f) dz=%.4f",
         pair_match.tracked_face, pair_match.left_face, pair_match.right_face,
@@ -218,10 +221,6 @@ void ArmorTracker<CameraInfoV>::Update(const ArmorDetectorResults& armors_msg,
       (candidate_debug.has_same_number_candidate || has_same_target_candidate) ? 1 : 0;
   if (!has_pair_match && has_same_target_candidate)
   {
-    matched = true;
-    candidate_debug.matched = 1;
-    candidate_debug.accepted_mode = 1;
-    candidate_debug.selected_index = 0;
     candidate_debug.count = 1;
     auto& item = candidate_debug.items[0];
     item.armor_index = static_cast<uint8_t>(std::min<std::size_t>(best_armor_index, 255));
@@ -241,31 +240,55 @@ void ArmorTracker<CameraInfoV>::Update(const ArmorDetectorResults& armors_msg,
         static_cast<float>(GetArmorYawFromState(ekf_prediction, best_match.id));
     item.measured_yaw = static_cast<float>(best_match.measured_yaw);
     candidate_debug.best_same_face_score = static_cast<float>(best_match.score);
-    candidate_debug.same_face_matched = 1;
 
-    const int previous_face = rt_.tracked_face_index;
-    SpUpdate(best_armor, best_match, pair_delta_z_mode);
-    rt_.tracked_armor = best_armor;
-    rt_.tracked_id = best_armor.number;
-    rt_.tracked_armors_num =
-        static_cast<ArmorsNum>(SpArmorCountFor(best_armor));
-    rt_.tracked_face_index = best_match.id;
-    rt_.last_yaw = best_match.measured_yaw;
+    const bool accepted =
+        best_match.xyz_error < cfg_.match.max_match_distance &&
+        best_match.angle_error < cfg_.match.max_match_yaw_diff;
     rt_.info_position_diff = best_match.xyz_error;
     rt_.info_yaw_diff = best_match.angle_error;
-    rt_.update_count++;
-    if (best_match.id != previous_face)
+    if (!accepted)
     {
-      rt_.switch_count++;
+      XR_LOG_DEBUG(
+          "SP tracker reject match: armor=%zu num=%d type=%d face=%d score=%.3f err=(yaw=%.3f pitch=%.3f dist=%.3f angle=%.3f xyz=%.3f) gate=(xyz<%.3f yaw<%.3f)",
+          best_armor_index, static_cast<int>(best_armor.number),
+          static_cast<int>(best_armor.type), best_match.id, best_match.score,
+          best_match.yaw_error, best_match.pitch_error, best_match.distance_error,
+          best_match.angle_error, best_match.xyz_error,
+          cfg_.match.max_match_distance, cfg_.match.max_match_yaw_diff);
     }
-    SyncGeometryRuntimeFromState();
-    ekf_.ekf.SetState(ekf_.state);
-    XR_LOG_DEBUG(
-        "SP tracker update: armor=%zu num=%d type=%d face=%d score=%.3f err=(yaw=%.3f pitch=%.3f dist=%.3f angle=%.3f xyz=%.3f)",
-        best_armor_index, static_cast<int>(best_armor.number),
-        static_cast<int>(best_armor.type), best_match.id, best_match.score,
-        best_match.yaw_error, best_match.pitch_error, best_match.distance_error,
-        best_match.angle_error, best_match.xyz_error);
+    else
+    {
+      matched = true;
+      candidate_debug.matched = 1;
+      candidate_debug.accepted_mode = 1;
+      candidate_debug.selected_index = 0;
+      candidate_debug.same_face_matched = 1;
+
+      const int previous_face = rt_.tracked_face_index;
+      SpUpdate(best_armor, best_match, pair_delta_z_mode);
+      rt_.tracked_armor = best_armor;
+      rt_.tracked_id = best_armor.number;
+      rt_.tracked_armors_num =
+          static_cast<ArmorsNum>(SpArmorCountFor(best_armor));
+      rt_.tracked_face_index = best_match.id;
+      rt_.last_yaw = best_match.measured_yaw;
+      rt_.update_count++;
+      if (best_match.id != previous_face)
+      {
+        rt_.switch_count++;
+      }
+      if (SpMultiArmorFuseEnabled())
+      {
+        FuseMultiArmorObservation(armors_msg);
+      }
+      ClampGeometryState();
+      XR_LOG_DEBUG(
+          "SP tracker update: armor=%zu num=%d type=%d face=%d score=%.3f err=(yaw=%.3f pitch=%.3f dist=%.3f angle=%.3f xyz=%.3f)",
+          best_armor_index, static_cast<int>(best_armor.number),
+          static_cast<int>(best_armor.type), best_match.id, best_match.score,
+          best_match.yaw_error, best_match.pitch_error, best_match.distance_error,
+          best_match.angle_error, best_match.xyz_error);
+    }
   }
 
   if (matched && SpStateDiverged())

@@ -22,6 +22,8 @@ struct ObserverPolicy
   double max_match_distance = 0.15;
   double max_match_yaw_diff = 1.0;
   double initial_radius = 0.26;
+  double min_radius = 0.12;
+  double max_radius = 0.40;
 };
 
 struct ObserverRuntime
@@ -222,7 +224,8 @@ bool FuseMultiArmorObservation(ObserverRuntime& runtime, Eigen::VectorXd& state,
   std::array<FaceObservation, 4> faces{};
   bool have_even_face = false;
   bool have_odd_face = false;
-  const double max_position_diff = policy.max_match_distance * 2.5;
+  const double max_position_diff =
+      std::max(0.60, policy.max_match_distance * 5.0);
   const double max_yaw_diff = std::max(policy.max_match_yaw_diff, 1.2);
   std::vector<FuseCandidate> candidates;
 
@@ -441,8 +444,8 @@ bool FuseMultiArmorObservation(ObserverRuntime& runtime, Eigen::VectorXd& state,
   const int fit_rows = row;
   if (valid_face_count == 2)
   {
-    constexpr double kCenterPriorWeight = 0.35;
-    constexpr double kRadiusPriorWeight = 0.50;
+    constexpr double kCenterPriorWeight = 0.25;
+    constexpr double kRadiusPriorWeight = 0.35;
     const int prior_rows = 2 + (have_even_face ? 1 : 0) + (have_odd_face ? 1 : 0);
     A.conservativeResize(row + prior_rows, cols);
     b.conservativeResize(row + prior_rows);
@@ -493,15 +496,19 @@ bool FuseMultiArmorObservation(ObserverRuntime& runtime, Eigen::VectorXd& state,
   const double fused_r_even = have_even_face ? sol(even_col) : state(8);
   const double fused_r_odd =
       have_odd_face ? sol(odd_col) : GetArmorSecondRadiusFromState(state, policy);
+  const double min_radius =
+      std::max(0.05, std::min(policy.min_radius, policy.max_radius));
+  const double max_radius =
+      std::min(0.45, std::max(policy.min_radius, policy.max_radius));
   if (!std::isfinite(fused_x) || !std::isfinite(fused_y) ||
       !std::isfinite(fused_r_even) || !std::isfinite(fused_r_odd) ||
-      fused_r_even < 0.05 || fused_r_even > 0.45 || fused_r_odd < 0.05 ||
-      fused_r_odd > 0.45)
+      fused_r_even < min_radius || fused_r_even > max_radius ||
+      fused_r_odd < min_radius || fused_r_odd > max_radius)
   {
     return false;
   }
 
-  const double alpha = valid_face_count >= 3 ? 0.35 : 0.12;
+  const double alpha = valid_face_count >= 3 ? 0.18 : 0.06;
   state(0) = (1.0 - alpha) * state(0) + alpha * fused_x;
   state(2) = (1.0 - alpha) * state(2) + alpha * fused_y;
 

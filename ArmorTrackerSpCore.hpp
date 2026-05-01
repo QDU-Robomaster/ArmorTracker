@@ -84,7 +84,8 @@ int ArmorTracker<CameraInfoV>::SpArmorCountFor(const ArmorDetectorResult& armor)
 }
 
 template <CameraTypes::CameraInfo CameraInfoV>
-double ArmorTracker<CameraInfoV>::SpInitialRadiusFor(const ArmorDetectorResult& armor)
+double ArmorTracker<CameraInfoV>::SpInitialRadiusFor(
+    const ArmorDetectorResult& armor) const
 {
   if (SpIsBalanceArmor(armor))
   {
@@ -98,12 +99,16 @@ double ArmorTracker<CameraInfoV>::SpInitialRadiusFor(const ArmorDetectorResult& 
   {
     return 0.3205;
   }
-  return 0.2;
+  const double min_radius =
+      std::min(cfg_.geometry.min_radius, cfg_.geometry.max_radius);
+  const double max_radius =
+      std::max(cfg_.geometry.min_radius, cfg_.geometry.max_radius);
+  return std::clamp(cfg_.geometry.initial_radius, min_radius, max_radius);
 }
 
 template <CameraTypes::CameraInfo CameraInfoV>
 Eigen::VectorXd ArmorTracker<CameraInfoV>::SpInitialP0DiagFor(
-    const ArmorDetectorResult& armor)
+    const ArmorDetectorResult& armor) const
 {
   Eigen::VectorXd p0_diag(11);
   if (SpIsBalanceArmor(armor))
@@ -124,6 +129,17 @@ Eigen::VectorXd ArmorTracker<CameraInfoV>::SpInitialP0DiagFor(
   }
   if (SpArmorCountFor(armor) == 4)
   {
+    const double min_radius =
+        std::min(cfg_.geometry.min_radius, cfg_.geometry.max_radius);
+    const double max_radius =
+        std::max(cfg_.geometry.min_radius, cfg_.geometry.max_radius);
+    const double geometry_span = std::max(0.01, max_radius - min_radius);
+    const double radius_prior_sigma = std::max(0.04, geometry_span * 0.25);
+    const double delta_r_prior_sigma = std::max(0.03, geometry_span * 0.15);
+    p0_diag[ExtendedKalmanFilter::ROBOT_R] =
+        radius_prior_sigma * radius_prior_sigma;
+    p0_diag[ExtendedKalmanFilter::DELTA_R] =
+        delta_r_prior_sigma * delta_r_prior_sigma;
     p0_diag[ExtendedKalmanFilter::DELTA_Z] = SpDeltaZInitialVariance();
   }
   return p0_diag;
@@ -991,6 +1007,19 @@ void ArmorTracker<CameraInfoV>::SpPredict()
   q(6, 7) = b * angular_variance;
   q(7, 6) = b * angular_variance;
   q(7, 7) = c * angular_variance;
+  const double min_radius =
+      std::min(cfg_.geometry.min_radius, cfg_.geometry.max_radius);
+  const double max_radius =
+      std::max(cfg_.geometry.min_radius, cfg_.geometry.max_radius);
+  const double geometry_span = std::max(0.01, max_radius - min_radius);
+  const double radius_variance =
+      std::max(a * cfg_.ekf.sigma2_q_r, std::pow(geometry_span * 0.02, 2));
+  const double delta_r_variance =
+      std::max(a * cfg_.ekf.sigma2_q_r, std::pow(geometry_span * 0.015, 2));
+  q(ExtendedKalmanFilter::ROBOT_R, ExtendedKalmanFilter::ROBOT_R) =
+      radius_variance;
+  q(ExtendedKalmanFilter::DELTA_R, ExtendedKalmanFilter::DELTA_R) =
+      delta_r_variance;
   q(ExtendedKalmanFilter::DELTA_Z, ExtendedKalmanFilter::DELTA_Z) =
       SpDeltaZProcessVariance();
 
@@ -1026,9 +1055,45 @@ void ArmorTracker<CameraInfoV>::SpUpdate(const ArmorDetectorResult& armor,
   const double dz_variance_before_update =
       ekf_.covariance(ExtendedKalmanFilter::DELTA_Z,
                       ExtendedKalmanFilter::DELTA_Z);
+  const bool freeze_radius = rt_.tracked_armors_num == ArmorsNum::NORMAL_4;
+  const double radius_before_update =
+      ekf_.state(ExtendedKalmanFilter::ROBOT_R);
+  const double delta_r_before_update =
+      ekf_.state(ExtendedKalmanFilter::DELTA_R);
+  const double radius_variance_before_update =
+      ekf_.covariance(ExtendedKalmanFilter::ROBOT_R,
+                      ExtendedKalmanFilter::ROBOT_R);
+  const double delta_r_variance_before_update =
+      ekf_.covariance(ExtendedKalmanFilter::DELTA_R,
+                      ExtendedKalmanFilter::DELTA_R);
+  auto restore_radius_state = [this, radius_before_update,
+                               delta_r_before_update,
+                               radius_variance_before_update,
+                               delta_r_variance_before_update]()
+  {
+    ekf_.state(ExtendedKalmanFilter::ROBOT_R) = radius_before_update;
+    ekf_.state(ExtendedKalmanFilter::DELTA_R) = delta_r_before_update;
+    for (const int index : {ExtendedKalmanFilter::ROBOT_R,
+                            ExtendedKalmanFilter::DELTA_R})
+    {
+      ekf_.covariance.row(index).setZero();
+      ekf_.covariance.col(index).setZero();
+    }
+    ekf_.covariance(ExtendedKalmanFilter::ROBOT_R,
+                    ExtendedKalmanFilter::ROBOT_R) =
+        radius_variance_before_update;
+    ekf_.covariance(ExtendedKalmanFilter::DELTA_R,
+                    ExtendedKalmanFilter::DELTA_R) =
+        delta_r_variance_before_update;
+  };
   if (freeze_delta_z && rt_.tracked_armors_num == ArmorsNum::NORMAL_4)
   {
     h.col(ExtendedKalmanFilter::DELTA_Z).setZero();
+  }
+  if (freeze_radius)
+  {
+    h.col(ExtendedKalmanFilter::ROBOT_R).setZero();
+    h.col(ExtendedKalmanFilter::DELTA_R).setZero();
   }
 
   if (SpXyzMeasurementUpdateEnabled())
@@ -1114,6 +1179,10 @@ void ArmorTracker<CameraInfoV>::SpUpdate(const ArmorDetectorResult& armor,
     ekf_.covariance = (identity - kalman_gain * h_xyz) * ekf_.covariance *
                           (identity - kalman_gain * h_xyz).transpose() +
                       kalman_gain * r * kalman_gain.transpose();
+    if (freeze_radius && !SpXyzMeasurementFullGeometryEnabled())
+    {
+      restore_radius_state();
+    }
     if (freeze_delta_z && rt_.tracked_armors_num == ArmorsNum::NORMAL_4)
     {
       const int dz_index = ExtendedKalmanFilter::DELTA_Z;
@@ -1192,6 +1261,10 @@ void ArmorTracker<CameraInfoV>::SpUpdate(const ArmorDetectorResult& armor,
   ekf_.covariance = (identity - kalman_gain * h) * ekf_.covariance *
                         (identity - kalman_gain * h).transpose() +
                     kalman_gain * r * kalman_gain.transpose();
+  if (freeze_radius)
+  {
+    restore_radius_state();
+  }
   if (freeze_delta_z && rt_.tracked_armors_num == ArmorsNum::NORMAL_4)
   {
     const int dz_index = ExtendedKalmanFilter::DELTA_Z;
