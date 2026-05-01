@@ -9,7 +9,7 @@
 - `ArmorTracker.hpp`：模块入口、配置、topic、EKF 接线和主状态。
 - `ArmorTrackerPipeline.hpp`：每帧检测结果进入后的主处理流程。
 - `ArmorTrackerCommon.hpp`：yaw 展开、时间戳差值、图像面积等通用小函数。
-- `ArmorTrackerRuntimeSupport.hpp`：运行时开关、相机位姿转换和投影辅助逻辑。
+- `ArmorTrackerRuntimeSupport.hpp`：运行时开关、相机位姿转换和少量几何投影辅助逻辑。
 - `ArmorTrackerFaceSelector.hpp`：装甲面候选评分与选面策略。
 - `ArmorTrackerSelectionSupport.hpp`：选面后的 face 与 image-track 绑定维护。
 - `ArmorTrackerObserver.hpp`、`ArmorTrackerObserverRuntimeSupport.hpp`：整车几何观测模型和运行时状态映射。
@@ -59,3 +59,11 @@ tracker 以同步图像的传感器时间戳计算 `dt`。如果进程启动、�
 - `quality_recenter`：按匹配质量动态调节重定位权重。Webots 可打开，用 `score / yaw / xyz` 门控削弱低质量测量。
 
 这些配置仍可被同名环境变量覆盖，用于现场继续做数据驱动调参；默认不启用 canonical 初始化、固定输出外推、强制测量锚定、多装甲全车融合或 direct XYZ 更新。
+
+旧 Webots SP 分支里的单面约束投影以环境变量方式保留，默认关闭：
+
+- `XR_TRACKER_SP_FACE_CONSTRAINED_PROJECTION=1`：用当前相机位姿、相机内参和装甲板四点，在“装甲面 yaw 已由 SP 车体状态约束”的前提下重解装甲板平移。
+- `XR_TRACKER_SP_FACE_CONSTRAINED_MAX_REPROJ_PX`：约束投影允许的最大重投影 RMSE，默认 `3.0 px`。
+- `XR_TRACKER_SP_FACE_CONSTRAINED_SCORE_WEIGHT`：约束投影重投影误差加入装甲面匹配分数的权重，默认 `0.08`。
+
+这个路径只改变 tracker 内部 SP 匹配和 EKF 更新使用的测量位置，不改 `ArmorDetectorResult` 结构，也不向 detector 回填 yaw/id。

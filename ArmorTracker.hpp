@@ -404,7 +404,13 @@ class ArmorTracker : public LibXR::Application
     double angle_error = 0.0;
     double xyz_error = 0.0;
     double measured_yaw = 0.0;
+    bool constrained_projection_valid = false;
+    Eigen::Vector3d constrained_projection_xyz = Eigen::Vector3d::Zero();
+    double constrained_projection_rmse_px = 0.0;
   };
+
+  Eigen::Vector3d SpMatchMeasurementPosition(const ArmorDetectorResult& armor,
+                                             const SpArmorMatch& match) const;
 
   struct SpPairObservation
   {
