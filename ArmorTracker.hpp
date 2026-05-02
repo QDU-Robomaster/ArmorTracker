@@ -371,7 +371,7 @@ class ArmorTracker : public LibXR::Application
 
   // ====================== IO 与回调（原 Node 逻辑） ======================
   void VelocityCallback(double velocity_msg);
-  void ArmorsCallback(const DetectionMessage& message);
+  void ArmorsCallback(DetectionMessage message);
 
   // ====================== 辅助函数 ======================
   void InitEKF(const ArmorDetectorResult& a);
@@ -859,7 +859,7 @@ ArmorTracker<CameraInfoV>::ArmorTracker(LibXR::HardwareContainer& hw,
           self->SetConfig(self->cfg_);
           self->params_is_changed_ = false;
         }
-        self->ArmorsCallback(*armors_msg);
+        self->ArmorsCallback(armors_msg != nullptr ? *armors_msg : nullptr);
       },
       this);
   armors_topic.RegisterCallback(armors_cb);
