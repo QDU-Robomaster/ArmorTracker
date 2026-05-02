@@ -93,8 +93,8 @@ inline void LogAcceptedSelection(const FaceSelectionResult& selection,
   const bool did_face_switch = selected_candidate.face_index != 0;
 
   XR_LOG_DEBUG(
-      "Tracker pick: armor=%zu num=%d face=%d same=%d score=%.3f pos_diff=%.3f yaw_diff=%.3f view_bonus=%.3f area=%.3f frontality=%.3f cooldown=%.3f",
-      selected_candidate.armor_index,
+      "Tracker pick: armor=%u num=%d face=%d same=%d score=%.3f pos_diff=%.3f yaw_diff=%.3f view_bonus=%.3f area=%.3f frontality=%.3f cooldown=%.3f",
+      static_cast<unsigned>(selected_candidate.armor_index),
       static_cast<int>(selected_candidate.armor.number),
       selected_candidate.face_index, selected_candidate.same_number ? 1 : 0,
       selected_candidate.score, selected_candidate.position_diff,

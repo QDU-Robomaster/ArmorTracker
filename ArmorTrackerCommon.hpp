@@ -70,9 +70,9 @@ inline void LogImpossibleYawDiff(const char* tag, std::size_t armor_index,
   const double wrapped_measured = LibXR::CycleValue<double>(measured_yaw);
   const double wrapped_predicted = LibXR::CycleValue<double>(predicted_yaw);
   XR_LOG_ERROR(
-      "Impossible yaw diff[%s]: armor=%zu face=%d measured=%.6f predicted=%.6f wrapped_measured=%.6f wrapped_predicted=%.6f yaw_diff=%.6f direct_cycle_sub=%.6f raw_sub=%.6f",
-      tag, armor_index, face_index, measured_yaw, predicted_yaw, wrapped_measured,
-      wrapped_predicted, yaw_diff,
+      "Impossible yaw diff[%s]: armor=%u face=%d measured=%.6f predicted=%.6f wrapped_measured=%.6f wrapped_predicted=%.6f yaw_diff=%.6f direct_cycle_sub=%.6f raw_sub=%.6f",
+      tag, static_cast<unsigned>(armor_index), face_index, measured_yaw,
+      predicted_yaw, wrapped_measured, wrapped_predicted, yaw_diff,
       std::abs(LibXR::CycleValue<double>(measured_yaw) -
                LibXR::CycleValue<double>(predicted_yaw)),
       std::abs(measured_yaw - predicted_yaw));

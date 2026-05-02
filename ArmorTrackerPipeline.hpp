@@ -480,10 +480,11 @@ bool ArmorTracker<CameraInfoV>::TryRecoverTempLost(
   candidate_debug.accepted_mode =
       static_cast<uint8_t>(armor_tracker::FaceSelectionAcceptedMode::RELAXED_SAME_FACE);
   XR_LOG_DEBUG(
-      "Tracker TEMP_LOST recover: tracked_face_before=%d tracked_face_after=%d phase_cost=%.3f armor=%zu num=%d img=%d confirmed=%d score=%.3f center=%.1f area=%.3f frontality=%.3f yaw=%.3f phase_pos=[%.3f,%.3f,%.3f,%.3f] phase_yaw=[%.3f,%.3f,%.3f,%.3f]",
+      "Tracker TEMP_LOST recover: tracked_face_before=%d tracked_face_after=%d phase_cost=%.3f armor=%u num=%d img=%d confirmed=%d score=%.3f center=%.1f area=%.3f frontality=%.3f yaw=%.3f phase_pos=[%.3f,%.3f,%.3f,%.3f] phase_yaw=[%.3f,%.3f,%.3f,%.3f]",
       tracked_face_before_recover,
       recovered_face_phase, recovered_face_cost,
-      best.armor_index, static_cast<int>(best.armor.number), best.image_track_id,
+      static_cast<unsigned>(best.armor_index),
+      static_cast<int>(best.armor.number), best.image_track_id,
       best.confirmed_image_track ? 1 : 0, best.score, best.image_center,
       best.area_score, best.frontality, best.measured_yaw,
       best.phase_position_diff[0], best.phase_position_diff[1],
@@ -518,9 +519,11 @@ void ArmorTracker<CameraInfoV>::ArmorsCallback(const DetectionMessage& message)
   if (source_frame.image_frame->timestamp_us != image_timestamp_us)
   {
     XR_LOG_ERROR(
-        "ArmorTracker detector packet timestamp mismatch image=%llu packet=%llu",
-        static_cast<unsigned long long>(source_frame.image_frame->timestamp_us),
-        static_cast<unsigned long long>(image_timestamp_us));
+        "ArmorTracker detector packet timestamp mismatch image_hi=%u image_lo=%u packet_hi=%u packet_lo=%u",
+        static_cast<unsigned>(source_frame.image_frame->timestamp_us >> 32),
+        static_cast<unsigned>(source_frame.image_frame->timestamp_us),
+        static_cast<unsigned>(image_timestamp_us >> 32),
+        static_cast<unsigned>(image_timestamp_us));
     return;
   }
 

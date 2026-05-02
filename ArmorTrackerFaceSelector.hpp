@@ -367,8 +367,8 @@ FaceSelectionResult SelectFaceMatch(
           !allow_number_mismatch_same_face)
       {
         XR_LOG_DEBUG(
-            "Tracker reject mismatched number: armor=%zu num=%d tracked=%d face=%d has_same=%d persistent=%d confirmed=%d img_diff=%.1f area_log=%.3f",
-            armor_index, static_cast<int>(armor.number),
+            "Tracker reject mismatched number: armor=%u num=%d tracked=%d face=%d has_same=%d persistent=%d confirmed=%d img_diff=%.1f area_log=%.3f",
+            static_cast<unsigned>(armor_index), static_cast<int>(armor.number),
             static_cast<int>(tracked.tracked_id), face_index,
             result.has_same_number_candidate ? 1 : 0,
             same_persistent_track ? 1 : 0, confirmed_image_track ? 1 : 0,
@@ -380,9 +380,9 @@ FaceSelectionResult SelectFaceMatch(
            area_ratio_log > policy.single_armor_area_log_gate))
       {
         XR_LOG_DEBUG(
-            "Tracker single-armor reject: armor=%zu num=%d img_diff=%.1f area_log=%.3f",
-            armor_index, static_cast<int>(armor.number), image_center_diff,
-            area_ratio_log);
+            "Tracker single-armor reject: armor=%u num=%d img_diff=%.1f area_log=%.3f",
+            static_cast<unsigned>(armor_index), static_cast<int>(armor.number),
+            image_center_diff, area_ratio_log);
         continue;
       }
       double dz_mismatch_penalty = 0.0;
@@ -448,8 +448,8 @@ FaceSelectionResult SelectFaceMatch(
       }
 
       XR_LOG_DEBUG(
-          "Tracker cand: armor=%zu num=%d face=%d same=%d score=%.3f pos_diff=%.3f yaw_diff=%.3f img_diff=%.1f area_log=%.3f view_bonus=%.3f area=%.3f frontality=%.3f",
-          armor_index, static_cast<int>(armor.number), face_index,
+          "Tracker cand: armor=%u num=%d face=%d same=%d score=%.3f pos_diff=%.3f yaw_diff=%.3f img_diff=%.1f area_log=%.3f view_bonus=%.3f area=%.3f frontality=%.3f",
+          static_cast<unsigned>(armor_index), static_cast<int>(armor.number), face_index,
           same_number ? 1 : 0, score, position_diff, current_yaw_diff,
           image_center_diff, area_ratio_log, view_bonus, area_score, frontality);
 

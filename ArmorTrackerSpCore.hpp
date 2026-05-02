@@ -590,9 +590,9 @@ bool ArmorTracker<CameraInfoV>::SpTryCanonicalizeInitialState(
   SyncGeometryRuntimeFromState();
   ekf_.ekf.SetState(ekf_.state);
   XR_LOG_DEBUG(
-      "SP canonical init: force=%d obs=%zu score=%.3f face=%d dz=%.4f yaw=%.3f",
-      force ? 1 : 0, observations.size(), best.score, best.tracked_face,
-      best.dz, best.yaw);
+      "SP canonical init: force=%d obs=%u score=%.3f face=%d dz=%.4f yaw=%.3f",
+      force ? 1 : 0, static_cast<unsigned>(observations.size()), best.score,
+      best.tracked_face, best.dz, best.yaw);
   return true;
 }
 
