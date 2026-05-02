@@ -314,9 +314,56 @@ inline bool SpPairDeltaZEnabled()
   return EnvFlagEnabled("XR_TRACKER_SP_ENABLE_PAIR_DZ");
 }
 
-inline double SpPairDeltaZAlpha()
+inline double SpPairGeometryMinDeterminant()
 {
-  return std::clamp(ParseEnvDouble("XR_TRACKER_SP_PAIR_DZ_ALPHA", 0.40), 0.0, 1.0);
+  return std::clamp(
+      ParseEnvDouble("XR_TRACKER_SP_PAIR_GEOMETRY_MIN_DET", 0.35), 0.0, 1.0);
+}
+
+inline double SpPairGeometryMaxFitError()
+{
+  return std::max(
+      0.0, ParseEnvDouble("XR_TRACKER_SP_PAIR_GEOMETRY_MAX_FIT_ERROR", 0.035));
+}
+
+inline double SpPairGeometryMaxCenterShift()
+{
+  return std::max(
+      0.0, ParseEnvDouble("XR_TRACKER_SP_PAIR_GEOMETRY_MAX_CENTER_SHIFT", 0.60));
+}
+
+inline double SpPairGeometryMaxRadiusShift()
+{
+  return std::max(
+      0.0, ParseEnvDouble("XR_TRACKER_SP_PAIR_GEOMETRY_MAX_RADIUS_SHIFT", 0.30));
+}
+
+inline double SpPairGeometryCenterVariance()
+{
+  const double sigma =
+      std::max(1e-4, ParseEnvDouble("XR_TRACKER_SP_PAIR_GEOMETRY_CENTER_SIGMA", 0.025));
+  return sigma * sigma;
+}
+
+inline double SpPairGeometryYawVariance()
+{
+  const double sigma =
+      std::max(1e-4, ParseEnvDouble("XR_TRACKER_SP_PAIR_GEOMETRY_YAW_SIGMA", 0.025));
+  return sigma * sigma;
+}
+
+inline double SpPairGeometryRadiusVariance()
+{
+  const double sigma =
+      std::max(1e-4, ParseEnvDouble("XR_TRACKER_SP_PAIR_GEOMETRY_RADIUS_SIGMA", 0.018));
+  return sigma * sigma;
+}
+
+inline double SpPairGeometryCovarianceFloor()
+{
+  const double sigma =
+      std::max(1e-4, ParseEnvDouble("XR_TRACKER_SP_PAIR_GEOMETRY_STATE_SIGMA", 0.050));
+  return sigma * sigma;
 }
 
 inline double SpPairDeltaZMinHeight()
@@ -332,12 +379,6 @@ inline double SpPairDeltaZMaxAbs()
 inline double SpPairDeltaZVariance()
 {
   return std::max(1e-8, ParseEnvDouble("XR_TRACKER_SP_PAIR_DZ_VARIANCE", 4e-4));
-}
-
-inline double SpPairRecenterAlpha()
-{
-  return std::clamp(ParseEnvDouble("XR_TRACKER_SP_PAIR_RECENTER_ALPHA", 0.5),
-                    0.0, 1.0);
 }
 
 inline bool SpPairDualUpdateEnabled()
