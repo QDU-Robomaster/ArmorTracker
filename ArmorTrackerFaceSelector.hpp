@@ -24,6 +24,27 @@ inline double FaceSwitchPenalty(int face_index)
   return face_index == 2 ? 0.45 : 0.20;
 }
 
+inline double RadiusInvariantPositionDiff(const Eigen::Vector3d& predicted,
+                                          const Eigen::Vector3d& measured,
+                                          double predicted_yaw,
+                                          bool allow_radius_error)
+{
+  const Eigen::Vector3d residual = predicted - measured;
+  if (!allow_radius_error)
+  {
+    return residual.norm();
+  }
+
+  const Eigen::Vector2d radial_dir(std::cos(predicted_yaw),
+                                   std::sin(predicted_yaw));
+  const Eigen::Vector2d xy_residual(residual.x(), residual.y());
+  const double radial_error = xy_residual.dot(radial_dir);
+  const Eigen::Vector2d tangent_error = xy_residual - radial_error * radial_dir;
+  constexpr double kRadialErrorWeight = 0.35;
+  return std::sqrt(tangent_error.squaredNorm() + residual.z() * residual.z() +
+                   std::pow(kRadialErrorWeight * radial_error, 2));
+}
+
 struct FaceSelectionPolicy
 {
   // 这些是“本帧允许怎么选”的策略开关和阈值。
@@ -349,7 +370,10 @@ FaceSelectionResult SelectFaceMatch(
       const double predicted_yaw = get_predicted_yaw(face_index);
       const double measured_yaw =
           MeasuredArmorYawNear(armor, predicted_yaw);
-      const double position_diff = (predicted_position - position_vec).norm();
+      const bool allow_radius_error =
+          !policy.single_armor_mode && tracked.tracked_armors_num == 4;
+      const double position_diff = RadiusInvariantPositionDiff(
+          predicted_position, position_vec, predicted_yaw, allow_radius_error);
       const double current_yaw_diff =
           AngularDiffAbs(measured_yaw, predicted_yaw);
       LogImpossibleYawDiff("match", armor_index, face_index, measured_yaw,
@@ -490,10 +514,13 @@ FaceSelectionResult SelectFaceMatch(
     }
   }
 
-  const double relaxed_same_face_distance = policy.max_match_distance * 1.25;
+  const double relaxed_same_face_distance =
+      std::max(policy.max_match_distance * 1.25, 0.45);
   const double relaxed_face_switch_distance = policy.max_match_distance * 1.25;
   const double relaxed_face_switch_yaw_diff =
       std::max(policy.max_match_yaw_diff * 1.2, policy.max_match_yaw_diff + 0.1);
+  const double relaxed_same_face_yaw_diff =
+      std::max(policy.max_match_yaw_diff, std::min(relaxed_face_switch_yaw_diff, 0.80));
   const double face_switch_position_tie_margin = 0.01;
 
   // 第二阶段：在“同面保持”和“切面”之间做最终决策。
@@ -527,13 +554,14 @@ FaceSelectionResult SelectFaceMatch(
   result.relaxed_same_face_match =
       result.best_same_face_candidate.face_index == 0 &&
       result.best_same_face_candidate.position_diff < relaxed_same_face_distance &&
-      result.best_same_face_candidate.yaw_diff < policy.max_match_yaw_diff &&
+      result.best_same_face_candidate.yaw_diff < relaxed_same_face_yaw_diff &&
       relaxed_same_face_image_consistent;
 
   const double id_assisted_same_face_distance =
-      std::min(relaxed_same_face_distance, policy.max_match_distance * 1.10);
+      std::max(relaxed_same_face_distance,
+               std::min(policy.max_match_distance * 3.0, 0.45));
   const double id_assisted_same_face_yaw_diff =
-      std::min(relaxed_face_switch_yaw_diff, policy.max_match_yaw_diff * 0.75);
+      std::max(policy.max_match_yaw_diff, std::min(relaxed_face_switch_yaw_diff, 0.80));
   result.id_assisted_same_face_match =
       policy.id_assist_enabled && result.best_same_face_candidate.face_index == 0 &&
       result.best_same_face_candidate.same_persistent_track &&

@@ -472,6 +472,7 @@ class ArmorTracker : public LibXR::Application
                            const Eigen::VectorXd& state,
                            SpPairGeometryFit& fit) const;
   void SpApplyPairGeometryUpdate(const SpPairMatch& pair_match);
+  void SpCanonicalizePairPhaseForPositiveDz();
   void SpPredict();
   void SpUpdatePair(const SpPairMatch& pair_match);
   void SpUpdate(const ArmorDetectorResult& armor, const SpArmorMatch& match,

@@ -49,6 +49,31 @@ void ArmorTracker<CameraInfoV>::Init(const ArmorDetectorResults& armors_msg)
   InitEKF(rt_.tracked_armor);
   rt_.sp_initial_phase_resolved =
       SpTryCanonicalizeInitialState(armors_msg, true);
+  if ((SpPairGeometryEnabled() || SpPairDeltaZEnabled()) &&
+      rt_.tracked_armors_num == ArmorsNum::NORMAL_4)
+  {
+    SpPairMatch init_pair_match{};
+    if (SpResolvePairMatch(armors_msg, ekf_.state, init_pair_match))
+    {
+      SpApplyPairGeometryUpdate(init_pair_match);
+      if (init_pair_match.dz_valid)
+      {
+        rt_.sp_pair_delta_z_valid = true;
+      }
+      SyncGeometryRuntimeFromState();
+      ekf_.ekf.SetState(ekf_.state);
+      XR_LOG_DEBUG(
+          "SP pair shape init: left=(%zu/%d) right=(%zu/%d) score=%.3f geom=%d dz_valid=%d r=(%.3f,%.3f) dz=%.4f",
+          init_pair_match.left.armor_index, init_pair_match.left_face,
+          init_pair_match.right.armor_index, init_pair_match.right_face,
+          init_pair_match.score, init_pair_match.geometry_valid ? 1 : 0,
+          init_pair_match.dz_valid ? 1 : 0,
+          ekf_.state(ExtendedKalmanFilter::ROBOT_R),
+          ekf_.state(ExtendedKalmanFilter::ROBOT_R) +
+              ekf_.state(ExtendedKalmanFilter::DELTA_R),
+          ekf_.state(ExtendedKalmanFilter::DELTA_Z));
+    }
+  }
   XR_LOG_DEBUG("Init EKF!");
 
   rt_.state = State::DETECTING;
@@ -88,16 +113,9 @@ void ArmorTracker<CameraInfoV>::Update(const ArmorDetectorResults& armors_msg,
   XR_LOG_DEBUG("SP tracker predict");
   bool matched = false;
   rt_.measurement_valid_current_frame = false;
-  const bool pair_update_mode =
-      (SpPairGeometryEnabled() || SpPairDeltaZEnabled()) &&
-      rt_.tracked_armors_num == ArmorsNum::NORMAL_4 &&
-      rt_.state == State::TRACKING;
   const bool pair_delta_z_mode =
       SpPairDeltaZEnabled() && rt_.tracked_armors_num == ArmorsNum::NORMAL_4 &&
       rt_.state == State::TRACKING;
-  SpPairMatch pair_match{};
-  const bool has_pair_match =
-      pair_update_mode && SpResolvePairMatch(armors_msg, ekf_prediction, pair_match);
   ArmorTracker<CameraInfoV>::CandidateDebugMsg candidate_debug{};
   std::fill(candidate_debug.detection_track_ids.begin(),
             candidate_debug.detection_track_ids.end(), static_cast<int16_t>(-1));
@@ -127,113 +145,108 @@ void ArmorTracker<CameraInfoV>::Update(const ArmorDetectorResults& armors_msg,
   armor_tracker::FaceSelectionResult face_selection{};
   const armor_tracker::FaceSelectionResult* audit_selection = nullptr;
 
-  if (has_pair_match)
+  const int previous_face = rt_.tracked_face_index;
+  face_selection = armor_tracker::SelectFaceMatch(
+      armors_msg, BuildFaceSelectionTrackedState(), face_policy,
+      GetCameraWorldPosition(),
+      ekf_prediction(ExtendedKalmanFilter::V_YAW),
+      [this](std::size_t armor_index)
+      {
+        return FindDetectionTrackId(armor_index);
+      },
+      [this](std::size_t armor_index)
+      {
+        return IsDetectionTrackConfirmed(armor_index);
+      },
+      [this, &ekf_prediction](int local_face_index)
+      {
+        return GetArmorPositionFromState(
+            ekf_prediction, LocalFaceToCanonicalFace(local_face_index));
+      },
+      [this, &ekf_prediction](int local_face_index)
+      {
+        return GetArmorYawFromState(
+            ekf_prediction, LocalFaceToCanonicalFace(local_face_index));
+      });
+  audit_selection = &face_selection;
+  FillCandidateDebugFromSelection(face_selection, candidate_debug);
+
+  std::size_t selected_armor_index = 0;
+  int selected_canonical_face = -1;
+  if (face_selection.has_selected_candidate)
   {
-    matched = true;
-    candidate_debug.has_same_number_candidate = 1;
-    candidate_debug.matched = 1;
-    candidate_debug.accepted_mode = 1;
-    candidate_debug.count = 2;
-    candidate_debug.selected_index =
-        pair_match.tracked_armor_index == pair_match.left.armor_index ? 0 : 1;
-    candidate_debug.best_same_face_score = static_cast<float>(pair_match.score);
-    candidate_debug.same_face_matched = 1;
+    selected_armor_index = face_selection.selected_candidate.armor_index;
+    selected_canonical_face =
+        LocalFaceToCanonicalFace(face_selection.selected_candidate.face_index);
+  }
 
-    const auto fill_item = [this, &candidate_debug, &ekf_prediction](
-                               std::size_t item_index,
-                               const SpPairObservation& observation,
-                               const SpArmorMatch& match)
-    {
-      auto& item = candidate_debug.items[item_index];
-      item.armor_index =
-          static_cast<uint8_t>(std::min<std::size_t>(observation.armor_index, 255));
-      item.face_index = static_cast<uint8_t>(std::max(0, match.id));
-      item.same_number = 1;
-      item.image_track_id =
-          static_cast<int16_t>(FindDetectionTrackId(observation.armor_index));
-      item.image_track_confirmed =
-          IsDetectionTrackConfirmed(observation.armor_index) ? 1 : 0;
-      item.same_persistent_track = 0;
-      item.number = observation.armor.number;
-      item.type = observation.armor.type;
-      item.score = static_cast<float>(match.score);
-      item.position_diff = static_cast<float>(match.xyz_error);
-      item.yaw_diff = static_cast<float>(match.angle_error);
-      item.center_x = observation.armor.center.x;
-      item.center_y = observation.armor.center.y;
-      item.predicted_yaw =
-          static_cast<float>(GetArmorYawFromState(ekf_prediction, match.id));
-      item.measured_yaw = static_cast<float>(match.measured_yaw);
-    };
-    fill_item(0, pair_match.left, pair_match.left_match);
-    fill_item(1, pair_match.right, pair_match.right_match);
-
-    const int previous_face = rt_.tracked_face_index;
-    SpUpdatePair(pair_match);
-    rt_.tracked_armor = pair_match.tracked_armor;
-    rt_.tracked_id = pair_match.tracked_armor.number;
-    rt_.tracked_armors_num =
-        static_cast<ArmorsNum>(SpArmorCountFor(pair_match.tracked_armor));
-    rt_.tracked_face_index = pair_match.tracked_face;
-    rt_.last_yaw = pair_match.tracked_match.measured_yaw;
-    rt_.info_position_diff = pair_match.tracked_match.xyz_error;
-    rt_.info_yaw_diff = pair_match.tracked_match.angle_error;
+  matched = ApplyFaceSelection(face_selection, candidate_debug, pair_delta_z_mode);
+  if (matched)
+  {
     rt_.update_count++;
-    if (pair_match.tracked_face != previous_face)
+    if (rt_.tracked_face_index != previous_face)
     {
       rt_.switch_count++;
     }
-    SyncGeometryRuntimeFromState();
-    ekf_.ekf.SetState(ekf_.state);
-    XR_LOG_DEBUG(
-        "SP pair tracker update: tracked_face=%d left_face=%d right_face=%d score=%.3f geom=%d dz_valid=%d err=(left_xyz=%.3f right_xyz=%.3f left_angle=%.3f right_angle=%.3f) r=(%.3f,%.3f) dz=%.4f",
-        pair_match.tracked_face, pair_match.left_face, pair_match.right_face,
-        pair_match.score, pair_match.geometry_valid ? 1 : 0,
-        pair_match.dz_valid ? 1 : 0, pair_match.left_match.xyz_error,
-        pair_match.right_match.xyz_error, pair_match.left_match.angle_error,
-        pair_match.right_match.angle_error,
-        ekf_.state(ExtendedKalmanFilter::ROBOT_R),
-        ekf_.state(ExtendedKalmanFilter::ROBOT_R) +
-            ekf_.state(ExtendedKalmanFilter::DELTA_R),
-        ekf_.state(ExtendedKalmanFilter::DELTA_Z));
   }
 
-  if (!has_pair_match)
+  const bool pair_shape_update_mode =
+      (SpPairGeometryEnabled() || SpPairDeltaZEnabled()) &&
+      rt_.tracked_armors_num == ArmorsNum::NORMAL_4 &&
+      rt_.tracked_id != ArmorNumber::INVALID;
+  SpPairMatch pair_match{};
+  if (pair_shape_update_mode &&
+      SpResolvePairMatch(armors_msg, matched ? ekf_.state : ekf_prediction,
+                         pair_match))
   {
-    const int previous_face = rt_.tracked_face_index;
-    face_selection = armor_tracker::SelectFaceMatch(
-        armors_msg, BuildFaceSelectionTrackedState(), face_policy,
-        GetCameraWorldPosition(),
-        ekf_prediction(ExtendedKalmanFilter::V_YAW),
-        [this](std::size_t armor_index)
-        {
-          return FindDetectionTrackId(armor_index);
-        },
-        [this](std::size_t armor_index)
-        {
-          return IsDetectionTrackConfirmed(armor_index);
-        },
-        [this, &ekf_prediction](int local_face_index)
-        {
-          return GetArmorPositionFromState(
-              ekf_prediction, LocalFaceToCanonicalFace(local_face_index));
-        },
-        [this, &ekf_prediction](int local_face_index)
-        {
-          return GetArmorYawFromState(
-              ekf_prediction, LocalFaceToCanonicalFace(local_face_index));
-        });
-    audit_selection = &face_selection;
-    FillCandidateDebugFromSelection(face_selection, candidate_debug);
-    matched = ApplyFaceSelection(face_selection, candidate_debug,
-                                 pair_delta_z_mode);
-    if (matched)
+    bool accept_pair_shape = false;
+    if (matched && selected_canonical_face >= 0)
     {
-      rt_.update_count++;
-      if (rt_.tracked_face_index != previous_face)
+      const bool selected_is_left =
+          pair_match.left.armor_index == selected_armor_index &&
+          pair_match.left_face == selected_canonical_face;
+      const bool selected_is_right =
+          pair_match.right.armor_index == selected_armor_index &&
+          pair_match.right_face == selected_canonical_face;
+      accept_pair_shape = selected_is_left || selected_is_right;
+    }
+    else
+    {
+      // 未匹配帧只允许高自洽的双板 shape 观测修半径；它不改变本帧 matched 状态。
+      // 已经 TRACKING 时的偶发 miss 不用 pair 改 shape，避免噪声观测污染稳定跟踪。
+      accept_pair_shape = rt_.state != State::TRACKING &&
+                          pair_match.geometry_valid &&
+                          pair_match.score <=
+                              armor_tracker_detail::SpPairGeometryFallbackMaxScore();
+    }
+
+    if (accept_pair_shape)
+    {
+      SpApplyPairGeometryUpdate(pair_match);
+      if (pair_match.dz_valid)
       {
-        rt_.switch_count++;
+        rt_.sp_pair_delta_z_valid = true;
       }
+      SyncGeometryRuntimeFromState();
+      ekf_.ekf.SetState(ekf_.state);
+      XR_LOG_DEBUG(
+          "SP pair shape update: matched=%d selected=(armor=%zu face=%d) left=(%zu/%d) right=(%zu/%d) score=%.3f geom=%d dz_valid=%d r=(%.3f,%.3f) dz=%.4f",
+          matched ? 1 : 0, selected_armor_index, selected_canonical_face,
+          pair_match.left.armor_index, pair_match.left_face,
+          pair_match.right.armor_index, pair_match.right_face, pair_match.score,
+          pair_match.geometry_valid ? 1 : 0, pair_match.dz_valid ? 1 : 0,
+          ekf_.state(ExtendedKalmanFilter::ROBOT_R),
+          ekf_.state(ExtendedKalmanFilter::ROBOT_R) +
+              ekf_.state(ExtendedKalmanFilter::DELTA_R),
+          ekf_.state(ExtendedKalmanFilter::DELTA_Z));
+    }
+    else
+    {
+      XR_LOG_DEBUG(
+          "SP pair shape skipped: matched=%d selected=(armor=%zu face=%d) pair=(left=%zu/%d right=%zu/%d) score=%.3f",
+          matched ? 1 : 0, selected_armor_index, selected_canonical_face,
+          pair_match.left.armor_index, pair_match.left_face,
+          pair_match.right.armor_index, pair_match.right_face, pair_match.score);
     }
   }
 

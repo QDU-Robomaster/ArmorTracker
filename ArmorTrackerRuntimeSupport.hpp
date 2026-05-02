@@ -355,8 +355,14 @@ inline double SpPairGeometryYawVariance()
 inline double SpPairGeometryRadiusVariance()
 {
   const double sigma =
-      std::max(1e-4, ParseEnvDouble("XR_TRACKER_SP_PAIR_GEOMETRY_RADIUS_SIGMA", 0.018));
+      std::max(1e-4, ParseEnvDouble("XR_TRACKER_SP_PAIR_GEOMETRY_RADIUS_SIGMA", 0.100));
   return sigma * sigma;
+}
+
+inline double SpPairGeometryFallbackMaxScore()
+{
+  return std::max(
+      0.0, ParseEnvDouble("XR_TRACKER_SP_PAIR_GEOMETRY_FALLBACK_MAX_SCORE", 1.20));
 }
 
 inline double SpPairGeometryCovarianceFloor()

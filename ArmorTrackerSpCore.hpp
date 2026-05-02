@@ -966,6 +966,63 @@ bool ArmorTracker<CameraInfoV>::SpResolvePairMatch(
 }
 
 template <CameraTypes::CameraInfo CameraInfoV>
+void ArmorTracker<CameraInfoV>::SpCanonicalizePairPhaseForPositiveDz()
+{
+  if (rt_.tracked_armors_num != ArmorsNum::NORMAL_4 ||
+      SymmetricGeometryEnabled() || !SpCanonicalInitPreferPositiveDz() ||
+      ekf_.state(ExtendedKalmanFilter::DELTA_Z) >= 0.0)
+  {
+    return;
+  }
+
+  Eigen::MatrixXd transform =
+      Eigen::MatrixXd::Identity(ekf_.covariance.rows(), ekf_.covariance.cols());
+  transform(ExtendedKalmanFilter::Z_ARMOR, ExtendedKalmanFilter::DELTA_Z) = 1.0;
+  transform(ExtendedKalmanFilter::ROBOT_R, ExtendedKalmanFilter::DELTA_R) = 1.0;
+  transform(ExtendedKalmanFilter::DELTA_Z, ExtendedKalmanFilter::DELTA_Z) = -1.0;
+  transform(ExtendedKalmanFilter::DELTA_R, ExtendedKalmanFilter::DELTA_R) = -1.0;
+
+  ekf_.state(ExtendedKalmanFilter::YAW) =
+      SpLimitRad(ekf_.state(ExtendedKalmanFilter::YAW) + 0.5 * M_PI);
+  ekf_.state(ExtendedKalmanFilter::Z_ARMOR) +=
+      ekf_.state(ExtendedKalmanFilter::DELTA_Z);
+  ekf_.state(ExtendedKalmanFilter::DELTA_Z) =
+      -ekf_.state(ExtendedKalmanFilter::DELTA_Z);
+  ekf_.state(ExtendedKalmanFilter::ROBOT_R) +=
+      ekf_.state(ExtendedKalmanFilter::DELTA_R);
+  ekf_.state(ExtendedKalmanFilter::DELTA_R) =
+      -ekf_.state(ExtendedKalmanFilter::DELTA_R);
+  ekf_.covariance = transform * ekf_.covariance * transform.transpose();
+
+  rt_.tracked_face_index =
+      armor_tracker::NormalizeFaceIndex(rt_.tracked_face_index - 1, 4);
+  ekf_.measurement_face_index =
+      armor_tracker::NormalizeFaceIndex(ekf_.measurement_face_index - 1, 4);
+
+  const auto old_valid = rt_.face_track_id_valid;
+  const auto old_ids = rt_.face_track_id;
+  for (int face = 0; face < 4; ++face)
+  {
+    const int old_face = armor_tracker::NormalizeFaceIndex(face + 1, 4);
+    rt_.face_track_id_valid[face] = old_valid[old_face];
+    rt_.face_track_id[face] = old_ids[old_face];
+  }
+  if (rt_.face_track_id_valid[rt_.tracked_face_index])
+  {
+    rt_.tracked_face_track_id_valid = true;
+    rt_.tracked_face_track_id = rt_.face_track_id[rt_.tracked_face_index];
+  }
+  else
+  {
+    rt_.tracked_face_track_id_valid = false;
+    rt_.tracked_face_track_id = 0;
+  }
+
+  SyncGeometryRuntimeFromState();
+  ekf_.ekf.SetState(ekf_.state);
+}
+
+template <CameraTypes::CameraInfo CameraInfoV>
 void ArmorTracker<CameraInfoV>::SpApplyPairGeometryUpdate(
     const SpPairMatch& pair_match)
 {
@@ -974,12 +1031,11 @@ void ArmorTracker<CameraInfoV>::SpApplyPairGeometryUpdate(
     return;
   }
 
-  constexpr int kMaxRows = 7;
+  constexpr int kMaxRows = 4;
   Eigen::MatrixXd h = Eigen::MatrixXd::Zero(kMaxRows, 11);
   Eigen::VectorXd z = Eigen::VectorXd::Zero(kMaxRows);
   Eigen::VectorXd r_diag = Eigen::VectorXd::Zero(kMaxRows);
   int rows = 0;
-  int yaw_row = -1;
 
   const auto add_scalar = [&](int state_index, double measurement,
                               double variance)
@@ -993,27 +1049,19 @@ void ArmorTracker<CameraInfoV>::SpApplyPairGeometryUpdate(
   if (pair_match.geometry_valid)
   {
     const double covariance_floor = SpPairGeometryCovarianceFloor();
-    const int geometry_indices[] = {
-        ExtendedKalmanFilter::X_CENTER, ExtendedKalmanFilter::Y_CENTER,
-        ExtendedKalmanFilter::YAW, ExtendedKalmanFilter::ROBOT_R,
-        ExtendedKalmanFilter::DELTA_R};
-    for (const int index : geometry_indices)
-    {
-      ekf_.covariance(index, index) =
-          std::max(ekf_.covariance(index, index), covariance_floor);
-    }
+    ekf_.covariance(ExtendedKalmanFilter::ROBOT_R,
+                    ExtendedKalmanFilter::ROBOT_R) =
+        std::max(ekf_.covariance(ExtendedKalmanFilter::ROBOT_R,
+                                 ExtendedKalmanFilter::ROBOT_R),
+                 covariance_floor);
+    ekf_.covariance(ExtendedKalmanFilter::DELTA_R,
+                    ExtendedKalmanFilter::DELTA_R) =
+        std::max(ekf_.covariance(ExtendedKalmanFilter::DELTA_R,
+                                 ExtendedKalmanFilter::DELTA_R),
+                 covariance_floor);
 
-    add_scalar(ExtendedKalmanFilter::X_CENTER, pair_match.geometry.center.x(),
-               SpPairGeometryCenterVariance());
-    add_scalar(ExtendedKalmanFilter::Y_CENTER, pair_match.geometry.center.y(),
-               SpPairGeometryCenterVariance());
-
-    h(rows, ExtendedKalmanFilter::YAW) = 1.0;
-    z(rows) = pair_match.geometry.yaw;
-    r_diag(rows) = SpPairGeometryYawVariance();
-    yaw_row = rows;
-    ++rows;
-
+    // 单面观测已经能稳定约束中心和 yaw；双面几何只补足半径可观测性。
+    // 否则 PnP yaw/中心噪声会通过伪观测改写运动状态，反而破坏内录跟踪。
     add_scalar(ExtendedKalmanFilter::ROBOT_R, pair_match.geometry.r_even,
                SpPairGeometryRadiusVariance());
     if (!SymmetricGeometryEnabled())
@@ -1051,10 +1099,6 @@ void ArmorTracker<CameraInfoV>::SpApplyPairGeometryUpdate(
 
   const Eigen::VectorXd predicted = h * ekf_.state;
   Eigen::VectorXd innovation = z - predicted;
-  if (yaw_row >= 0)
-  {
-    innovation(yaw_row) = SpLimitRad(innovation(yaw_row));
-  }
 
   const Eigen::MatrixXd r = r_diag.asDiagonal();
   const Eigen::MatrixXd innovation_cov =
@@ -1071,6 +1115,10 @@ void ArmorTracker<CameraInfoV>::SpApplyPairGeometryUpdate(
                         (identity - kalman_gain * h).transpose() +
                     kalman_gain * r * kalman_gain.transpose();
   ClampGeometryState();
+  if (pair_match.dz_valid)
+  {
+    SpCanonicalizePairPhaseForPositiveDz();
+  }
 }
 
 template <CameraTypes::CameraInfo CameraInfoV>
