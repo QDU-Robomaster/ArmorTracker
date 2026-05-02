@@ -53,6 +53,7 @@ constructor_args:
       enable_pair_dz: false
       measurement_recenter_alpha: 1.0
       quality_recenter: false
+      enable_pair_geometry: true
   sync: '@camera_frame_sync'
 template_args:
   - Info:
@@ -204,6 +205,7 @@ class ArmorTracker : public LibXR::Application
       bool enable_pair_dz = false;               // 双装甲高低差软融合
       double measurement_recenter_alpha = 1.0;  // 单装甲测量重定位权重
       bool quality_recenter = false;             // 按匹配质量调节重定位权重
+      bool enable_pair_geometry = true;          // 双装甲显式估计整车中心与长短半径
     } sp;
   };
 
@@ -405,9 +407,23 @@ class ArmorTracker : public LibXR::Application
     Eigen::Vector3d xyz = Eigen::Vector3d::Zero();
   };
 
+  struct SpPairGeometryFit
+  {
+    bool valid = false;
+    Eigen::Vector2d center = Eigen::Vector2d::Zero();
+    double r_even = 0.0;
+    double r_odd = 0.0;
+    double yaw = 0.0;
+    double fit_error = 0.0;
+    double center_shift = 0.0;
+    double radius_shift = 0.0;
+  };
+
   struct SpPairMatch
   {
     bool valid = false;
+    bool geometry_valid = false;
+    bool dz_valid = false;
     SpPairObservation left{};
     SpPairObservation right{};
     int left_face = 0;
@@ -417,9 +433,8 @@ class ArmorTracker : public LibXR::Application
     double score = std::numeric_limits<double>::infinity();
     double yaw = 0.0;
     double dz_observed = 0.0;
-    double low_z = 0.0;
-    double high_z = 0.0;
-    bool left_is_high = false;
+    double even_z_observed = 0.0;
+    SpPairGeometryFit geometry{};
     int tracked_face = 0;
     std::size_t tracked_armor_index = 0;
     ArmorDetectorResult tracked_armor{};
@@ -449,12 +464,20 @@ class ArmorTracker : public LibXR::Application
   bool SpResolvePairMatch(const ArmorDetectorResults& armors_msg,
                           const Eigen::VectorXd& state,
                           SpPairMatch& pair_match) const;
+  bool SpSolvePairGeometry(const SpPairObservation& left, int left_face,
+                           double left_measured_yaw,
+                           const SpPairObservation& right, int right_face,
+                           double right_measured_yaw,
+                           const Eigen::VectorXd& state,
+                           SpPairGeometryFit& fit) const;
+  void SpApplyPairGeometryUpdate(const SpPairMatch& pair_match);
   void SpPredict();
   void SpUpdatePair(const SpPairMatch& pair_match);
   void SpUpdate(const ArmorDetectorResult& armor, const SpArmorMatch& match,
                 bool freeze_delta_z);
   bool SpStateDiverged() const;
   bool SpPairDeltaZEnabled() const;
+  bool SpPairGeometryEnabled() const;
   double SpMeasurementRecenterAlpha() const;
   bool SpMeasurementRecenterQualityEnabled() const;
   // ====================== 内部聚合成员（类内聚合） ======================
@@ -603,12 +626,18 @@ using armor_tracker_detail::SpCanonicalInitPreferPositiveDz;
 using armor_tracker_detail::SpPitchVarianceScale;
 using armor_tracker_detail::SpYpdArmorYawVarianceScale;
 using armor_tracker_detail::SpYpdDistanceVarianceScale;
-using armor_tracker_detail::SpPairDeltaZAlpha;
 using armor_tracker_detail::SpPairDeltaZMaxAbs;
 using armor_tracker_detail::SpPairDeltaZMinHeight;
 using armor_tracker_detail::SpPairDeltaZVariance;
 using armor_tracker_detail::SpPairDualUpdateEnabled;
-using armor_tracker_detail::SpPairRecenterAlpha;
+using armor_tracker_detail::SpPairGeometryCenterVariance;
+using armor_tracker_detail::SpPairGeometryCovarianceFloor;
+using armor_tracker_detail::SpPairGeometryMaxCenterShift;
+using armor_tracker_detail::SpPairGeometryMaxFitError;
+using armor_tracker_detail::SpPairGeometryMaxRadiusShift;
+using armor_tracker_detail::SpPairGeometryMinDeterminant;
+using armor_tracker_detail::SpPairGeometryRadiusVariance;
+using armor_tracker_detail::SpPairGeometryYawVariance;
 using armor_tracker_detail::SpMeasurementAnchoredOutputEnabled;
 using armor_tracker_detail::SpOutputExtrapolateSeconds;
 using armor_tracker_detail::SpMeasurementRecenterAlphaBad;
@@ -648,6 +677,20 @@ bool ArmorTracker<CameraInfoV>::SpPairDeltaZEnabled() const
     return true;
   }
   return cfg_.sp.enable_pair_dz;
+}
+
+template <CameraTypes::CameraInfo CameraInfoV>
+bool ArmorTracker<CameraInfoV>::SpPairGeometryEnabled() const
+{
+  if (armor_tracker_detail::EnvFlagEnabled("XR_TRACKER_SP_DISABLE_PAIR_GEOMETRY"))
+  {
+    return false;
+  }
+  if (armor_tracker_detail::EnvFlagEnabled("XR_TRACKER_SP_ENABLE_PAIR_GEOMETRY"))
+  {
+    return true;
+  }
+  return cfg_.sp.enable_pair_geometry;
 }
 
 template <CameraTypes::CameraInfo CameraInfoV>
@@ -1313,6 +1356,11 @@ int ArmorTracker<CameraInfoV>::CommandFun(ArmorTracker<CameraInfoV>* self, int a
       LibXR::STDIO::Printf<"      - %f\r\n">(self->cfg_.frames.translation[0]);
       LibXR::STDIO::Printf<"      - %f\r\n">(self->cfg_.frames.translation[1]);
       LibXR::STDIO::Printf<"      - %f\r\n">(self->cfg_.frames.translation[2]);
+      LibXR::STDIO::Printf<"  sp:\r\n">();
+      LibXR::STDIO::Printf<"    enable_pair_dz: %d\r\n">(self->cfg_.sp.enable_pair_dz ? 1 : 0);
+      LibXR::STDIO::Printf<"    measurement_recenter_alpha: %f\r\n">(self->cfg_.sp.measurement_recenter_alpha);
+      LibXR::STDIO::Printf<"    quality_recenter: %d\r\n">(self->cfg_.sp.quality_recenter ? 1 : 0);
+      LibXR::STDIO::Printf<"    enable_pair_geometry: %d\r\n">(self->cfg_.sp.enable_pair_geometry ? 1 : 0);
       // clang-format on
     }
     return 0;

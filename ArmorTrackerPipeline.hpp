@@ -88,12 +88,16 @@ void ArmorTracker<CameraInfoV>::Update(const ArmorDetectorResults& armors_msg,
   XR_LOG_DEBUG("SP tracker predict");
   bool matched = false;
   rt_.measurement_valid_current_frame = false;
+  const bool pair_update_mode =
+      (SpPairGeometryEnabled() || SpPairDeltaZEnabled()) &&
+      rt_.tracked_armors_num == ArmorsNum::NORMAL_4 &&
+      rt_.state == State::TRACKING;
   const bool pair_delta_z_mode =
       SpPairDeltaZEnabled() && rt_.tracked_armors_num == ArmorsNum::NORMAL_4 &&
       rt_.state == State::TRACKING;
   SpPairMatch pair_match{};
   const bool has_pair_match =
-      pair_delta_z_mode && SpResolvePairMatch(armors_msg, ekf_prediction, pair_match);
+      pair_update_mode && SpResolvePairMatch(armors_msg, ekf_prediction, pair_match);
   ArmorTracker<CameraInfoV>::CandidateDebugMsg candidate_debug{};
   std::fill(candidate_debug.detection_track_ids.begin(),
             candidate_debug.detection_track_ids.end(), static_cast<int16_t>(-1));
@@ -182,11 +186,15 @@ void ArmorTracker<CameraInfoV>::Update(const ArmorDetectorResults& armors_msg,
     SyncGeometryRuntimeFromState();
     ekf_.ekf.SetState(ekf_.state);
     XR_LOG_DEBUG(
-        "SP pair tracker update: tracked_face=%d left_face=%d right_face=%d score=%.3f err=(left_xyz=%.3f right_xyz=%.3f left_angle=%.3f right_angle=%.3f) dz=%.4f",
+        "SP pair tracker update: tracked_face=%d left_face=%d right_face=%d score=%.3f geom=%d dz_valid=%d err=(left_xyz=%.3f right_xyz=%.3f left_angle=%.3f right_angle=%.3f) r=(%.3f,%.3f) dz=%.4f",
         pair_match.tracked_face, pair_match.left_face, pair_match.right_face,
-        pair_match.score, pair_match.left_match.xyz_error,
+        pair_match.score, pair_match.geometry_valid ? 1 : 0,
+        pair_match.dz_valid ? 1 : 0, pair_match.left_match.xyz_error,
         pair_match.right_match.xyz_error, pair_match.left_match.angle_error,
         pair_match.right_match.angle_error,
+        ekf_.state(ExtendedKalmanFilter::ROBOT_R),
+        ekf_.state(ExtendedKalmanFilter::ROBOT_R) +
+            ekf_.state(ExtendedKalmanFilter::DELTA_R),
         ekf_.state(ExtendedKalmanFilter::DELTA_Z));
   }
 
