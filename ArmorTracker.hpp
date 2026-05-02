@@ -138,6 +138,7 @@ class ArmorTracker : public LibXR::Application
   using ImageFrame = typename FrameSync::ImageFrame;
   using ImuStamped = typename FrameSync::ImuStamped;
   using SyncedFrame = typename FrameSync::SyncedFrame;
+  using DetectionPacket = ArmorDetectionsFramePacket<CameraInfoV>;
   using DetectionMessage = ArmorDetectionsFrameMessage<CameraInfoV>;
 
   static inline constexpr CameraInfo kCameraInfo = CameraInfoV;
@@ -371,7 +372,7 @@ class ArmorTracker : public LibXR::Application
 
   // ====================== IO 与回调（原 Node 逻辑） ======================
   void VelocityCallback(double velocity_msg);
-  void ArmorsCallback(const DetectionMessage& message);
+  void ArmorsCallback(DetectionPacket* packet);
 
   // ====================== 辅助函数 ======================
   void InitEKF(const ArmorDetectorResult& a);
@@ -853,13 +854,13 @@ ArmorTracker<CameraInfoV>::ArmorTracker(LibXR::HardwareContainer& hw,
   auto armors_cb = LibXR::Topic::Callback::Create(
       [](bool, ArmorTracker* self, LibXR::RawData& data)
       {
-        auto* armors_msg = reinterpret_cast<DetectionMessage*>(data.addr_);
+        auto* packet_addr = reinterpret_cast<DetectionPacket**>(data.addr_);
         if (self->params_is_changed_ == true)
         {
           self->SetConfig(self->cfg_);
           self->params_is_changed_ = false;
         }
-        self->ArmorsCallback(*armors_msg);
+        self->ArmorsCallback(packet_addr != nullptr ? *packet_addr : nullptr);
       },
       this);
   armors_topic.RegisterCallback(armors_cb);

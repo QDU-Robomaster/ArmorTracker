@@ -500,9 +500,20 @@ void ArmorTracker<CameraInfoV>::VelocityCallback(double velocity_msg)
 }
 
 template <CameraTypes::CameraInfo CameraInfoV>
-void ArmorTracker<CameraInfoV>::ArmorsCallback(const DetectionMessage& message)
+void ArmorTracker<CameraInfoV>::ArmorsCallback(DetectionPacket* packet)
 {
-  const auto& source_frame = message.source_frame;
+  if (packet == nullptr)
+  {
+    XR_LOG_ERROR("ArmorTracker received empty detector packet pointer");
+    return;
+  }
+  if (packet->detections == nullptr)
+  {
+    XR_LOG_ERROR("ArmorTracker received detector packet without detections");
+    return;
+  }
+
+  const auto& source_frame = packet->source_frame;
   if (source_frame.image_frame == nullptr)
   {
     XR_LOG_ERROR("ArmorTracker received detector packet without image frame");
@@ -523,8 +534,16 @@ void ArmorTracker<CameraInfoV>::ArmorsCallback(const DetectionMessage& message)
         static_cast<unsigned long long>(image_timestamp_us));
     return;
   }
+  if (packet->detections->image_timestamp_us != image_timestamp_us)
+  {
+    XR_LOG_ERROR(
+        "ArmorTracker detector result timestamp mismatch result=%llu packet=%llu",
+        static_cast<unsigned long long>(packet->detections->image_timestamp_us),
+        static_cast<unsigned long long>(image_timestamp_us));
+    return;
+  }
 
-  ArmorDetectorResults armors_msg = message.results;
+  ArmorDetectorResults armors_msg = packet->detections->results;
   const LibXR::Transform<double> camera_pose_world =
       ArmorTrackerCameraRotationToTrackerWorldPose(
           armor_tracker_detail::PackedCameraRotation(source_frame.imu->rotation_wxyz),
