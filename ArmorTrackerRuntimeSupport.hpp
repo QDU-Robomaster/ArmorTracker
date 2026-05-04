@@ -251,7 +251,7 @@ inline double SpPitchVarianceScale()
 inline double SpYpdDistanceVarianceScale()
 {
   return std::max(1e-4,
-                  ParseEnvDouble("XR_TRACKER_SP_DISTANCE_R_SCALE", 1.0));
+                  ParseEnvDouble("XR_TRACKER_SP_DISTANCE_R_SCALE", 0.1));
 }
 
 inline double SpYpdArmorYawVarianceScale()
@@ -372,6 +372,12 @@ inline double SpPairGeometryCovarianceFloor()
   return sigma * sigma;
 }
 
+inline double SpDeltaRadiusShrinkAlpha()
+{
+  return std::clamp(ParseEnvDouble("XR_TRACKER_SP_DELTA_R_SHRINK_ALPHA", 0.03),
+                    0.0, 1.0);
+}
+
 inline double SpPairDeltaZMinHeight()
 {
   return std::max(0.0, ParseEnvDouble("XR_TRACKER_SP_PAIR_DZ_MIN_HEIGHT", 0.015));
@@ -395,6 +401,95 @@ inline bool SpPairDualUpdateEnabled()
 inline bool SpMeasurementAnchoredOutputEnabled()
 {
   return EnvFlagEnabled("XR_TRACKER_SP_ENABLE_OUTPUT_MEAS_ANCHOR");
+}
+
+inline bool SpFixedPoseYawOptimizeEnabled()
+{
+  return EnvFlagEnabled("XR_TRACKER_SP_ENABLE_FIXED_POSE_YAW_OPT");
+}
+
+inline double SpFixedPoseYawPitchDeg()
+{
+  return std::clamp(
+      ParseEnvDouble("XR_TRACKER_SP_FIXED_POSE_YAW_PITCH_DEG", 15.0), 0.0, 45.0);
+}
+
+inline double SpFixedPoseYawRangeDeg()
+{
+  return std::clamp(
+      ParseEnvDouble("XR_TRACKER_SP_FIXED_POSE_YAW_RANGE_DEG", 70.0), 1.0, 180.0);
+}
+
+inline double SpFixedPoseYawCoarseStepDeg()
+{
+  return std::clamp(
+      ParseEnvDouble("XR_TRACKER_SP_FIXED_POSE_YAW_COARSE_STEP_DEG", 2.0),
+      0.2, 20.0);
+}
+
+inline double SpFixedPoseYawFineStepDeg()
+{
+  return std::clamp(
+      ParseEnvDouble("XR_TRACKER_SP_FIXED_POSE_YAW_FINE_STEP_DEG", 0.2),
+      0.05, 5.0);
+}
+
+inline double SpFixedPoseYawMinGainPx()
+{
+  return std::max(
+      0.0, ParseEnvDouble("XR_TRACKER_SP_FIXED_POSE_YAW_MIN_GAIN_PX", 0.05));
+}
+
+inline bool SpCenterMotionObserverEnabled()
+{
+  return !EnvFlagEnabled("XR_TRACKER_SP_DISABLE_CENTER_MOTION_OBSERVER");
+}
+
+inline bool SpCenterMotionObserverRadialVelocityEnabled()
+{
+  return EnvFlagEnabled("XR_TRACKER_SP_CENTER_MOTION_OBSERVER_RADIAL");
+}
+
+inline bool SpYawRateObserverEnabled()
+{
+  if (EnvFlagEnabled("XR_TRACKER_SP_DISABLE_YAW_RATE_OBSERVER"))
+  {
+    return false;
+  }
+  return EnvFlagEnabled("XR_TRACKER_SP_ENABLE_YAW_RATE_OBSERVER");
+}
+
+inline double SpYawRateObserverAlpha()
+{
+  return std::clamp(ParseEnvDouble("XR_TRACKER_SP_YAW_RATE_OBSERVER_ALPHA", 0.08),
+                    0.0, 1.0);
+}
+
+inline double SpYawRateObserverTau()
+{
+  return std::clamp(ParseEnvDouble("XR_TRACKER_SP_YAW_RATE_OBSERVER_TAU", 0.020),
+                    0.001, 0.500);
+}
+
+inline double SpYawRateObserverBlend()
+{
+  return std::clamp(ParseEnvDouble("XR_TRACKER_SP_YAW_RATE_OBSERVER_BLEND", 1.0),
+                    0.0, 1.0);
+}
+
+inline double SpYawRateObserverMaxRaw()
+{
+  return std::max(0.0, ParseEnvDouble("XR_TRACKER_SP_YAW_RATE_OBSERVER_MAX_RAW", 20.0));
+}
+
+inline double SpYawRateObserverMaxBlendDelta()
+{
+  return std::max(0.0, ParseEnvDouble("XR_TRACKER_SP_YAW_RATE_OBSERVER_MAX_BLEND_DELTA", 0.8));
+}
+
+inline std::uint32_t SpYawRateObserverMinSamples()
+{
+  return ParseEnvUint("XR_TRACKER_SP_YAW_RATE_OBSERVER_MIN_SAMPLES", 4U);
 }
 
 inline double SpOutputExtrapolateSeconds()

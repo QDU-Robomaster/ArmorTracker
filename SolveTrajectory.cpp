@@ -177,7 +177,8 @@ void SolveTrajectory::CalculateArmorPosition(Target* msg, bool use_1,
     use_1 = !use_1;  // 交替使用 r1/r2
   }
 
-  if (msg->measured_face_valid && msg->measured_face_index >= 0 &&
+  if (msg->use_measured_face_anchor && msg->measured_face_valid &&
+      msg->measured_face_index >= 0 &&
       msg->measured_face_index < msg->armors_num)
   {
     const int idx = msg->measured_face_index;
@@ -338,6 +339,12 @@ void SolveTrajectory::FireLogicDefault(float& pitch, float& yaw, float& aim_x,
 int SolveTrajectory::SelectSpLikeAimArmor(Target* msg)
 {
   const int armor_num = std::max(1, std::min(4, msg->armors_num));
+  if (!msg->face_switch_observed)
+  {
+    lock_id_ = std::clamp(msg->tracked_face_index, 0, armor_num - 1);
+    return lock_id_;
+  }
+
   const double camera_facing_yaw =
       std::remainder(std::atan2(msg->position.y(), msg->position.x()) +
                          static_cast<double>(PI),

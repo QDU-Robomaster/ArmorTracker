@@ -51,7 +51,7 @@ constructor_args:
 
     sp:
       enable_pair_dz: false
-      measurement_recenter_alpha: 1.0
+      measurement_recenter_alpha: 0.25
       quality_recenter: false
       enable_pair_geometry: true
   sync: '@camera_frame_sync'
@@ -90,6 +90,7 @@ depends:
 #include <vector>
 
 #include <Eigen/Eigen>
+#include <opencv2/calib3d.hpp>
 
 // 框架与外部依赖头
 #include "ArmorTrackerCommon.hpp"
@@ -204,7 +205,7 @@ class ArmorTracker : public LibXR::Application
     struct SpTuning
     {
       bool enable_pair_dz = false;               // 双装甲高低差软融合
-      double measurement_recenter_alpha = 1.0;  // 单装甲测量重定位权重
+      double measurement_recenter_alpha = 0.25;  // 单装甲测量重定位权重
       bool quality_recenter = false;             // 按匹配质量调节重定位权重
       bool enable_pair_geometry = true;          // 双装甲显式估计整车中心与长短半径
     } sp;
@@ -307,6 +308,30 @@ class ArmorTracker : public LibXR::Application
     uint8_t switch_face_matched{};
     uint8_t switch_blocked_by_timeout{};
     uint8_t switch_allowed{};
+    uint8_t ekf_update_valid{};
+    uint8_t ekf_update_mode{};  // 1: YPD observation, 2: XYZ observation.
+    int8_t ekf_update_face{-1};
+    uint8_t ekf_freeze_delta_z{};
+    uint8_t ekf_range_clamped{};
+    float ekf_raw_range_m{};
+    float ekf_range_m{};
+    float ekf_mahalanobis{};
+    float ekf_pre_res_x{};
+    float ekf_pre_res_y{};
+    float ekf_pre_res_z{};
+    float ekf_pre_res_norm{};
+    float ekf_post_res_x{};
+    float ekf_post_res_y{};
+    float ekf_post_res_z{};
+    float ekf_post_res_norm{};
+    float ekf_innov_0{};
+    float ekf_innov_1{};
+    float ekf_innov_2{};
+    float ekf_innov_3{};
+    float ekf_r_0{};
+    float ekf_r_1{};
+    float ekf_r_2{};
+    float ekf_r_3{};
     std::array<int16_t, kMaxDetections> detection_track_ids{};
     std::array<uint8_t, kMaxDetections> detection_track_confirmed{};
     CandidateDebugItem items[kMaxItems]{};
@@ -357,7 +382,7 @@ class ArmorTracker : public LibXR::Application
   void AdvanceTrackerState(bool matched);
   bool ApplyFaceSelection(const armor_tracker::FaceSelectionResult& selection,
                           CandidateDebugMsg& candidate_debug,
-                          bool freeze_delta_z);
+                          bool freeze_delta_z, uint64_t image_timestamp_us);
   bool TryRecoverTempLost(const ArmorDetectorResults& armors_msg,
                           CandidateDebugMsg& candidate_debug);
   armor_tracker::ObserverPolicy BuildObserverPolicy() const;
@@ -383,6 +408,16 @@ class ArmorTracker : public LibXR::Application
                                          int observed_face_index,
                                          double measured_yaw);
   int LocalFaceToCanonicalFace(int local_face_index) const;
+  void OptimizeArmorYawMeasurements(
+      ArmorDetectorResults& armors_msg,
+      const LibXR::Transform<double>& camera_pose_world) const;
+  bool OptimizeSingleArmorYawMeasurement(
+      ArmorDetectorResult& armor,
+      const LibXR::Transform<double>& camera_pose_world) const;
+  double ArmorYawReprojectionError(
+      const ArmorDetectorResult& armor,
+      const LibXR::Transform<double>& camera_pose_world,
+      double yaw_rad, double pitch_rad) const;
   void SyncGeometryRuntimeFromState();
   void ClampGeometryState();
   double GetArmorYawFromState(const Eigen::VectorXd& x, int face_index = 0) const;
@@ -474,9 +509,17 @@ class ArmorTracker : public LibXR::Application
   void SpApplyPairGeometryUpdate(const SpPairMatch& pair_match);
   void SpCanonicalizePairPhaseForPositiveDz();
   void SpPredict();
-  void SpUpdatePair(const SpPairMatch& pair_match);
+  void SpUpdatePair(const SpPairMatch& pair_match,
+                    uint64_t image_timestamp_us = 0,
+                    CandidateDebugMsg* candidate_debug = nullptr);
   void SpUpdate(const ArmorDetectorResult& armor, const SpArmorMatch& match,
-                bool freeze_delta_z);
+                bool freeze_delta_z, uint64_t image_timestamp_us = 0,
+                CandidateDebugMsg* candidate_debug = nullptr);
+  void SpUpdateCenterMotionObserver(const ArmorDetectorResult& armor,
+                                    const SpArmorMatch& match,
+                                    uint64_t image_timestamp_us);
+  void SpApplyYawRateObserver(double output_yaw, uint64_t image_timestamp_us,
+                              SolveTrajectory::Target& target_msg);
   bool SpStateDiverged() const;
   bool SpPairDeltaZEnabled() const;
   bool SpPairGeometryEnabled() const;
@@ -530,6 +573,22 @@ class ArmorTracker : public LibXR::Application
     bool sp_initial_phase_resolved = false;
     bool sp_pair_delta_z_valid = false;
     bool measurement_valid_current_frame = false;
+    bool center_motion_observer_valid = false;
+    uint64_t center_motion_observer_timestamp_us = 0;
+    Eigen::Vector3d center_motion_observer_anchor = Eigen::Vector3d::Zero();
+    Eigen::Vector3d center_motion_observer_velocity = Eigen::Vector3d::Zero();
+    Eigen::Vector3d center_motion_observer_raw_velocity = Eigen::Vector3d::Zero();
+    double center_motion_observer_confidence = 0.0;
+    std::uint32_t center_motion_observer_samples = 0;
+    bool yaw_rate_observer_valid = false;
+    uint64_t yaw_rate_observer_timestamp_us = 0;
+    double yaw_rate_observer_yaw = 0.0;
+    double yaw_rate_observer_value = 0.0;
+    std::uint32_t yaw_rate_observer_samples = 0;
+    bool sp_range_filter_valid = false;
+    uint64_t sp_range_filter_timestamp_us = 0;
+    int sp_range_filter_face = -1;
+    double sp_range_filter_distance = 0.0;
 
     // 另一片装甲板信息
     double dz = 0.0;
@@ -616,6 +675,7 @@ using armor_tracker_detail::SingleArmorModeEnabled;
 using armor_tracker_detail::SymmetricGeometryEnabled;
 using armor_tracker_detail::SpDeltaZInitialVariance;
 using armor_tracker_detail::SpDeltaZProcessVariance;
+using armor_tracker_detail::SpDeltaRadiusShrinkAlpha;
 using armor_tracker_detail::SpDirectDeltaZAlpha;
 using armor_tracker_detail::SpDirectDeltaZEnabled;
 using armor_tracker_detail::SpDirectDeltaZMaxAbs;
@@ -641,6 +701,21 @@ using armor_tracker_detail::SpPairGeometryMinDeterminant;
 using armor_tracker_detail::SpPairGeometryRadiusVariance;
 using armor_tracker_detail::SpPairGeometryYawVariance;
 using armor_tracker_detail::SpMeasurementAnchoredOutputEnabled;
+using armor_tracker_detail::SpFixedPoseYawCoarseStepDeg;
+using armor_tracker_detail::SpFixedPoseYawFineStepDeg;
+using armor_tracker_detail::SpFixedPoseYawMinGainPx;
+using armor_tracker_detail::SpFixedPoseYawOptimizeEnabled;
+using armor_tracker_detail::SpFixedPoseYawPitchDeg;
+using armor_tracker_detail::SpFixedPoseYawRangeDeg;
+using armor_tracker_detail::SpCenterMotionObserverEnabled;
+using armor_tracker_detail::SpCenterMotionObserverRadialVelocityEnabled;
+using armor_tracker_detail::SpYawRateObserverAlpha;
+using armor_tracker_detail::SpYawRateObserverBlend;
+using armor_tracker_detail::SpYawRateObserverEnabled;
+using armor_tracker_detail::SpYawRateObserverMaxBlendDelta;
+using armor_tracker_detail::SpYawRateObserverMaxRaw;
+using armor_tracker_detail::SpYawRateObserverMinSamples;
+using armor_tracker_detail::SpYawRateObserverTau;
 using armor_tracker_detail::SpOutputExtrapolateSeconds;
 using armor_tracker_detail::SpMeasurementRecenterAlphaBad;
 using armor_tracker_detail::SpMeasurementRecenterAlphaGood;

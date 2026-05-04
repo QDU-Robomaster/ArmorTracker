@@ -181,7 +181,8 @@ Eigen::Vector3d ArmorTracker<CameraInfoV>::GetCameraWorldPosition()
 template <CameraTypes::CameraInfo CameraInfoV>
 bool ArmorTracker<CameraInfoV>::ApplyFaceSelection(
     const armor_tracker::FaceSelectionResult& selection,
-    CandidateDebugMsg& candidate_debug, bool freeze_delta_z)
+    CandidateDebugMsg& candidate_debug, bool freeze_delta_z,
+    uint64_t image_timestamp_us)
 {
   rt_.info_position_diff = selection.info_position_diff;
   rt_.info_yaw_diff = selection.info_yaw_diff;
@@ -221,7 +222,13 @@ bool ArmorTracker<CameraInfoV>::ApplyFaceSelection(
 
   ApplySelectedIdentity(selected_candidate);
   ApplySelectedFaceBinding(selected_candidate, did_face_switch);
-  SpUpdate(selected_candidate.armor, sp_match, freeze_delta_z);
+  SpUpdate(selected_candidate.armor, sp_match, freeze_delta_z, image_timestamp_us,
+           &candidate_debug);
+  if (SpCenterMotionObserverEnabled())
+  {
+    SpUpdateCenterMotionObserver(selected_candidate.armor, sp_match,
+                                 image_timestamp_us);
+  }
   rt_.tracked_armor = selected_candidate.armor;
   rt_.tracked_armors_num =
       static_cast<ArmorsNum>(SpArmorCountFor(selected_candidate.armor));
@@ -336,4 +343,195 @@ Eigen::Vector3d ArmorTracker<CameraInfoV>::GetArmorPositionFromState(const Eigen
                                                         int face_index) const
 {
   return SpArmorPosition(x, face_index);
+}
+
+template <CameraTypes::CameraInfo CameraInfoV>
+void ArmorTracker<CameraInfoV>::OptimizeArmorYawMeasurements(
+    ArmorDetectorResults& armors_msg,
+    const LibXR::Transform<double>& camera_pose_world) const
+{
+  if (!SpFixedPoseYawOptimizeEnabled())
+  {
+    return;
+  }
+
+  for (auto& armor : armors_msg)
+  {
+    OptimizeSingleArmorYawMeasurement(armor, camera_pose_world);
+  }
+}
+
+template <CameraTypes::CameraInfo CameraInfoV>
+bool ArmorTracker<CameraInfoV>::OptimizeSingleArmorYawMeasurement(
+    ArmorDetectorResult& armor,
+    const LibXR::Transform<double>& camera_pose_world) const
+{
+  if (!armor.pnp_valid)
+  {
+    return false;
+  }
+
+  const bool is_balance =
+      armor.type == ArmorType::LARGE &&
+      (armor.number == ArmorNumber::THREE ||
+       armor.number == ArmorNumber::FOUR ||
+       armor.number == ArmorNumber::FIVE);
+  if (is_balance)
+  {
+    return false;
+  }
+
+  const double raw_yaw = armor_tracker::QuaternionToYaw(armor.pose.rotation);
+  if (!std::isfinite(raw_yaw))
+  {
+    return false;
+  }
+
+  const double pitch_abs = SpFixedPoseYawPitchDeg() * M_PI / 180.0;
+  const std::array<double, 2> pitch_candidates = {pitch_abs, -pitch_abs};
+  double raw_fixed_error = std::numeric_limits<double>::infinity();
+  for (const double pitch : pitch_candidates)
+  {
+    raw_fixed_error =
+        std::min(raw_fixed_error,
+                 ArmorYawReprojectionError(armor, camera_pose_world, raw_yaw, pitch));
+  }
+  if (!std::isfinite(raw_fixed_error))
+  {
+    return false;
+  }
+
+  double best_yaw = raw_yaw;
+  double best_pitch = pitch_candidates[0];
+  double best_error = raw_fixed_error;
+  const double search_range = SpFixedPoseYawRangeDeg() * M_PI / 180.0;
+  const double coarse_step = SpFixedPoseYawCoarseStepDeg() * M_PI / 180.0;
+  const double fine_step = SpFixedPoseYawFineStepDeg() * M_PI / 180.0;
+
+  auto try_candidate = [&](double yaw, double pitch)
+  {
+    const double error =
+        ArmorYawReprojectionError(armor, camera_pose_world, yaw, pitch);
+    if (std::isfinite(error) && error < best_error)
+    {
+      best_error = error;
+      best_yaw = yaw;
+      best_pitch = pitch;
+    }
+  };
+
+  for (const double pitch : pitch_candidates)
+  {
+    for (double offset = -search_range; offset <= search_range + 1e-9;
+         offset += coarse_step)
+    {
+      try_candidate(raw_yaw + offset, pitch);
+    }
+  }
+
+  const double fine_range = std::max(coarse_step, 4.0 * fine_step);
+  for (const double pitch : pitch_candidates)
+  {
+    for (double offset = -fine_range; offset <= fine_range + 1e-9;
+         offset += fine_step)
+    {
+      try_candidate(best_yaw + offset, pitch);
+    }
+  }
+
+  if (raw_fixed_error - best_error < SpFixedPoseYawMinGainPx())
+  {
+    return false;
+  }
+
+  const Eigen::AngleAxisd yaw_rotation(best_yaw, Eigen::Vector3d::UnitZ());
+  const Eigen::AngleAxisd pitch_rotation(best_pitch, Eigen::Vector3d::UnitY());
+  armor.pose.rotation =
+      LibXR::Quaternion<double>((yaw_rotation * pitch_rotation).toRotationMatrix());
+  return true;
+}
+
+template <CameraTypes::CameraInfo CameraInfoV>
+double ArmorTracker<CameraInfoV>::ArmorYawReprojectionError(
+    const ArmorDetectorResult& armor,
+    const LibXR::Transform<double>& camera_pose_world,
+    double yaw_rad, double pitch_rad) const
+{
+  const double half_width_m =
+      ((armor.type == ArmorType::LARGE) ? 225.0 : 135.0) * 0.5 / 1000.0;
+  constexpr double half_height_m = 56.0 * 0.5 / 1000.0;
+  const std::vector<cv::Point3f> object_points = {
+      {0.0F, static_cast<float>(half_width_m), static_cast<float>(-half_height_m)},
+      {0.0F, static_cast<float>(half_width_m), static_cast<float>(half_height_m)},
+      {0.0F, static_cast<float>(-half_width_m), static_cast<float>(half_height_m)},
+      {0.0F, static_cast<float>(-half_width_m), static_cast<float>(-half_height_m)}};
+  const std::vector<cv::Point2f> image_points = {
+      armor.points[3], armor.points[0], armor.points[1], armor.points[2]};
+
+  const auto r_wc = camera_pose_world.rotation.ToRotationMatrix();
+  const Eigen::Matrix3d r_cw = r_wc.transpose();
+  const Eigen::Vector3d t_wc(camera_pose_world.translation.x(),
+                             camera_pose_world.translation.y(),
+                             camera_pose_world.translation.z());
+  const Eigen::Vector3d t_aw(armor.pose.translation.x(),
+                             armor.pose.translation.y(),
+                             armor.pose.translation.z());
+  const Eigen::Vector3d t_ac = r_cw * (t_aw - t_wc);
+  if (!t_ac.allFinite() || t_ac.z() <= 1e-6)
+  {
+    return std::numeric_limits<double>::infinity();
+  }
+
+  const Eigen::AngleAxisd yaw_rotation(yaw_rad, Eigen::Vector3d::UnitZ());
+  const Eigen::AngleAxisd pitch_rotation(pitch_rad, Eigen::Vector3d::UnitY());
+  const Eigen::Matrix3d r_aw =
+      (yaw_rotation * pitch_rotation).toRotationMatrix();
+  const Eigen::Matrix3d r_ac = r_cw * r_aw;
+
+  cv::Mat rmat(3, 3, CV_64F);
+  for (int row = 0; row < 3; ++row)
+  {
+    for (int col = 0; col < 3; ++col)
+    {
+      rmat.at<double>(row, col) = r_ac(row, col);
+    }
+  }
+  cv::Mat rvec;
+  cv::Rodrigues(rmat, rvec);
+  const cv::Mat tvec =
+      (cv::Mat_<double>(3, 1) << t_ac.x(), t_ac.y(), t_ac.z());
+  const cv::Mat camera_matrix =
+      cv::Mat(3, 3, CV_64F,
+              const_cast<double*>(kCameraInfo.camera_matrix.data()))
+          .clone();
+
+  cv::Mat dist_coeffs;
+  constexpr auto dist_info = CameraTypes::BuildPnPDistCoeffs(kCameraInfo);
+  if constexpr (!dist_info.requires_undistort_first && dist_info.size > 0)
+  {
+    dist_coeffs =
+        cv::Mat(1, static_cast<int>(dist_info.size), CV_64F,
+                const_cast<double*>(dist_info.values.data()))
+            .clone();
+  }
+
+  std::vector<cv::Point2f> projected;
+  cv::projectPoints(object_points, rvec, tvec, camera_matrix, dist_coeffs,
+                    projected);
+  if (projected.size() != image_points.size())
+  {
+    return std::numeric_limits<double>::infinity();
+  }
+
+  double error = 0.0;
+  for (std::size_t index = 0; index < image_points.size(); ++index)
+  {
+    const double point_error = cv::norm(projected[index] - image_points[index]);
+    if (!std::isfinite(point_error))
+    {
+      return std::numeric_limits<double>::infinity();
+    }
+    error += point_error;
+  }
+  return error;
 }

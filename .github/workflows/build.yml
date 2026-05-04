@@ -50,6 +50,7 @@ jobs:
           set(WEBOTS_HOME /usr/local/webots)
           set(LIBXR_PRINT_FLOAT_ENABLE_DOUBLE ON CACHE BOOL "" FORCE)
           set(LIBXR_PRINT_INTEGER_ENABLE_64BIT ON CACHE BOOL "" FORCE)
+          set(LIBXR_PRINT_ENABLE_POINTER ON CACHE BOOL "" FORCE)
           add_subdirectory(libxr)
           set_property(TARGET xr PROPERTY CXX_STANDARD 20)
           set_property(TARGET xr PROPERTY CXX_STANDARD_REQUIRED ON)

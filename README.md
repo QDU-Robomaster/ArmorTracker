@@ -27,8 +27,9 @@
 
 `ArmorTracker` 主体是模板头文件实现。`TableGenerator.cpp` 是离线弹道表生成工具，不应链接进运行时目标。
 
-tracker 日志会输出 `double` 观测量和 `uint64_t` 图像时间戳，模块 CMake 会显式打开 libxr 的
-`LIBXR_PRINT_FLOAT_ENABLE_DOUBLE` 和 `LIBXR_PRINT_INTEGER_ENABLE_64BIT`。
+tracker 日志会输出 `double` 观测量和 `uint64_t` 图像时间戳。BSP 或 CI 的顶层 CMake 必须在
+`add_subdirectory(libxr)` 前显式打开 `LIBXR_PRINT_FLOAT_ENABLE_DOUBLE` 和
+`LIBXR_PRINT_INTEGER_ENABLE_64BIT`。
 
 ## 弹道表
 
