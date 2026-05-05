@@ -7,7 +7,7 @@
 
 #include <opencv2/imgproc.hpp>
 
-#include "armor.hpp"
+#include "ArmorDetectorTypes.hpp"
 #include "cycle_value.hpp"
 #include "logger.hpp"
 #include "transform.hpp"

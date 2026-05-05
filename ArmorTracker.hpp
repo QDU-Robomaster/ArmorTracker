@@ -102,7 +102,7 @@ depends:
 #include "CameraFrameSync.hpp"
 #include "SolveTrajectory.hpp"
 #include "app_framework.hpp"
-#include "armor.hpp"
+#include "ArmorDetectorTypes.hpp"
 #include "cycle_value.hpp"
 #include "extended_kalman_filter.hpp"
 #include "libxr_time.hpp"

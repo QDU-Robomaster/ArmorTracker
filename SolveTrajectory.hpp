@@ -9,7 +9,7 @@
 #include <vector>
 
 #include "TrajectoryCompensationTable.hpp"
-#include "armor.hpp"
+#include "ArmorDetectorTypes.hpp"
 
 /**
  * @brief Solve projectile pitch/yaw aiming for rotating multi-armor targets.
@@ -74,7 +74,7 @@ class SolveTrajectory
   {
     uint64_t image_timestamp_us{};          ///< 图像传感器时间戳 [us]
     bool tracking;                         ///< 是否正在追踪
-    ArmorNumber id;                        ///< 目标ID（来自 armor.hpp）
+    ArmorNumber id;                        ///< 目标ID（来自 ArmorDetectorTypes.hpp）
     int armors_num;                        ///< 装甲板数量（3 或 4）
     Eigen::Matrix<double, 3, 1> position;  ///< 世界系目标中心位置 [m]
     Eigen::Matrix<double, 3, 1> velocity;  ///< 世界系目标线速度 [m/s]
