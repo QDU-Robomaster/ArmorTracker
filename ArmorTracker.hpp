@@ -100,6 +100,7 @@ depends:
 #include "ArmorTrackerRuntimeSupport.hpp"
 #include "ArmorTrackerSelectionSupport.hpp"
 #include "CameraFrameSync.hpp"
+#include "RobotGameReferee.hpp"
 #include "SolveTrajectory.hpp"
 #include "app_framework.hpp"
 #include "ArmorDetectorTypes.hpp"
@@ -985,18 +986,19 @@ ArmorTracker<CameraInfoV>::ArmorTracker(LibXR::HardwareContainer& hw,
       this);
   armors_topic.RegisterCallback(armors_cb);
 
-  // 弹丸速度订阅（用于弹道解算初始化）
-  LibXR::Topic::Domain referee_domain = LibXR::Topic::Domain("referee");
-  LibXR::Topic bullet_speed_tp =
-      LibXR::Topic::FindOrCreate<float>("bullet_speed", &referee_domain);
+  // 裁判系统摘要包订阅，用完整大包更新弹道解算弹速。
+  LibXR::Topic::Domain host_domain = LibXR::Topic::Domain("host");
+  LibXR::Topic robot_game_ref_tp =
+      LibXR::Topic::FindOrCreate<RobotGameReferee::Pack>("robot_game_ref",
+                                                         &host_domain);
   auto velocity_cb = LibXR::Topic::Callback::Create(
       [](bool, ArmorTracker* self, LibXR::RawData& data)
       {
-        auto velocity_msg = reinterpret_cast<float*>(data.addr_);
-        self->VelocityCallback(*velocity_msg);
+        auto* referee_msg = reinterpret_cast<RobotGameReferee::Pack*>(data.addr_);
+        self->VelocityCallback(referee_msg->launcher_data.bullet_speed);
       },
       this);
-  bullet_speed_tp.RegisterCallback(velocity_cb);
+  robot_game_ref_tp.RegisterCallback(velocity_cb);
 
   if (const char* audit_env = std::getenv("XR_TRACKER_STATE_AUDIT_PATH"))
   {
