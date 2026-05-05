@@ -100,6 +100,7 @@ void ArmorTracker<CameraInfoV>::ApplySelectedFaceBinding(
   const int tracked_face_track_before =
       rt_.tracked_face_track_id_valid ? static_cast<int>(rt_.tracked_face_track_id)
                                       : -1;
+  UNUSED(tracked_face_track_before);
   auto binding_runtime = BuildFaceBindingRuntime();
   armor_tracker::ApplySelectedFaceBinding(binding_runtime, selected_candidate,
                                           did_face_switch);

@@ -69,9 +69,9 @@ void ArmorTracker<CameraInfoV>::Init(const ArmorDetectorResults& armors_msg)
       SyncGeometryRuntimeFromState();
       ekf_.ekf.SetState(ekf_.state);
       XR_LOG_DEBUG(
-          "SP pair shape init: left=(%zu/%d) right=(%zu/%d) score=%.3f geom=%d dz_valid=%d r=(%.3f,%.3f) dz=%.4f",
-          init_pair_match.left.armor_index, init_pair_match.left_face,
-          init_pair_match.right.armor_index, init_pair_match.right_face,
+          "SP pair shape init: left=(%u/%d) right=(%u/%d) score=%.3f geom=%d dz_valid=%d r=(%.3f,%.3f) dz=%.4f",
+          static_cast<unsigned>(init_pair_match.left.armor_index), init_pair_match.left_face,
+          static_cast<unsigned>(init_pair_match.right.armor_index), init_pair_match.right_face,
           init_pair_match.score, init_pair_match.geometry_valid ? 1 : 0,
           init_pair_match.dz_valid ? 1 : 0,
           ekf_.state(ExtendedKalmanFilter::ROBOT_R),
@@ -237,10 +237,10 @@ void ArmorTracker<CameraInfoV>::Update(const ArmorDetectorResults& armors_msg,
       SyncGeometryRuntimeFromState();
       ekf_.ekf.SetState(ekf_.state);
       XR_LOG_DEBUG(
-          "SP pair shape update: matched=%d selected=(armor=%zu face=%d) left=(%zu/%d) right=(%zu/%d) score=%.3f geom=%d dz_valid=%d r=(%.3f,%.3f) dz=%.4f",
-          matched ? 1 : 0, selected_armor_index, selected_canonical_face,
-          pair_match.left.armor_index, pair_match.left_face,
-          pair_match.right.armor_index, pair_match.right_face, pair_match.score,
+          "SP pair shape update: matched=%d selected=(armor=%u face=%d) left=(%u/%d) right=(%u/%d) score=%.3f geom=%d dz_valid=%d r=(%.3f,%.3f) dz=%.4f",
+          matched ? 1 : 0, static_cast<unsigned>(selected_armor_index), selected_canonical_face,
+          static_cast<unsigned>(pair_match.left.armor_index), pair_match.left_face,
+          static_cast<unsigned>(pair_match.right.armor_index), pair_match.right_face, pair_match.score,
           pair_match.geometry_valid ? 1 : 0, pair_match.dz_valid ? 1 : 0,
           ekf_.state(ExtendedKalmanFilter::ROBOT_R),
           ekf_.state(ExtendedKalmanFilter::ROBOT_R) +
@@ -250,10 +250,10 @@ void ArmorTracker<CameraInfoV>::Update(const ArmorDetectorResults& armors_msg,
     else
     {
       XR_LOG_DEBUG(
-          "SP pair shape skipped: matched=%d selected=(armor=%zu face=%d) pair=(left=%zu/%d right=%zu/%d) score=%.3f",
-          matched ? 1 : 0, selected_armor_index, selected_canonical_face,
-          pair_match.left.armor_index, pair_match.left_face,
-          pair_match.right.armor_index, pair_match.right_face, pair_match.score);
+          "SP pair shape skipped: matched=%d selected=(armor=%u face=%d) pair=(left=%u/%d right=%u/%d) score=%.3f",
+          matched ? 1 : 0, static_cast<unsigned>(selected_armor_index), selected_canonical_face,
+          static_cast<unsigned>(pair_match.left.armor_index), pair_match.left_face,
+          static_cast<unsigned>(pair_match.right.armor_index), pair_match.right_face, pair_match.score);
     }
   }
 
@@ -509,10 +509,10 @@ bool ArmorTracker<CameraInfoV>::TryRecoverTempLost(
   candidate_debug.accepted_mode =
       static_cast<uint8_t>(armor_tracker::FaceSelectionAcceptedMode::RELAXED_SAME_FACE);
   XR_LOG_DEBUG(
-      "Tracker TEMP_LOST recover: tracked_face_before=%d tracked_face_after=%d phase_cost=%.3f armor=%zu num=%d img=%d confirmed=%d score=%.3f center=%.1f area=%.3f frontality=%.3f yaw=%.3f phase_pos=[%.3f,%.3f,%.3f,%.3f] phase_yaw=[%.3f,%.3f,%.3f,%.3f]",
+      "Tracker TEMP_LOST recover: tracked_face_before=%d tracked_face_after=%d phase_cost=%.3f armor=%u num=%d img=%d confirmed=%d score=%.3f center=%.1f area=%.3f frontality=%.3f yaw=%.3f phase_pos=[%.3f,%.3f,%.3f,%.3f] phase_yaw=[%.3f,%.3f,%.3f,%.3f]",
       tracked_face_before_recover,
       recovered_face_phase, recovered_face_cost,
-      best.armor_index, static_cast<int>(best.armor.number), best.image_track_id,
+      static_cast<unsigned>(best.armor_index), static_cast<int>(best.armor.number), best.image_track_id,
       best.confirmed_image_track ? 1 : 0, best.score, best.image_center,
       best.area_score, best.frontality, best.measured_yaw,
       best.phase_position_diff[0], best.phase_position_diff[1],
@@ -558,27 +558,36 @@ void ArmorTracker<CameraInfoV>::ArmorsCallback(DetectionPacket* packet)
   if (source_frame.image_frame->timestamp_us != image_timestamp_us)
   {
     XR_LOG_ERROR(
-        "ArmorTracker detector packet timestamp mismatch image=%llu packet=%llu",
-        static_cast<unsigned long long>(source_frame.image_frame->timestamp_us),
-        static_cast<unsigned long long>(image_timestamp_us));
+        "ArmorTracker detector packet timestamp mismatch image=%u packet=%u",
+        static_cast<unsigned>(source_frame.image_frame->timestamp_us),
+        static_cast<unsigned>(image_timestamp_us));
     return;
   }
   if (packet->detections->image_timestamp_us != image_timestamp_us)
   {
     XR_LOG_ERROR(
-        "ArmorTracker detector result timestamp mismatch result=%llu packet=%llu",
-        static_cast<unsigned long long>(packet->detections->image_timestamp_us),
-        static_cast<unsigned long long>(image_timestamp_us));
+        "ArmorTracker detector result timestamp mismatch result=%u packet=%u",
+        static_cast<unsigned>(packet->detections->image_timestamp_us),
+        static_cast<unsigned>(image_timestamp_us));
     return;
   }
 
   ArmorDetectorResults armors_msg = packet->detections->results;
+  armors_msg.erase(
+      std::remove_if(armors_msg.begin(), armors_msg.end(),
+                     [](const ArmorDetectorResult& armor)
+                     {
+                       return !armor.pnp_valid;
+                     }),
+      armors_msg.end());
+
   const LibXR::Transform<double> camera_pose_world =
       ArmorTrackerCameraRotationToTrackerWorldPose(
           armor_tracker_detail::PackedCameraRotation(source_frame.imu->rotation_wxyz),
           armor_tracker_detail::PackedCameraTranslation(
               source_frame.imu->translation_xyz),
-          io_.gimbal_to_camera_transform_static);
+          io_.gimbal_to_camera_transform_static,
+          io_.camera_pose_runtime);
   io_.current_camera_pose = camera_pose_world;
   io_.current_camera_pose_valid = true;
 

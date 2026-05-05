@@ -610,6 +610,7 @@ class ArmorTracker : public LibXR::Application
     LibXR::Transform<double> gimbal_to_camera_transform_static{};
     LibXR::Transform<double> current_camera_pose{};
     bool current_camera_pose_valid = false;
+    armor_tracker_detail::CameraPoseRuntime camera_pose_runtime{};
 
     // tracker 只发布跟踪状态和调试信息；云台命令由 Aimer 发布。
     LibXR::Topic::Domain tracker_domain = LibXR::Topic::Domain("tracker");
@@ -1270,8 +1271,8 @@ std::optional<ArmorDetectorResult> ArmorTracker<CameraInfoV>::SelectSingleArmorO
       if (suspicious_pose_jump)
       {
         XR_LOG_DEBUG(
-            "SingleArmor reject pose jump: idx=%zu track=%d yaw_jump=%.3f center_diff=%.1f area_log=%.3f prev=(%.3f,%.3f,%.3f) now=(%.3f,%.3f,%.3f)",
-            armor_index, detection_track_id, yaw_jump,
+            "SingleArmor reject pose jump: idx=%u track=%d yaw_jump=%.3f center_diff=%.1f area_log=%.3f prev=(%.3f,%.3f,%.3f) now=(%.3f,%.3f,%.3f)",
+            static_cast<unsigned>(armor_index), detection_track_id, yaw_jump,
             static_cast<double>(center_diff), static_cast<double>(area_log), rt_.tracked_armor.pose.translation.x(),
             rt_.tracked_armor.pose.translation.y(), rt_.tracked_armor.pose.translation.z(),
             armor.pose.translation.x(), armor.pose.translation.y(),

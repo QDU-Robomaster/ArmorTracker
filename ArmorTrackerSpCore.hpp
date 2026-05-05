@@ -590,8 +590,8 @@ bool ArmorTracker<CameraInfoV>::SpTryCanonicalizeInitialState(
   SyncGeometryRuntimeFromState();
   ekf_.ekf.SetState(ekf_.state);
   XR_LOG_DEBUG(
-      "SP canonical init: force=%d obs=%zu score=%.3f face=%d dz=%.4f yaw=%.3f",
-      force ? 1 : 0, observations.size(), best.score, best.tracked_face,
+      "SP canonical init: force=%d obs=%u score=%.3f face=%d dz=%.4f yaw=%.3f",
+      force ? 1 : 0, static_cast<unsigned>(observations.size()), best.score, best.tracked_face,
       best.dz, best.yaw);
   return true;
 }
@@ -1409,12 +1409,15 @@ void ArmorTracker<CameraInfoV>::SpUpdate(const ArmorDetectorResult& armor,
     }
 
     const double range = std::max(1e-6, armor_xyz.norm());
+    const double detector_variance_scale =
+        armor_tracker::DetectorObservationVarianceScale(armor);
     const double position_sigma =
+        std::sqrt(detector_variance_scale) *
         std::max(0.005, SpXyzMeasurementRFactor(cfg_.noise.r_xyz_factor) * range);
     Eigen::VectorXd r_diag(4);
     r_diag << position_sigma * position_sigma,
         position_sigma * position_sigma, position_sigma * position_sigma,
-        SpXyzMeasurementYawVariance(cfg_.noise.r_yaw);
+        detector_variance_scale * SpXyzMeasurementYawVariance(cfg_.noise.r_yaw);
 
     Eigen::VectorXd z(4);
     z << armor_xyz.x(), armor_xyz.y(), armor_xyz.z(), match.measured_yaw;
@@ -1476,11 +1479,16 @@ void ArmorTracker<CameraInfoV>::SpUpdate(const ArmorDetectorResult& armor,
 
   const double center_yaw = std::atan2(armor_xyz.y(), armor_xyz.x());
   const double delta_angle = SpLimitRad(match.measured_yaw - center_yaw);
+  const double detector_variance_scale =
+      armor_tracker::DetectorObservationVarianceScale(armor);
   Eigen::VectorXd r_diag(4);
-  r_diag << 4e-3, 4e-3 * SpPitchVarianceScale(),
-      (std::log(std::abs(delta_angle) + 1.0) + 1.0) *
+  r_diag << detector_variance_scale * 4e-3,
+      detector_variance_scale * 4e-3 * SpPitchVarianceScale(),
+      detector_variance_scale *
+          (std::log(std::abs(delta_angle) + 1.0) + 1.0) *
           SpYpdDistanceVarianceScale(),
-      (std::log(std::abs(armor_ypd.z()) + 1.0) / 200.0 + 9e-2) *
+      detector_variance_scale *
+          (std::log(std::abs(armor_ypd.z()) + 1.0) / 200.0 + 9e-2) *
           SpYpdArmorYawVarianceScale();
   const Eigen::MatrixXd r = r_diag.asDiagonal();
 

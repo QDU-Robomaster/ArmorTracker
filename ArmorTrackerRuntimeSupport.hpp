@@ -4,12 +4,30 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 
 #include "ArmorTrackerCommon.hpp"
 #include "CameraBase.hpp"
 
 namespace armor_tracker_detail
 {
+enum class CameraPoseMode : uint8_t
+{
+  FULL,
+  STATIC_ONLY,
+  YAW_ONLY,
+  RELATIVE_IMU,
+  RELATIVE_YAW_ONLY,
+};
+
+struct CameraPoseRuntime
+{
+  bool relative_rotation_initialized = false;
+  LibXR::Quaternion<double> initial_camera_rotation_inverse{};
+  bool relative_yaw_initialized = false;
+  double initial_camera_yaw = 0.0;
+};
+
 inline LibXR::Quaternion<double> PackedCameraRotation(
     const std::array<float, 4>& rotation_wxyz)
 {
@@ -24,13 +42,105 @@ inline LibXR::Position<double> PackedCameraTranslation(
                                  translation_xyz[2]);
 }
 
-inline LibXR::Transform<double> ArmorTrackerCameraRotationToTrackerWorldPose(
-    const LibXR::Quaternion<double>& camera_rotation,
+inline CameraPoseMode ParseCameraPoseMode()
+{
+  const char* env = std::getenv("XR_TRACKER_CAMERA_POSE_MODE");
+  if (env == nullptr || env[0] == '\0' || std::strcmp(env, "full") == 0 ||
+      std::strcmp(env, "default") == 0)
+  {
+    return CameraPoseMode::FULL;
+  }
+  if (std::strcmp(env, "static_only") == 0 || std::strcmp(env, "static") == 0)
+  {
+    return CameraPoseMode::STATIC_ONLY;
+  }
+  if (std::strcmp(env, "yaw_only") == 0 || std::strcmp(env, "yaw") == 0)
+  {
+    return CameraPoseMode::YAW_ONLY;
+  }
+  if (std::strcmp(env, "relative_imu") == 0)
+  {
+    return CameraPoseMode::RELATIVE_IMU;
+  }
+  if (std::strcmp(env, "relative_yaw_only") == 0 ||
+      std::strcmp(env, "relative_yaw") == 0)
+  {
+    return CameraPoseMode::RELATIVE_YAW_ONLY;
+  }
+  return CameraPoseMode::FULL;
+}
+
+inline LibXR::Quaternion<double> CameraYawOnlyRotation(
+    const LibXR::Quaternion<double>& camera_rotation)
+{
+  const Eigen::Vector3d euler =
+      LibXR::RotationMatrix<double>(camera_rotation.ToRotationMatrix()).ToEulerAngle();
+  return LibXR::Quaternion<double>(
+      LibXR::EulerAngle<double>(0.0, 0.0, euler.z()).ToQuaternion());
+}
+
+inline double CameraYaw(const LibXR::Quaternion<double>& camera_rotation)
+{
+  const Eigen::Vector3d euler =
+      LibXR::RotationMatrix<double>(camera_rotation.ToRotationMatrix()).ToEulerAngle();
+  return euler.z();
+}
+
+inline LibXR::Transform<double> ComposeCameraPose(
+    const LibXR::Quaternion<double>& dynamic_rotation,
     const LibXR::Position<double>& camera_translation,
     const LibXR::Transform<double>& gimbal_to_camera_transform_static)
 {
-  return LibXR::Transform<double>(camera_rotation, camera_translation) +
+  return LibXR::Transform<double>(dynamic_rotation, camera_translation) +
          gimbal_to_camera_transform_static;
+}
+
+inline LibXR::Transform<double> ArmorTrackerCameraRotationToTrackerWorldPose(
+    const LibXR::Quaternion<double>& camera_rotation,
+    const LibXR::Position<double>& camera_translation,
+    const LibXR::Transform<double>& gimbal_to_camera_transform_static,
+    CameraPoseRuntime& runtime)
+{
+  switch (ParseCameraPoseMode())
+  {
+    case CameraPoseMode::STATIC_ONLY:
+      return ComposeCameraPose(LibXR::Quaternion<double>(), camera_translation,
+                               gimbal_to_camera_transform_static);
+    case CameraPoseMode::YAW_ONLY:
+      return ComposeCameraPose(CameraYawOnlyRotation(camera_rotation),
+                               camera_translation,
+                               gimbal_to_camera_transform_static);
+    case CameraPoseMode::RELATIVE_IMU:
+    {
+      if (!runtime.relative_rotation_initialized)
+      {
+        runtime.initial_camera_rotation_inverse = -camera_rotation;
+        runtime.relative_rotation_initialized = true;
+      }
+      return ComposeCameraPose(
+          runtime.initial_camera_rotation_inverse * camera_rotation,
+          camera_translation, gimbal_to_camera_transform_static);
+    }
+    case CameraPoseMode::RELATIVE_YAW_ONLY:
+    {
+      const double yaw = CameraYaw(camera_rotation);
+      if (!runtime.relative_yaw_initialized)
+      {
+        runtime.initial_camera_yaw = yaw;
+        runtime.relative_yaw_initialized = true;
+      }
+      return ComposeCameraPose(
+          LibXR::Quaternion<double>(
+              LibXR::EulerAngle<double>(0.0, 0.0,
+                                        yaw - runtime.initial_camera_yaw)
+                  .ToQuaternion()),
+          camera_translation, gimbal_to_camera_transform_static);
+    }
+    case CameraPoseMode::FULL:
+    default:
+      return ComposeCameraPose(camera_rotation, camera_translation,
+                               gimbal_to_camera_transform_static);
+  }
 }
 
 inline bool SingleArmorModeEnabled()
