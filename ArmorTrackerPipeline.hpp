@@ -1,5 +1,16 @@
 #pragma once
 
+/**
+ * @file ArmorTrackerPipeline.hpp
+ * @brief ArmorTracker 每帧处理流水线、状态机和 detector topic 回调实现。
+ *
+ * 该文件负责把 detector 输出、相机同步姿态、整车模型 EKF 更新、调试消息和最终
+ * tracker/target 发布串成一条运行期流水线。
+ */
+
+/**
+ * @brief 从当前帧检测结果中选择初始目标并初始化 EKF。
+ */
 template <CameraTypes::CameraInfo CameraInfoV>
 void ArmorTracker<CameraInfoV>::Init(const ArmorDetectorResults& armors_msg)
 {
@@ -8,22 +19,70 @@ void ArmorTracker<CameraInfoV>::Init(const ArmorDetectorResults& armors_msg)
     return;
   }
 
-  double min_distance = DBL_MAX;
+  double best_score = DBL_MAX;
   ArmorPriority best_priority = ArmorPriority::FIFTH;
   std::size_t tracked_index = 0;
   rt_.tracked_armor = armors_msg[0];
+  bool found_stable_candidate = false;
   for (std::size_t armor_index = 0; armor_index < armors_msg.size(); ++armor_index)
   {
     const auto& armor = armors_msg[armor_index];
-    if (static_cast<int>(armor.priority) < static_cast<int>(best_priority) ||
-        (armor.priority == best_priority &&
-         armor.distance_to_image_center < min_distance))
+    const int detection_track_id = FindDetectionTrackId(armor_index);
+    const bool confirmed_track = IsDetectionTrackConfirmed(armor_index);
+    const bool stable_observation =
+        !ObservationQualityEnabled() ||
+        armor_tracker::StableArmorObservation(
+            armor, ObservationStableMaxReprojectionPx(),
+            ObservationStableMinAreaPx(), ObservationStableMinConfidence());
+    if (!stable_observation && InitRequiresStableObservation())
+    {
+      continue;
+    }
+
+    const double range =
+        std::sqrt(std::pow(armor.pose.translation.x(), 2.0) +
+                  std::pow(armor.pose.translation.y(), 2.0) +
+                  std::pow(armor.pose.translation.z(), 2.0));
+    const double quality_penalty =
+        ObservationQualityEnabled()
+            ? armor_tracker::ArmorObservationQualityPenalty(
+                  armor, ObservationStableMaxReprojectionPx(),
+                  ObservationStableMinAreaPx(), ObservationStableMinConfidence())
+            : 0.0;
+    double score =
+        static_cast<double>(static_cast<int>(armor.priority)) +
+        0.22 * armor.distance_to_image_center / 320.0 +
+        0.10 * range / std::max(cfg_.limits.max_armor_distance, 1e-6) +
+        ObservationQualityScoreWeight() * quality_penalty -
+        0.20 * static_cast<double>(armor.confidence);
+    if (confirmed_track && detection_track_id >= 0)
+    {
+      score -= ObservationConfirmedTrackBonus();
+    }
+    if (stable_observation)
+    {
+      found_stable_candidate = true;
+      score -= 0.12;
+    }
+
+    if (score < best_score - 1e-6 ||
+        (std::abs(score - best_score) <= 1e-6 &&
+         (static_cast<int>(armor.priority) < static_cast<int>(best_priority) ||
+          (armor.priority == best_priority &&
+           armor.distance_to_image_center <
+               rt_.tracked_armor.distance_to_image_center))))
     {
       best_priority = armor.priority;
-      min_distance = armor.distance_to_image_center;
+      best_score = score;
       tracked_index = armor_index;
       rt_.tracked_armor = armor;
     }
+  }
+  if (InitRequiresStableObservation() && !found_stable_candidate)
+  {
+    XR_LOG_DEBUG("Tracker init skipped: no stable observation among %u detections",
+                 static_cast<unsigned>(armors_msg.size()));
+    return;
   }
 
   const int detection_track_id = FindDetectionTrackId(tracked_index);
@@ -42,13 +101,45 @@ void ArmorTracker<CameraInfoV>::Init(const ArmorDetectorResults& armors_msg)
 
   rt_.tracked_id = rt_.tracked_armor.number;
   rt_.tracked_armors_num =
-      static_cast<ArmorsNum>(SpArmorCountFor(rt_.tracked_armor));
-  rt_.sp_initial_phase_resolved = false;
-  rt_.sp_pair_delta_z_valid = false;
+      static_cast<ArmorsNum>(VehicleArmorCountFor(rt_.tracked_armor));
+  rt_.model_initial_phase_resolved = false;
+  rt_.model_pair_delta_z_valid = false;
   rt_.measurement_valid_current_frame = false;
+  rt_.center_motion_observer_valid = false;
+  rt_.center_motion_observer_samples = 0;
+  rt_.center_motion_observer_confidence = 0.0;
+  rt_.yaw_rate_observer_valid = false;
+  rt_.yaw_rate_observer_samples = 0;
+  rt_.model_range_filter_valid = false;
+  rt_.output_anchor_delta_valid = false;
   InitEKF(rt_.tracked_armor);
-  rt_.sp_initial_phase_resolved =
-      SpTryCanonicalizeInitialState(armors_msg, true);
+  rt_.model_initial_phase_resolved =
+      VehicleTryCanonicalizeInitialState(armors_msg, true);
+  if ((VehiclePairGeometryEnabled() || VehiclePairDeltaZEnabled()) &&
+      rt_.tracked_armors_num == ArmorsNum::NORMAL_4)
+  {
+    VehiclePairMatch init_pair_match{};
+    if (VehicleResolvePairMatch(armors_msg, ekf_.state, init_pair_match))
+    {
+      VehicleApplyPairGeometryUpdate(init_pair_match);
+      if (init_pair_match.dz_valid)
+      {
+        rt_.model_pair_delta_z_valid = true;
+      }
+      SyncGeometryRuntimeFromState();
+      ekf_.ekf.SetState(ekf_.state);
+      XR_LOG_DEBUG(
+          "whole-body model pair shape init: left=(%u/%d) right=(%u/%d) score=%.3f geom=%d dz_valid=%d r=(%.3f,%.3f) dz=%.4f",
+          static_cast<unsigned>(init_pair_match.left.armor_index), init_pair_match.left_face,
+          static_cast<unsigned>(init_pair_match.right.armor_index), init_pair_match.right_face,
+          init_pair_match.score, init_pair_match.geometry_valid ? 1 : 0,
+          init_pair_match.dz_valid ? 1 : 0,
+          ekf_.state(ExtendedKalmanFilter::ROBOT_R),
+          ekf_.state(ExtendedKalmanFilter::ROBOT_R) +
+              ekf_.state(ExtendedKalmanFilter::DELTA_R),
+          ekf_.state(ExtendedKalmanFilter::DELTA_Z));
+    }
+  }
   XR_LOG_DEBUG("Init EKF!");
 
   rt_.state = State::DETECTING;
@@ -60,6 +151,9 @@ void ArmorTracker<CameraInfoV>::Init(const ArmorDetectorResults& armors_msg)
   candidate_debug_msg_ = CandidateDebugMsg{};
 }
 
+/**
+ * @brief 对一帧检测结果执行预测、候选选择、EKF 更新和状态审计。
+ */
 template <CameraTypes::CameraInfo CameraInfoV>
 void ArmorTracker<CameraInfoV>::Update(const ArmorDetectorResults& armors_msg,
                                        uint64_t image_timestamp_us)
@@ -70,30 +164,28 @@ void ArmorTracker<CameraInfoV>::Update(const ArmorDetectorResults& armors_msg,
     return;
   }
 
-  SpPredict();
+  VehiclePredict();
   Eigen::VectorXd ekf_prediction = ekf_.state;
-  if (SpCanonicalInitEnabled())
+  if (VehicleCanonicalInitEnabled())
   {
     if (rt_.update_count <=
-        static_cast<int>(SpCanonicalInitMaxUpdates()))
+        static_cast<int>(VehicleCanonicalInitMaxUpdates()))
     {
-      if (SpTryCanonicalizeInitialState(
-              armors_msg, !rt_.sp_initial_phase_resolved))
+      if (VehicleTryCanonicalizeInitialState(
+              armors_msg, !rt_.model_initial_phase_resolved))
       {
-        rt_.sp_initial_phase_resolved = true;
+        rt_.model_initial_phase_resolved = true;
         ekf_prediction = ekf_.state;
       }
     }
   }
-  XR_LOG_DEBUG("SP tracker predict");
+  XR_LOG_DEBUG("whole-body model tracker predict");
   bool matched = false;
   rt_.measurement_valid_current_frame = false;
-  const bool pair_delta_z_mode =
-      SpPairDeltaZEnabled() && rt_.tracked_armors_num == ArmorsNum::NORMAL_4 &&
+  const bool freeze_single_observation_delta_z =
+      VehicleFreezeSingleObservationDeltaZEnabled() && VehiclePairDeltaZEnabled() &&
+      rt_.tracked_armors_num == ArmorsNum::NORMAL_4 &&
       rt_.state == State::TRACKING;
-  SpPairMatch pair_match{};
-  const bool has_pair_match =
-      pair_delta_z_mode && SpResolvePairMatch(armors_msg, ekf_prediction, pair_match);
   ArmorTracker<CameraInfoV>::CandidateDebugMsg candidate_debug{};
   std::fill(candidate_debug.detection_track_ids.begin(),
             candidate_debug.detection_track_ids.end(), static_cast<int16_t>(-1));
@@ -123,115 +215,116 @@ void ArmorTracker<CameraInfoV>::Update(const ArmorDetectorResults& armors_msg,
   armor_tracker::FaceSelectionResult face_selection{};
   const armor_tracker::FaceSelectionResult* audit_selection = nullptr;
 
-  if (has_pair_match)
+  const int previous_face = rt_.tracked_face_index;
+  face_selection = armor_tracker::SelectFaceMatch(
+      armors_msg, BuildFaceSelectionTrackedState(), face_policy,
+      GetCameraWorldPosition(),
+      ekf_prediction(ExtendedKalmanFilter::V_YAW),
+      [this](std::size_t armor_index)
+      {
+        return FindDetectionTrackId(armor_index);
+      },
+      [this](std::size_t armor_index)
+      {
+        return IsDetectionTrackConfirmed(armor_index);
+      },
+      [this, &ekf_prediction](int local_face_index)
+      {
+        return GetArmorPositionFromState(
+            ekf_prediction, LocalFaceToCanonicalFace(local_face_index));
+      },
+      [this, &ekf_prediction](int local_face_index)
+      {
+        return GetArmorYawFromState(
+            ekf_prediction, LocalFaceToCanonicalFace(local_face_index));
+      });
+  audit_selection = &face_selection;
+  FillCandidateDebugFromSelection(face_selection, candidate_debug);
+
+  std::size_t selected_armor_index = 0;
+  int selected_canonical_face = -1;
+  if (face_selection.has_selected_candidate)
   {
-    matched = true;
-    candidate_debug.has_same_number_candidate = 1;
-    candidate_debug.matched = 1;
-    candidate_debug.accepted_mode = 1;
-    candidate_debug.count = 2;
-    candidate_debug.selected_index =
-        pair_match.tracked_armor_index == pair_match.left.armor_index ? 0 : 1;
-    candidate_debug.best_same_face_score = static_cast<float>(pair_match.score);
-    candidate_debug.same_face_matched = 1;
+    selected_armor_index = face_selection.selected_candidate.armor_index;
+    selected_canonical_face =
+        LocalFaceToCanonicalFace(face_selection.selected_candidate.face_index);
+  }
 
-    const auto fill_item = [this, &candidate_debug, &ekf_prediction](
-                               std::size_t item_index,
-                               const SpPairObservation& observation,
-                               const SpArmorMatch& match)
-    {
-      auto& item = candidate_debug.items[item_index];
-      item.armor_index =
-          static_cast<uint8_t>(std::min<std::size_t>(observation.armor_index, 255));
-      item.face_index = static_cast<uint8_t>(std::max(0, match.id));
-      item.same_number = 1;
-      item.image_track_id =
-          static_cast<int16_t>(FindDetectionTrackId(observation.armor_index));
-      item.image_track_confirmed =
-          IsDetectionTrackConfirmed(observation.armor_index) ? 1 : 0;
-      item.same_persistent_track = 0;
-      item.number = observation.armor.number;
-      item.type = observation.armor.type;
-      item.score = static_cast<float>(match.score);
-      item.position_diff = static_cast<float>(match.xyz_error);
-      item.yaw_diff = static_cast<float>(match.angle_error);
-      item.center_x = observation.armor.center.x;
-      item.center_y = observation.armor.center.y;
-      item.predicted_yaw =
-          static_cast<float>(GetArmorYawFromState(ekf_prediction, match.id));
-      item.measured_yaw = static_cast<float>(match.measured_yaw);
-    };
-    fill_item(0, pair_match.left, pair_match.left_match);
-    fill_item(1, pair_match.right, pair_match.right_match);
-
-    const int previous_face = rt_.tracked_face_index;
-    SpUpdatePair(pair_match);
-    rt_.tracked_armor = pair_match.tracked_armor;
-    rt_.tracked_id = pair_match.tracked_armor.number;
-    rt_.tracked_armors_num =
-        static_cast<ArmorsNum>(SpArmorCountFor(pair_match.tracked_armor));
-    rt_.tracked_face_index = pair_match.tracked_face;
-    rt_.last_yaw = pair_match.tracked_match.measured_yaw;
-    rt_.info_position_diff = pair_match.tracked_match.xyz_error;
-    rt_.info_yaw_diff = pair_match.tracked_match.angle_error;
+  matched = ApplyFaceSelection(face_selection, candidate_debug,
+                               freeze_single_observation_delta_z,
+                               image_timestamp_us);
+  if (matched)
+  {
     rt_.update_count++;
-    if (pair_match.tracked_face != previous_face)
+    if (rt_.tracked_face_index != previous_face)
     {
       rt_.switch_count++;
     }
-    SyncGeometryRuntimeFromState();
-    ekf_.ekf.SetState(ekf_.state);
-    XR_LOG_DEBUG(
-        "SP pair tracker update: tracked_face=%d left_face=%d right_face=%d score=%.3f err=(left_xyz=%.3f right_xyz=%.3f left_angle=%.3f right_angle=%.3f) dz=%.4f",
-        pair_match.tracked_face, pair_match.left_face, pair_match.right_face,
-        pair_match.score, pair_match.left_match.xyz_error,
-        pair_match.right_match.xyz_error, pair_match.left_match.angle_error,
-        pair_match.right_match.angle_error,
-        ekf_.state(ExtendedKalmanFilter::DELTA_Z));
   }
 
-  if (!has_pair_match)
+  const bool pair_shape_update_mode =
+      (VehiclePairGeometryEnabled() || VehiclePairDeltaZEnabled()) &&
+      rt_.tracked_armors_num == ArmorsNum::NORMAL_4 &&
+      rt_.tracked_id != ArmorNumber::INVALID;
+  VehiclePairMatch pair_match{};
+  if (pair_shape_update_mode &&
+      VehicleResolvePairMatch(armors_msg, matched ? ekf_.state : ekf_prediction,
+                         pair_match))
   {
-    const int previous_face = rt_.tracked_face_index;
-    face_selection = armor_tracker::SelectFaceMatch(
-        armors_msg, BuildFaceSelectionTrackedState(), face_policy,
-        GetCameraWorldPosition(),
-        ekf_prediction(ExtendedKalmanFilter::V_YAW),
-        [this](std::size_t armor_index)
-        {
-          return FindDetectionTrackId(armor_index);
-        },
-        [this](std::size_t armor_index)
-        {
-          return IsDetectionTrackConfirmed(armor_index);
-        },
-        [this, &ekf_prediction](int local_face_index)
-        {
-          return GetArmorPositionFromState(
-              ekf_prediction, LocalFaceToCanonicalFace(local_face_index));
-        },
-        [this, &ekf_prediction](int local_face_index)
-        {
-          return GetArmorYawFromState(
-              ekf_prediction, LocalFaceToCanonicalFace(local_face_index));
-        });
-    audit_selection = &face_selection;
-    FillCandidateDebugFromSelection(face_selection, candidate_debug);
-    matched = ApplyFaceSelection(face_selection, candidate_debug,
-                                 pair_delta_z_mode);
-    if (matched)
+    bool accept_pair_shape = false;
+    if (matched && selected_canonical_face >= 0)
     {
-      rt_.update_count++;
-      if (rt_.tracked_face_index != previous_face)
+      const bool selected_is_left =
+          pair_match.left.armor_index == selected_armor_index &&
+          pair_match.left_face == selected_canonical_face;
+      const bool selected_is_right =
+          pair_match.right.armor_index == selected_armor_index &&
+          pair_match.right_face == selected_canonical_face;
+      accept_pair_shape = selected_is_left || selected_is_right;
+    }
+    else
+    {
+      // 未匹配帧只允许高自洽的双板 shape 观测修半径；它不改变本帧 matched 状态。
+      // 已经 TRACKING 时的偶发 miss 不用 pair 改 shape，避免噪声观测污染稳定跟踪。
+      accept_pair_shape = rt_.state != State::TRACKING &&
+                          pair_match.geometry_valid &&
+                          pair_match.score <=
+                              armor_tracker_detail::VehiclePairGeometryFallbackMaxScore();
+    }
+
+    if (accept_pair_shape)
+    {
+      VehicleApplyPairGeometryUpdate(pair_match);
+      if (pair_match.dz_valid)
       {
-        rt_.switch_count++;
+        rt_.model_pair_delta_z_valid = true;
       }
+      SyncGeometryRuntimeFromState();
+      ekf_.ekf.SetState(ekf_.state);
+      XR_LOG_DEBUG(
+          "whole-body model pair shape update: matched=%d selected=(armor=%u face=%d) left=(%u/%d) right=(%u/%d) score=%.3f geom=%d dz_valid=%d r=(%.3f,%.3f) dz=%.4f",
+          matched ? 1 : 0, static_cast<unsigned>(selected_armor_index), selected_canonical_face,
+          static_cast<unsigned>(pair_match.left.armor_index), pair_match.left_face,
+          static_cast<unsigned>(pair_match.right.armor_index), pair_match.right_face, pair_match.score,
+          pair_match.geometry_valid ? 1 : 0, pair_match.dz_valid ? 1 : 0,
+          ekf_.state(ExtendedKalmanFilter::ROBOT_R),
+          ekf_.state(ExtendedKalmanFilter::ROBOT_R) +
+              ekf_.state(ExtendedKalmanFilter::DELTA_R),
+          ekf_.state(ExtendedKalmanFilter::DELTA_Z));
+    }
+    else
+    {
+      XR_LOG_DEBUG(
+          "whole-body model pair shape skipped: matched=%d selected=(armor=%u face=%d) pair=(left=%u/%d right=%u/%d) score=%.3f",
+          matched ? 1 : 0, static_cast<unsigned>(selected_armor_index), selected_canonical_face,
+          static_cast<unsigned>(pair_match.left.armor_index), pair_match.left_face,
+          static_cast<unsigned>(pair_match.right.armor_index), pair_match.right_face, pair_match.score);
     }
   }
 
-  if (matched && SpStateDiverged())
+  if (matched && VehicleStateDiverged())
   {
-    XR_LOG_DEBUG("SP tracker target diverged: r1=%.3f r2=%.3f",
+    XR_LOG_DEBUG("whole-body model tracker target diverged: r1=%.3f r2=%.3f",
                  ekf_.state(ExtendedKalmanFilter::ROBOT_R),
                  ekf_.state(ExtendedKalmanFilter::ROBOT_R) +
                      ekf_.state(ExtendedKalmanFilter::DELTA_R));
@@ -273,6 +366,9 @@ void ArmorTracker<CameraInfoV>::Update(const ArmorDetectorResults& armors_msg,
   WriteStateAuditRow(image_timestamp_us, ekf_prediction, audit_selection, matched);
 }
 
+/**
+ * @brief 根据本帧是否匹配推进 LOST/DETECTING/TRACKING/TEMP_LOST 状态机。
+ */
 template <CameraTypes::CameraInfo CameraInfoV>
 void ArmorTracker<CameraInfoV>::AdvanceTrackerState(bool matched)
 {
@@ -322,6 +418,9 @@ void ArmorTracker<CameraInfoV>::AdvanceTrackerState(bool matched)
   }
 }
 
+/**
+ * @brief 在 TEMP_LOST 状态下用身份、图像连续性和视角质量尝试快速恢复。
+ */
 template <CameraTypes::CameraInfo CameraInfoV>
 bool ArmorTracker<CameraInfoV>::TryRecoverTempLost(
     const ArmorDetectorResults& armors_msg, CandidateDebugMsg& candidate_debug)
@@ -331,19 +430,22 @@ bool ArmorTracker<CameraInfoV>::TryRecoverTempLost(
     return false;
   }
 
+  /**
+   * @brief TEMP_LOST 快速恢复的候选观测。
+   */
   struct RecoveryCandidate
   {
-    std::size_t armor_index = 0;
-    ArmorDetectorResult armor{};
-    int image_track_id = -1;
-    bool confirmed_image_track = false;
-    double score = DBL_MAX;
-    double image_center = DBL_MAX;
-    double area_score = 0.0;
-    double frontality = 0.0;
-    double measured_yaw = 0.0;
-    std::array<double, 4> phase_position_diff{};
-    std::array<double, 4> phase_yaw_diff{};
+    std::size_t armor_index = 0;             ///< detector 结果索引。
+    ArmorDetectorResult armor{};             ///< detector 装甲结果。
+    int image_track_id = -1;                 ///< 图像 track ID。
+    bool confirmed_image_track = false;      ///< 图像 track 是否已确认。
+    double score = DBL_MAX;                  ///< 恢复候选分，越小越好。
+    double image_center = DBL_MAX;           ///< 到图像中心距离。
+    double area_score = 0.0;                 ///< 图像面积归一化分。
+    double frontality = 0.0;                 ///< 装甲朝向相机程度。
+    double measured_yaw = 0.0;               ///< 展开后的测量 yaw。
+    std::array<double, 4> phase_position_diff{}; ///< 各相位位置差。
+    std::array<double, 4> phase_yaw_diff{};       ///< 各相位 yaw 差。
   };
 
   RecoveryCandidate best{};
@@ -459,8 +561,9 @@ bool ArmorTracker<CameraInfoV>::TryRecoverTempLost(
     rt_.face_track_id[0] = rt_.tracked_face_track_id;
   }
 
-  RecenterTrackedStateToMeasurement(best.armor, 0, best.measured_yaw);
-  ekf_.measurement_face_index = 0;
+  RecenterTrackedStateToMeasurement(best.armor, recovered_face_phase,
+                                    best.measured_yaw);
+  ekf_.measurement_face_index = recovered_face_phase;
   ekf_.measurement_geometry_mode = EKFBlock::MeasurementGeometryMode::FULL_BODY;
   const auto p = best.armor.pose.translation;
   ekf_.measurement =
@@ -480,10 +583,10 @@ bool ArmorTracker<CameraInfoV>::TryRecoverTempLost(
   candidate_debug.accepted_mode =
       static_cast<uint8_t>(armor_tracker::FaceSelectionAcceptedMode::RELAXED_SAME_FACE);
   XR_LOG_DEBUG(
-      "Tracker TEMP_LOST recover: tracked_face_before=%d tracked_face_after=%d phase_cost=%.3f armor=%zu num=%d img=%d confirmed=%d score=%.3f center=%.1f area=%.3f frontality=%.3f yaw=%.3f phase_pos=[%.3f,%.3f,%.3f,%.3f] phase_yaw=[%.3f,%.3f,%.3f,%.3f]",
+      "Tracker TEMP_LOST recover: tracked_face_before=%d tracked_face_after=%d phase_cost=%.3f armor=%u num=%d img=%d confirmed=%d score=%.3f center=%.1f area=%.3f frontality=%.3f yaw=%.3f phase_pos=[%.3f,%.3f,%.3f,%.3f] phase_yaw=[%.3f,%.3f,%.3f,%.3f]",
       tracked_face_before_recover,
       recovered_face_phase, recovered_face_cost,
-      best.armor_index, static_cast<int>(best.armor.number), best.image_track_id,
+      static_cast<unsigned>(best.armor_index), static_cast<int>(best.armor.number), best.image_track_id,
       best.confirmed_image_track ? 1 : 0, best.score, best.image_center,
       best.area_score, best.frontality, best.measured_yaw,
       best.phase_position_diff[0], best.phase_position_diff[1],
@@ -493,27 +596,41 @@ bool ArmorTracker<CameraInfoV>::TryRecoverTempLost(
   return true;
 }
 
+/**
+ * @brief detector 结果 topic 回调，完成坐标转换、过滤、跟踪更新和 topic 发布。
+ */
 template <CameraTypes::CameraInfo CameraInfoV>
-void ArmorTracker<CameraInfoV>::VelocityCallback(double velocity_msg)
+void ArmorTracker<CameraInfoV>::ArmorsCallback(
+    typename ArmorTracker<CameraInfoV>::DetectionMessageArg message)
 {
-  io_.solver->Init(velocity_msg);
-}
+  const ArmorDetectionsSourceFrame<CameraInfoV>* source_frame_ptr = nullptr;
+  const ArmorDetectorResults* detections_ptr = nullptr;
+  uint64_t detections_timestamp_us = 0;
 
-template <CameraTypes::CameraInfo CameraInfoV>
-void ArmorTracker<CameraInfoV>::ArmorsCallback(DetectionPacket* packet)
-{
-  if (packet == nullptr)
+  if constexpr (std::is_pointer<DetectionMessage>::value)
   {
-    XR_LOG_ERROR("ArmorTracker received empty detector packet pointer");
-    return;
+    if (message == nullptr)
+    {
+      XR_LOG_ERROR("ArmorTracker received empty detector packet pointer");
+      return;
+    }
+    if (message->detections == nullptr)
+    {
+      XR_LOG_ERROR("ArmorTracker received detector packet without detections");
+      return;
+    }
+    source_frame_ptr = &message->source_frame;
+    detections_ptr = &message->detections->results;
+    detections_timestamp_us = message->detections->image_timestamp_us;
   }
-  if (packet->detections == nullptr)
+  else
   {
-    XR_LOG_ERROR("ArmorTracker received detector packet without detections");
-    return;
+    source_frame_ptr = &message.source_frame;
+    detections_ptr = &message.results;
+    detections_timestamp_us = message.source_frame.image_timestamp_us;
   }
 
-  const auto& source_frame = packet->source_frame;
+  const auto& source_frame = *source_frame_ptr;
   if (source_frame.image_frame == nullptr)
   {
     XR_LOG_ERROR("ArmorTracker received detector packet without image frame");
@@ -529,27 +646,37 @@ void ArmorTracker<CameraInfoV>::ArmorsCallback(DetectionPacket* packet)
   if (source_frame.image_frame->timestamp_us != image_timestamp_us)
   {
     XR_LOG_ERROR(
-        "ArmorTracker detector packet timestamp mismatch image=%llu packet=%llu",
-        static_cast<unsigned long long>(source_frame.image_frame->timestamp_us),
-        static_cast<unsigned long long>(image_timestamp_us));
+        "ArmorTracker detector packet timestamp mismatch image=%u packet=%u",
+        static_cast<unsigned>(source_frame.image_frame->timestamp_us),
+        static_cast<unsigned>(image_timestamp_us));
     return;
   }
-  if (packet->detections->image_timestamp_us != image_timestamp_us)
+  if (detections_timestamp_us != image_timestamp_us)
   {
     XR_LOG_ERROR(
-        "ArmorTracker detector result timestamp mismatch result=%llu packet=%llu",
-        static_cast<unsigned long long>(packet->detections->image_timestamp_us),
-        static_cast<unsigned long long>(image_timestamp_us));
+        "ArmorTracker detector result timestamp mismatch result=%u packet=%u",
+        static_cast<unsigned>(detections_timestamp_us),
+        static_cast<unsigned>(image_timestamp_us));
     return;
   }
 
-  ArmorDetectorResults armors_msg = packet->detections->results;
+  const ArmorDetectorResults detector_preview_armors = *detections_ptr;
+  ArmorDetectorResults armors_msg = detector_preview_armors;
+  armors_msg.erase(
+      std::remove_if(armors_msg.begin(), armors_msg.end(),
+                     [](const ArmorDetectorResult& armor)
+                     {
+                       return !armor.pnp_valid;
+                     }),
+      armors_msg.end());
+
   const LibXR::Transform<double> camera_pose_world =
       ArmorTrackerCameraRotationToTrackerWorldPose(
           armor_tracker_detail::PackedCameraRotation(source_frame.imu->rotation_wxyz),
           armor_tracker_detail::PackedCameraTranslation(
               source_frame.imu->translation_xyz),
-          io_.gimbal_to_camera_transform_static);
+          io_.gimbal_to_camera_transform_static,
+          io_.camera_pose_runtime);
   io_.current_camera_pose = camera_pose_world;
   io_.current_camera_pose_valid = true;
 
@@ -560,6 +687,7 @@ void ArmorTracker<CameraInfoV>::ArmorsCallback(DetectionPacket* packet)
     LibXR::Transform<double> tf = armor.pose;
     armor.pose = camera_pose_world + tf;
   }
+  OptimizeArmorYawMeasurements(armors_msg, camera_pose_world);
 
   // 过滤异常装甲
   armors_msg.erase(
@@ -575,11 +703,12 @@ void ArmorTracker<CameraInfoV>::ArmorsCallback(DetectionPacket* packet)
 
   // 构造消息
   TrackerInfo info_msg{};
-  SolveTrajectory::Target target_msg{};
+  ArmorTrackerTarget target_msg{};
   ekf_msg_ = {};
   ekf_msg_.image_timestamp_us = image_timestamp_us;
   target_msg.image_timestamp_us = image_timestamp_us;
   target_msg.id = ArmorNumber::INVALID;
+  target_msg.velocity_confidence = 0.0;
 
   auto time = LibXR::Timebase::GetMicroseconds();
   // 同步图像时间戳是 tracker 的运动模型基准；只有没有有效传感器时间时才退回进程时间。
@@ -646,7 +775,7 @@ void ArmorTracker<CameraInfoV>::ArmorsCallback(DetectionPacket* packet)
     {
       target_msg.tracking = true;
       Eigen::VectorXd output_state = ekf_.state;
-      const double output_dt = SpOutputExtrapolateSeconds();
+      const double output_dt = VehicleOutputExtrapolateSeconds();
       if (output_dt > 0.0 && output_state.size() > ExtendedKalmanFilter::DELTA_Z)
       {
         output_state(ExtendedKalmanFilter::X_CENTER) +=
@@ -656,11 +785,57 @@ void ArmorTracker<CameraInfoV>::ArmorsCallback(DetectionPacket* packet)
         output_state(ExtendedKalmanFilter::Z_ARMOR) +=
             output_state(ExtendedKalmanFilter::V_Z_ARMOR) * output_dt;
         output_state(ExtendedKalmanFilter::YAW) =
-            SpLimitRad(output_state(ExtendedKalmanFilter::YAW) +
+            VehicleLimitRad(output_state(ExtendedKalmanFilter::YAW) +
                        output_state(ExtendedKalmanFilter::V_YAW) * output_dt);
       }
       const auto& state = output_state;
+      const Eigen::Vector3d ekf_velocity(
+          state(ExtendedKalmanFilter::V_X_CENTER),
+          state(ExtendedKalmanFilter::V_Y_CENTER),
+          state(ExtendedKalmanFilter::V_Z_ARMOR));
+      const Eigen::Vector3d output_velocity =
+          VehicleCenterMotionObserverEnabled() && rt_.center_motion_observer_valid
+              ? rt_.center_motion_observer_velocity
+              : ekf_velocity;
+      Eigen::Vector3d velocity_variance = Eigen::Vector3d::Zero();
+      if (ekf_.covariance.rows() > ExtendedKalmanFilter::V_Z_ARMOR &&
+          ekf_.covariance.cols() > ExtendedKalmanFilter::V_Z_ARMOR)
+      {
+        velocity_variance.x() = std::max(
+            0.0, ekf_.covariance(ExtendedKalmanFilter::V_X_CENTER,
+                                 ExtendedKalmanFilter::V_X_CENTER));
+        velocity_variance.y() = std::max(
+            0.0, ekf_.covariance(ExtendedKalmanFilter::V_Y_CENTER,
+                                 ExtendedKalmanFilter::V_Y_CENTER));
+        velocity_variance.z() = std::max(
+            0.0, ekf_.covariance(ExtendedKalmanFilter::V_Z_ARMOR,
+                                 ExtendedKalmanFilter::V_Z_ARMOR));
+      }
+      const double xy_velocity_sigma =
+          std::sqrt(std::max(velocity_variance.x(), velocity_variance.y()));
+      double covariance_confidence =
+          std::clamp((1.20 - xy_velocity_sigma) / (1.20 - 0.20), 0.0, 1.0);
+      if (!std::isfinite(covariance_confidence))
+      {
+        covariance_confidence = 0.0;
+      }
+      double velocity_confidence =
+          VehicleCenterMotionObserverEnabled() && rt_.center_motion_observer_valid
+              ? rt_.center_motion_observer_confidence
+              : covariance_confidence;
+      if (rt_.state == State::TEMP_LOST || !rt_.measurement_valid_current_frame ||
+          !output_velocity.allFinite())
+      {
+        velocity_confidence *= 0.25;
+      }
+      target_msg.velocity_variance = velocity_variance;
+      target_msg.velocity_confidence = std::clamp(velocity_confidence, 0.0, 1.0);
       target_msg.id = rt_.tracked_id;
+      target_msg.tracked_face_index = std::clamp(
+          rt_.tracked_face_index, 0,
+          std::max(1, static_cast<int>(rt_.tracked_armors_num)) - 1);
+      target_msg.face_switch_observed = rt_.switch_count > 0;
+      target_msg.use_measured_face_anchor = VehicleAimerMeasuredFaceAnchorEnabled();
       target_msg.measured_face_valid = false;
       target_msg.measured_face_index = -1;
       if (SingleArmorModeEnabled())
@@ -670,31 +845,27 @@ void ArmorTracker<CameraInfoV>::ArmorsCallback(DetectionPacket* packet)
         target_msg.position.x() = armor_pos.x();
         target_msg.position.y() = armor_pos.y();
         target_msg.position.z() = armor_pos.z();
-        target_msg.velocity.x() = state(1);
-        target_msg.velocity.y() = state(3);
-        target_msg.velocity.z() = state(5);
+        target_msg.velocity = output_velocity;
         target_msg.yaw = GetArmorYawFromState(state, 0);
         target_msg.v_yaw = state(7);
         target_msg.radius_1 = 0.0;
         target_msg.radius_2 = 0.0;
         target_msg.dz = 0.0;
+        VehicleApplyYawRateObserver(target_msg.yaw, image_timestamp_us, target_msg);
       }
       else
       {
         target_msg.armors_num = static_cast<int>(rt_.tracked_armors_num);
         target_msg.position.x() = state(0);
-        target_msg.velocity.x() = state(1);
         target_msg.position.y() = state(2);
-        target_msg.velocity.y() = state(3);
         target_msg.position.z() = state(4);
-        target_msg.velocity.z() = state(5);
+        target_msg.velocity = output_velocity;
         target_msg.yaw = state(6);
         target_msg.v_yaw = state(7);
         target_msg.radius_1 = state(8);
         target_msg.radius_2 = rt_.another_r;
         target_msg.dz = rt_.dz;
-        if (SpMeasurementAnchoredOutputEnabled() &&
-            rt_.measurement_valid_current_frame)
+        if (rt_.measurement_valid_current_frame)
         {
           target_msg.measured_face_valid = true;
           target_msg.measured_face_index =
@@ -704,14 +875,16 @@ void ArmorTracker<CameraInfoV>::ArmorsCallback(DetectionPacket* packet)
               ekf_.measurement(0), ekf_.measurement(1), ekf_.measurement(2));
           target_msg.measured_face_yaw = ekf_.measurement(3);
         }
+        VehicleApplyYawRateObserver(target_msg.yaw, image_timestamp_us, target_msg);
       }
 
       XR_LOG_DEBUG(
           "Target position: (%.3f, %.3f, %.3f) velocity: (%.3f, %.3f, "
-          "%.3f) yaw: %.3f "
+          "%.3f) velocity_confidence: %.3f yaw: %.3f "
           "v_yaw: %.3f radius_1: %.3f radius_2: %.3f dz: %.3f",
           target_msg.position.x(), target_msg.position.y(), target_msg.position.z(),
           target_msg.velocity.x(), target_msg.velocity.y(), target_msg.velocity.z(),
+          target_msg.velocity_confidence,
           target_msg.yaw, target_msg.v_yaw, target_msg.radius_1, target_msg.radius_2,
           target_msg.dz);
 
@@ -743,13 +916,93 @@ void ArmorTracker<CameraInfoV>::ArmorsCallback(DetectionPacket* packet)
         {
           pw_armors[i] = GetArmorPositionFromState(st, i);
         }
-        if (SpMeasurementAnchoredOutputEnabled() &&
+        if (VehicleMeasurementAnchoredOutputEnabled() &&
             rt_.measurement_valid_current_frame)
         {
           const int face_index =
               std::clamp(ekf_.measurement_face_index, 0, publish_armor_count - 1);
-          pw_armors[face_index] = Eigen::Vector3d(
+          const Eigen::Vector3d measured_face_position(
               ekf_.measurement(0), ekf_.measurement(1), ekf_.measurement(2));
+          const Eigen::Vector3d desired_delta =
+              measured_face_position - pw_armors[face_index];
+          Eigen::Vector3d anchor_delta = desired_delta;
+          if (desired_delta.allFinite())
+          {
+            const Eigen::Vector3d camera_world(
+                camera_pose_world.translation.x(),
+                camera_pose_world.translation.y(),
+                camera_pose_world.translation.z());
+            Eigen::Vector3d radial_dir = measured_face_position - camera_world;
+            const double radial_norm = radial_dir.norm();
+            if (radial_norm > 1e-6 && std::isfinite(radial_norm))
+            {
+              radial_dir /= radial_norm;
+            }
+            else
+            {
+              radial_dir = Eigen::Vector3d::Zero();
+            }
+
+            if (rt_.output_anchor_delta_valid)
+            {
+              const double radial_alpha = VehicleOutputMeasAnchorAlpha();
+              const double lateral_alpha = VehicleOutputMeasAnchorLateralAlpha();
+              const double desired_radial_scalar =
+                  radial_dir.squaredNorm() > 0.0 ? desired_delta.dot(radial_dir) : 0.0;
+              const Eigen::Vector3d desired_radial =
+                  desired_radial_scalar * radial_dir;
+              const Eigen::Vector3d desired_lateral =
+                  desired_delta - desired_radial;
+              const double previous_radial_scalar =
+                  radial_dir.squaredNorm() > 0.0
+                      ? rt_.output_anchor_delta.dot(radial_dir)
+                      : 0.0;
+              const Eigen::Vector3d previous_radial =
+                  previous_radial_scalar * radial_dir;
+              const Eigen::Vector3d previous_lateral =
+                  rt_.output_anchor_delta - previous_radial;
+              Eigen::Vector3d radial_delta =
+                  (1.0 - radial_alpha) * previous_radial +
+                  radial_alpha * desired_radial;
+              const Eigen::Vector3d lateral_delta =
+                  (1.0 - lateral_alpha) * previous_lateral +
+                  lateral_alpha * desired_lateral;
+              Eigen::Vector3d step = radial_delta - previous_radial;
+              const double max_step = VehicleOutputMeasAnchorMaxStep();
+              const double step_norm = step.norm();
+              if (max_step > 0.0 && step_norm > max_step)
+              {
+                step *= max_step / step_norm;
+                radial_delta = previous_radial + step;
+              }
+              anchor_delta = lateral_delta + radial_delta;
+            }
+
+            const double max_delta = VehicleOutputMeasAnchorMaxDelta();
+            const double delta_norm = anchor_delta.norm();
+            if (max_delta > 0.0 && delta_norm > max_delta)
+            {
+              anchor_delta *= max_delta / delta_norm;
+            }
+
+            rt_.output_anchor_delta = anchor_delta;
+            rt_.output_anchor_delta_timestamp_us = image_timestamp_us;
+            rt_.output_anchor_delta_valid = true;
+          }
+          else
+          {
+            rt_.output_anchor_delta_valid = false;
+            anchor_delta = Eigen::Vector3d::Zero();
+          }
+          pw_center += anchor_delta;
+          for (int i = 0; i < publish_armor_count; ++i)
+          {
+            pw_armors[i] += anchor_delta;
+          }
+        }
+        else
+        {
+          rt_.output_anchor_delta_valid = false;
         }
         for (int i = publish_armor_count; i < 4; ++i)
         {
@@ -802,4 +1055,162 @@ void ArmorTracker<CameraInfoV>::ArmorsCallback(DetectionPacket* packet)
   // ekf_points 是运行期数据合约，供预览、录像和 truth 对齐工具消费。
   io_.ekf_points_topic.Publish(ekf_msg_);
   io_.target_topic.Publish(target_msg);
+  SubmitPreview(*source_frame.image_frame, detector_preview_armors, target_msg,
+                ekf_msg_, candidate_debug_msg_);
+}
+
+/**
+ * @brief 提交 tracker 实时预览帧。
+ *
+ * 预览线程只消费这里捕获的消息快照，不读取下一帧复用的 tracker 成员缓存；
+ * `VisionPreview::Submit()` 会先深拷贝图像，主链路不会被窗口绘制反压。
+ */
+template <CameraTypes::CameraInfo CameraInfoV>
+void ArmorTracker<CameraInfoV>::SubmitPreview(
+    const ImageFrame& image_frame,
+    const ArmorDetectorResults& detector_armors,
+    const ArmorTrackerTarget& target_msg,
+    const EkfPointsMsg& ekf_msg,
+    const CandidateDebugMsg& candidate_debug_msg)
+{
+  if (!preview_.Running())
+  {
+    return;
+  }
+
+  int cv_type = -1;
+  switch (kCameraInfo.encoding)
+  {
+    case CameraTypes::Encoding::RGB8:
+    case CameraTypes::Encoding::BGR8:
+      cv_type = CV_8UC3;
+      break;
+    case CameraTypes::Encoding::RGBA8:
+    case CameraTypes::Encoding::BGRA8:
+      cv_type = CV_8UC4;
+      break;
+    case CameraTypes::Encoding::MONO8:
+      cv_type = CV_8UC1;
+      break;
+    default:
+      break;
+  }
+  if (cv_type < 0)
+  {
+    return;
+  }
+
+  cv::Mat image(static_cast<int>(kCameraInfo.height),
+                static_cast<int>(kCameraInfo.width), cv_type,
+                const_cast<uint8_t*>(image_frame.data.data()),
+                static_cast<size_t>(kCameraInfo.step));
+  cv::Mat bgr_image;
+  switch (kCameraInfo.encoding)
+  {
+    case CameraTypes::Encoding::RGB8:
+      cv::cvtColor(image, bgr_image, cv::COLOR_RGB2BGR);
+      break;
+    case CameraTypes::Encoding::RGBA8:
+      cv::cvtColor(image, bgr_image, cv::COLOR_RGBA2BGR);
+      break;
+    case CameraTypes::Encoding::BGRA8:
+      cv::cvtColor(image, bgr_image, cv::COLOR_BGRA2BGR);
+      break;
+    case CameraTypes::Encoding::MONO8:
+      cv::cvtColor(image, bgr_image, cv::COLOR_GRAY2BGR);
+      break;
+    case CameraTypes::Encoding::BGR8:
+      bgr_image = image;
+      break;
+    default:
+      return;
+  }
+  if (bgr_image.empty())
+  {
+    return;
+  }
+
+  const auto camera_matrix = kCameraInfo.camera_matrix;
+  preview_.Submit(
+      bgr_image,
+      [detector_armors, target_msg, ekf_msg, candidate_debug_msg,
+       camera_matrix](cv::Mat& canvas)
+      {
+        for (const auto& armor : detector_armors)
+        {
+          const cv::Scalar color =
+              armor.pnp_valid ? cv::Scalar(80, 220, 255) : cv::Scalar(120, 120, 120);
+          for (std::size_t i = 0; i < armor.points.size(); ++i)
+          {
+            cv::line(canvas, armor.points[i],
+                     armor.points[(i + 1U) % armor.points.size()], color, 2,
+                     cv::LINE_AA);
+          }
+          cv::circle(canvas, armor.center, 4, color, -1, cv::LINE_AA);
+        }
+
+        const auto project = [&camera_matrix](const LibXR::Position<double>& point,
+                                              cv::Point& uv) -> bool
+        {
+          const double z = point.z();
+          if (!std::isfinite(z) || z <= 1e-6)
+          {
+            return false;
+          }
+          const double u = camera_matrix[0] * point.x() / z + camera_matrix[2];
+          const double v = camera_matrix[4] * point.y() / z + camera_matrix[5];
+          if (!std::isfinite(u) || !std::isfinite(v))
+          {
+            return false;
+          }
+          uv = cv::Point(static_cast<int>(std::lround(u)),
+                         static_cast<int>(std::lround(v)));
+          return true;
+        };
+
+        cv::Point center_uv;
+        if (ekf_msg.valid[0] && project(ekf_msg.center_cam, center_uv))
+        {
+          cv::drawMarker(canvas, center_uv, cv::Scalar(40, 255, 40),
+                         cv::MARKER_CROSS, 18, 2, cv::LINE_AA);
+          cv::putText(canvas, "TC", center_uv + cv::Point(8, -8),
+                      cv::FONT_HERSHEY_SIMPLEX, 0.55, cv::Scalar(40, 255, 40),
+                      2, cv::LINE_AA);
+        }
+
+        for (int i = 0; i < 4; ++i)
+        {
+          cv::Point armor_uv;
+          if (ekf_msg.valid[i + 1] && project(ekf_msg.armors_cam[i], armor_uv))
+          {
+            cv::circle(canvas, armor_uv, 5, cv::Scalar(255, 120, 40), -1,
+                       cv::LINE_AA);
+            cv::putText(canvas, "E" + std::to_string(i), armor_uv + cv::Point(6, 16),
+                        cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(255, 120, 40),
+                        2, cv::LINE_AA);
+          }
+        }
+
+        const auto id_index = static_cast<std::size_t>(target_msg.id);
+        const std::string id_name =
+            id_index < ARMOR_NUMBER_NAMES.size()
+                ? std::string(ARMOR_NUMBER_NAMES[id_index])
+                : std::string("invalid");
+        const std::string header =
+            std::string("tracker ") + (target_msg.tracking ? "TRACK" : "NO_TARGET") +
+            " id=" + id_name +
+            " face=" + std::to_string(target_msg.tracked_face_index) +
+            " det=" + std::to_string(detector_armors.size());
+        cv::putText(canvas, header, cv::Point(12, 28),
+                    cv::FONT_HERSHEY_SIMPLEX, 0.75, cv::Scalar(40, 240, 40),
+                    2, cv::LINE_AA);
+
+        const std::string debug_line =
+            "candidate count=" + std::to_string(candidate_debug_msg.count) +
+            " selected=" + std::to_string(candidate_debug_msg.selected_index) +
+            " matched=" + std::to_string(candidate_debug_msg.matched);
+        cv::putText(canvas, debug_line, cv::Point(12, 56),
+                    cv::FONT_HERSHEY_SIMPLEX, 0.58, cv::Scalar(230, 230, 230),
+                    2, cv::LINE_AA);
+      });
 }

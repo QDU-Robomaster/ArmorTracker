@@ -50,6 +50,7 @@ jobs:
           set(WEBOTS_HOME /usr/local/webots)
           set(LIBXR_PRINT_FLOAT_ENABLE_DOUBLE ON CACHE BOOL "" FORCE)
           set(LIBXR_PRINT_INTEGER_ENABLE_64BIT ON CACHE BOOL "" FORCE)
+          set(LIBXR_PRINT_ENABLE_POINTER ON CACHE BOOL "" FORCE)
           add_subdirectory(libxr)
           set_property(TARGET xr PROPERTY CXX_STANDARD 20)
           set_property(TARGET xr PROPERTY CXX_STANDARD_REQUIRED ON)
@@ -93,6 +94,7 @@ jobs:
           xrobot_add_mod qdu-future/CameraBase@master
           xrobot_add_mod qdu-future/WebotsCamera@master
           xrobot_add_mod qdu-future/CameraFrameSync@master
+          xrobot_add_mod qdu-future/VisionPreview@master
           xrobot_add_mod qdu-future/ArmorDetector@master
           cat Modules/modules.yaml
 
@@ -113,11 +115,11 @@ jobs:
                 height: 720
                 step: 3840
                 encoding: CameraTypes::Encoding::BGR8
-                camera_matrix: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+                camera_matrix: [800.0, 0.0, 640.0, 0.0, 800.0, 360.0, 0.0, 0.0, 1.0]
                 distortion_model: CameraTypes::DistortionModel::PLUMB_BOB
                 distortion_coefficients: [0.0, 0.0, 0.0, 0.0, 0.0]
                 rectification_matrix: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
-                projection_matrix: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+                projection_matrix: [800.0, 0.0, 640.0, 0.0, 0.0, 800.0, 360.0, 0.0, 0.0, 0.0, 1.0, 0.0]
 
           modules:
             - id: BlinkLED_0
@@ -151,22 +153,13 @@ jobs:
               constructor_args:
                 cfg:
                   detect_color: 1
-                  traditional:
-                    threshold: 150.0
-                    max_angle_error_deg: 45.0
-                    min_lightbar_ratio: 1.5
-                    max_lightbar_ratio: 20.0
-                    min_lightbar_length: 8.0
-                  yolo:
-                    use_roi: false
-                    roi_x: 420
-                    roi_y: 50
-                    roi_width: 600
-                    roi_height: 600
-                    use_traditional_refine: true
-                    score_threshold: 0.7
-                    nms_threshold: 0.3
-                    min_confidence: 0.8
+                  network:
+                    score_threshold: 0.1
+                    min_confidence: 0.1
+                    enable_quad_check: true
+                    min_quad_area_px: 16.0
+                    openvino_device: CPU
+                    openvino_performance_mode: LATENCY
                 sync: '@camera_frame_sync'
 
             - id: ArmorTracker_0
@@ -184,19 +177,6 @@ jobs:
                   thresholds:
                     tracking_thres: 5
                     lost_time_thres: 0.3
-                  solver:
-                    k: 0.092
-                    bias_time: 100
-                    s_bias: 0.19133
-                    z_bias: 0.21265
-                    calculate_mode: {expr: SolveTrajectory::CalculateMode::NORMAL}
-                    table_config:
-                      max_x: 13.0
-                      min_x: 0.0
-                      max_y: 1.0
-                      min_y: -1.0
-                      resolution: 0.01
-                      filename: {string: table.bin}
                   ekf:
                     sigma2_q_xyz: 20.0
                     sigma2_q_yaw: 100.0
@@ -211,6 +191,20 @@ jobs:
                   frames:
                     rotation: [1.0, 0.0, 0.0, 0.0]
                     translation: [0.0, 0.0, 0.0]
+                  model:
+                    enable_pair_dz: true
+                    measurement_recenter_alpha: 0.25
+                    quality_recenter: true
+                    enable_pair_geometry: false
+                    enable_output_meas_anchor: false
+                    enable_aimer_meas_anchor: true
+                    enable_fixed_pose_yaw_opt: false
+                  preview:
+                    enabled: false
+                    preview_window_name: armor_tracker_preview
+                    preview_scale: 0.5
+                    preview_wait_key_ms: 1
+                    queue_capacity: 1
                 sync: '@camera_frame_sync'
           EOF
           cat tracker_ci.yaml

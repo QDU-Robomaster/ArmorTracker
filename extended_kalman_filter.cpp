@@ -1,16 +1,15 @@
 #include "extended_kalman_filter.hpp"
 
+/**
+ * @file extended_kalman_filter.cpp
+ * @brief 通用扩展卡尔曼滤波器实现。
+ */
+
 #include <array>
 
-/*
-f:过程函数
-h:观测函数
-j_f:过程函数的雅可比矩阵
-j_h:测量函数的雅可比矩阵
-u_q:过程噪声协方差矩阵
-u_r:测量噪声协方差矩阵
-P0:初始状态协方差矩阵
-*/
+/**
+ * @brief 构造注入式 EKF。
+ */
 ExtendedKalmanFilter::ExtendedKalmanFilter(const VecVecFunc& f, const VecVecFunc& h,
                                            const VecMatFunc& j_f, const VecMatFunc& j_h,
                                            const VoidMatFunc& u_q, const VecMatFunc& u_r,
@@ -29,12 +28,18 @@ ExtendedKalmanFilter::ExtendedKalmanFilter(const VecVecFunc& f, const VecVecFunc
 {
 }
 
+/**
+ * @brief 同步设置 EKF 的先验和后验状态。
+ */
 void ExtendedKalmanFilter::SetState(const Eigen::VectorXd& x0)
 {
   x_post_ = x0;
   x_pri_ = x0;
 }
 
+/**
+ * @brief 执行状态预测并把预测值作为默认后验值。
+ */
 Eigen::MatrixXd ExtendedKalmanFilter::Predict()
 {
   m_f_ = jacobian_f_(x_post_), m_q_ = update_q_();
@@ -49,6 +54,9 @@ Eigen::MatrixXd ExtendedKalmanFilter::Predict()
   return x_pri_;
 }
 
+/**
+ * @brief 使用当前观测修正先验状态。
+ */
 Eigen::MatrixXd ExtendedKalmanFilter::Update(const Eigen::VectorXd& z)
 {
   m_h_ = jacobian_h_(x_pri_), m_r_ = update_r_(z);
@@ -64,6 +72,9 @@ Eigen::MatrixXd ExtendedKalmanFilter::Update(const Eigen::VectorXd& z)
   return x_post_;
 }
 
+/**
+ * @brief 切断指定状态维度与其它维度的后验协方差。
+ */
 void ExtendedKalmanFilter::DecorrelatePosterior(
     std::initializer_list<int> state_indices)
 {

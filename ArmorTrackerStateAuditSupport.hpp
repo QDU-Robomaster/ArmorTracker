@@ -1,5 +1,13 @@
 #pragma once
 
+/**
+ * @file ArmorTrackerStateAuditSupport.hpp
+ * @brief ArmorTracker 状态审计 TSV 输出实现。
+ */
+
+/**
+ * @brief 写入一帧 tracker 状态、候选评分和 EKF 几何审计记录。
+ */
 template <CameraTypes::CameraInfo CameraInfoV>
 void ArmorTracker<CameraInfoV>::WriteStateAuditRow(
     uint64_t image_timestamp_us, const Eigen::VectorXd& ekf_prediction,

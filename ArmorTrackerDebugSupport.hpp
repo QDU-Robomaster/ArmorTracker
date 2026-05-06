@@ -1,5 +1,13 @@
 #pragma once
 
+/**
+ * @file ArmorTrackerDebugSupport.hpp
+ * @brief ArmorTracker 调试 topic 的组包辅助实现。
+ */
+
+/**
+ * @brief 将选面器内部调试快照复制到对外 CandidateDebugMsg。
+ */
 template <CameraTypes::CameraInfo CameraInfoV>
 void ArmorTracker<CameraInfoV>::FillCandidateDebugFromSelection(
     const armor_tracker::FaceSelectionResult& selection,
@@ -47,6 +55,7 @@ void ArmorTracker<CameraInfoV>::FillCandidateDebugFromSelection(
     dst.view_bonus = src.view_bonus;
     dst.area_score = src.area_score;
     dst.frontality = src.frontality;
+    dst.observation_quality_penalty = src.observation_quality_penalty;
     dst.center_x = src.center_x;
     dst.center_y = src.center_y;
     dst.predicted_yaw = src.predicted_yaw;
@@ -56,6 +65,9 @@ void ArmorTracker<CameraInfoV>::FillCandidateDebugFromSelection(
       static_cast<float>(rt_.face_switch_cooldown_remaining);
 }
 
+/**
+ * @brief 填充当前策略开关和阈值到调试消息。
+ */
 template <CameraTypes::CameraInfo CameraInfoV>
 void ArmorTracker<CameraInfoV>::FillCandidateDebugPolicy(
     CandidateDebugMsg& candidate_debug, const Eigen::VectorXd& ekf_prediction,

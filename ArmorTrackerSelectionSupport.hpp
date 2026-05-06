@@ -1,5 +1,10 @@
 #pragma once
 
+/**
+ * @file ArmorTrackerSelectionSupport.hpp
+ * @brief 选面结果到运行时绑定状态和日志输出的辅助逻辑。
+ */
+
 #include <algorithm>
 #include <array>
 
@@ -7,16 +12,21 @@
 
 namespace armor_tracker
 {
-// 选面之后只维护 face 与 image-track 的绑定，不把这段杂糅回主类。
+/**
+ * @brief 选面后维护 face 与 image-track 绑定所需的最小运行时状态。
+ */
 struct FaceBindingRuntime
 {
-  int tracked_armors_num = 4;
-  bool tracked_face_track_id_valid = false;
-  uint16_t tracked_face_track_id = 0;
-  std::array<bool, 4> face_track_id_valid{};
-  std::array<uint16_t, 4> face_track_id{};
+  int tracked_armors_num = 4;                 ///< 当前目标装甲面数量。
+  bool tracked_face_track_id_valid = false;   ///< 当前绑定面 track id 是否有效。
+  uint16_t tracked_face_track_id = 0;         ///< 当前绑定面的图像 track id。
+  std::array<bool, 4> face_track_id_valid{};  ///< 各面 track id 是否有效。
+  std::array<uint16_t, 4> face_track_id{};    ///< 各面绑定的图像 track id。
 };
 
+/**
+ * @brief 根据选中的候选和是否换面更新 face-track 绑定。
+ */
 inline void ApplySelectedFaceBinding(FaceBindingRuntime& runtime,
                                      const FaceMatchCandidate& selected_candidate,
                                      bool did_face_switch)
@@ -57,33 +67,46 @@ inline void ApplySelectedFaceBinding(FaceBindingRuntime& runtime,
   }
 }
 
+/**
+ * @brief 选面日志所需的上下文信息。
+ */
 struct FaceSelectionLogContext
 {
-  ArmorNumber tracked_id = ArmorNumber::INVALID;
-  double face_switch_timeout_sec = 0.0;
-  double face_switch_score_deadzone = 0.0;
-  double face_switch_position_deadzone = 0.0;
-  double face_switch_yaw_deadzone = 0.0;
-  double face_switch_cooldown_remaining = 0.0;
+  ArmorNumber tracked_id = ArmorNumber::INVALID;  ///< 当前跟踪 ID。
+  double face_switch_timeout_sec = 0.0;           ///< 换面冷却时间阈值。
+  double face_switch_score_deadzone = 0.0;        ///< 换面分数死区。
+  double face_switch_position_deadzone = 0.0;     ///< 换面位置死区。
+  double face_switch_yaw_deadzone = 0.0;          ///< 换面 yaw 死区。
+  double face_switch_cooldown_remaining = 0.0;    ///< 当前剩余换面冷却时间。
 };
 
+/**
+ * @brief 记录未接受任何候选时的关键拒绝信息。
+ */
 inline void LogRejectedSelection(const FaceSelectionResult& selection,
                                  const FaceSelectionLogContext& context)
 {
   const auto& best_candidate = selection.best_candidate;
   const auto& best_same_face_candidate = selection.best_same_face_candidate;
   const auto& best_switch_candidate = selection.best_switch_candidate;
+  UNUSED(best_candidate);
+  UNUSED(best_same_face_candidate);
+  UNUSED(best_switch_candidate);
   XR_LOG_DEBUG(
-      "No matched armor found! same_number=%d best_face=%d score=%.3f pos_diff=%.3f yaw_diff=%.3f same_score=%.3f switch_score=%.3f cooldown=%.3f image_track=%d confirmed=%d persistent=%d img_diff=%.1f area_log=%.3f",
+      "No matched armor found! same_number=%d best_face=%d score=%.3f pos_diff=%.3f yaw_diff=%.3f same_score=%.3f switch_score=%.3f cooldown=%.3f image_track=%d confirmed=%d persistent=%d img_diff=%.1f area_log=%.3f q_pen=%.3f",
       selection.has_same_number_candidate ? 1 : 0, best_candidate.face_index,
       best_candidate.score, best_candidate.position_diff, best_candidate.yaw_diff,
       best_same_face_candidate.score, best_switch_candidate.score,
       context.face_switch_cooldown_remaining, best_candidate.image_track_id,
       best_candidate.confirmed_image_track ? 1 : 0,
       best_candidate.same_persistent_track ? 1 : 0,
-      best_candidate.image_center_diff, best_candidate.area_ratio_log);
+      best_candidate.image_center_diff, best_candidate.area_ratio_log,
+      best_candidate.observation_quality_penalty);
 }
 
+/**
+ * @brief 记录接受候选后的匹配模式和换面原因。
+ */
 inline void LogAcceptedSelection(const FaceSelectionResult& selection,
                                  const FaceSelectionLogContext& context)
 {
@@ -91,15 +114,21 @@ inline void LogAcceptedSelection(const FaceSelectionResult& selection,
   const auto& best_same_face_candidate = selection.best_same_face_candidate;
   const auto& best_switch_candidate = selection.best_switch_candidate;
   const bool did_face_switch = selected_candidate.face_index != 0;
+  UNUSED(best_same_face_candidate);
+  UNUSED(best_switch_candidate);
 
   XR_LOG_DEBUG(
-      "Tracker pick: armor=%zu num=%d face=%d same=%d score=%.3f pos_diff=%.3f yaw_diff=%.3f view_bonus=%.3f area=%.3f frontality=%.3f cooldown=%.3f",
-      selected_candidate.armor_index,
+      "Tracker pick: armor=%u num=%d face=%d same=%d score=%.3f pos_diff=%.3f yaw_diff=%.3f view_bonus=%.3f area=%.3f frontality=%.3f q_pen=%.3f reproj=%.3f track=%d confirmed=%d cooldown=%.3f",
+      static_cast<unsigned>(selected_candidate.armor_index),
       static_cast<int>(selected_candidate.armor.number),
       selected_candidate.face_index, selected_candidate.same_number ? 1 : 0,
       selected_candidate.score, selected_candidate.position_diff,
       selected_candidate.yaw_diff, selected_candidate.view_bonus,
       selected_candidate.area_score, selected_candidate.frontality,
+      selected_candidate.observation_quality_penalty,
+      selected_candidate.armor.pnp_reprojection_error_px,
+      selected_candidate.image_track_id,
+      selected_candidate.confirmed_image_track ? 1 : 0,
       context.face_switch_cooldown_remaining);
 
   if (did_face_switch)

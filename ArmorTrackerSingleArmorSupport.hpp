@@ -1,5 +1,13 @@
 #pragma once
 
+/**
+ * @file ArmorTrackerSingleArmorSupport.hpp
+ * @brief 单装甲模式的观测选择、状态更新和调试输出实现。
+ */
+
+/**
+ * @brief 在单装甲模式下使用当前最佳观测直接维护目标状态。
+ */
 template <CameraTypes::CameraInfo CameraInfoV>
 void ArmorTracker<CameraInfoV>::UpdateSingleArmorMode(
     const ArmorDetectorResults& armors_msg, uint64_t image_timestamp_us)
@@ -34,7 +42,9 @@ void ArmorTracker<CameraInfoV>::UpdateSingleArmorMode(
     }
 
     const double raw_measured_yaw =
-        armor_tracker::OrientationToYawNear(armor, rt_.last_yaw);
+        MatchYawAllowPiAmbiguityEnabled()
+            ? armor_tracker::MeasuredArmorYawNearAllowPi(armor, rt_.last_yaw)
+            : armor_tracker::MeasuredArmorYawNear(armor, rt_.last_yaw);
     double measured_yaw = raw_measured_yaw;
     if (rt_.state == State::TRACKING || rt_.state == State::TEMP_LOST)
     {
@@ -61,8 +71,8 @@ void ArmorTracker<CameraInfoV>::UpdateSingleArmorMode(
       if (yaw_delta > yaw_gate)
       {
         XR_LOG_DEBUG(
-            "SingleArmor yaw hold: idx=%zu track=%d yaw_prev=%.3f yaw_raw=%.3f yaw_meas=%.3f yaw_delta=%.3f gate=%.3f",
-            selected_index, detection_track_id, rt_.last_yaw, raw_measured_yaw,
+            "SingleArmor yaw hold: idx=%u track=%d yaw_prev=%.3f yaw_raw=%.3f yaw_meas=%.3f yaw_delta=%.3f gate=%.3f",
+            static_cast<unsigned>(selected_index), detection_track_id, rt_.last_yaw, raw_measured_yaw,
             measured_yaw,
             yaw_delta, yaw_gate);
         measured_yaw = rt_.last_yaw;
@@ -70,8 +80,8 @@ void ArmorTracker<CameraInfoV>::UpdateSingleArmorMode(
     }
 
     XR_LOG_DEBUG(
-        "SingleArmor match: idx=%zu track=%d confirmed=%d num=%d type=%d center=(%.1f,%.1f) pos=(%.3f,%.3f,%.3f) score=%.3f center_diff=%.1f area_log=%.3f yaw_prev=%.3f yaw_raw=%.3f yaw_meas=%.3f",
-        selected_index, detection_track_id, confirmed_track ? 1 : 0,
+        "SingleArmor match: idx=%u track=%d confirmed=%d num=%d type=%d center=(%.1f,%.1f) pos=(%.3f,%.3f,%.3f) score=%.3f center_diff=%.1f area_log=%.3f yaw_prev=%.3f yaw_raw=%.3f yaw_meas=%.3f",
+        static_cast<unsigned>(selected_index), detection_track_id, confirmed_track ? 1 : 0,
         static_cast<int>(armor.number), static_cast<int>(armor.type),
         static_cast<double>(armor.center.x),
         static_cast<double>(armor.center.y),
