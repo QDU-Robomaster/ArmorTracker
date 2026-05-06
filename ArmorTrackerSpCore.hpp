@@ -590,9 +590,110 @@ bool ArmorTracker<CameraInfoV>::SpTryCanonicalizeInitialState(
   SyncGeometryRuntimeFromState();
   ekf_.ekf.SetState(ekf_.state);
   XR_LOG_DEBUG(
-      "SP canonical init: force=%d obs=%zu score=%.3f face=%d dz=%.4f yaw=%.3f",
-      force ? 1 : 0, observations.size(), best.score, best.tracked_face,
+      "SP canonical init: force=%d obs=%u score=%.3f face=%d dz=%.4f yaw=%.3f",
+      force ? 1 : 0, static_cast<unsigned>(observations.size()), best.score, best.tracked_face,
       best.dz, best.yaw);
+  return true;
+}
+
+template <CameraTypes::CameraInfo CameraInfoV>
+bool ArmorTracker<CameraInfoV>::SpSolvePairGeometry(
+    const SpPairObservation& left, int left_face, double left_measured_yaw,
+    const SpPairObservation& right, int right_face, double right_measured_yaw,
+    const Eigen::VectorXd& state, SpPairGeometryFit& fit) const
+{
+  fit = SpPairGeometryFit{};
+  if (rt_.tracked_armors_num != ArmorsNum::NORMAL_4 || left_face == right_face)
+  {
+    return false;
+  }
+
+  const bool left_odd = (left_face % 2) == 1;
+  const bool right_odd = (right_face % 2) == 1;
+  if (left_odd == right_odd)
+  {
+    return false;
+  }
+
+  const Eigen::Vector2d left_dir(std::cos(left_measured_yaw),
+                                 std::sin(left_measured_yaw));
+  const Eigen::Vector2d right_dir(std::cos(right_measured_yaw),
+                                  std::sin(right_measured_yaw));
+  const double det = right_dir.x() * left_dir.y() - left_dir.x() * right_dir.y();
+  if (!std::isfinite(det) || std::abs(det) < SpPairGeometryMinDeterminant())
+  {
+    return false;
+  }
+
+  const Eigen::Vector2d delta(left.xyz.x() - right.xyz.x(),
+                              left.xyz.y() - right.xyz.y());
+  Eigen::Matrix2d a;
+  a << left_dir.x(), -right_dir.x(), left_dir.y(), -right_dir.y();
+  const Eigen::Vector2d radii = a.fullPivLu().solve(delta);
+  if (!std::isfinite(radii.x()) || !std::isfinite(radii.y()))
+  {
+    return false;
+  }
+
+  const double min_radius =
+      std::min(cfg_.geometry.min_radius, cfg_.geometry.max_radius);
+  const double max_radius =
+      std::max(cfg_.geometry.min_radius, cfg_.geometry.max_radius);
+  const double left_radius = radii.x();
+  const double right_radius = radii.y();
+  if (left_radius < min_radius || left_radius > max_radius ||
+      right_radius < min_radius || right_radius > max_radius)
+  {
+    return false;
+  }
+
+  const Eigen::Vector2d left_center =
+      Eigen::Vector2d(left.xyz.x(), left.xyz.y()) - left_radius * left_dir;
+  const Eigen::Vector2d right_center =
+      Eigen::Vector2d(right.xyz.x(), right.xyz.y()) - right_radius * right_dir;
+  const Eigen::Vector2d center = 0.5 * (left_center + right_center);
+  const double fit_error = 0.5 * (left_center - right_center).norm();
+  if (!std::isfinite(fit_error) || fit_error > SpPairGeometryMaxFitError())
+  {
+    return false;
+  }
+
+  const double current_r_even = state(ExtendedKalmanFilter::ROBOT_R);
+  const double current_r_odd =
+      current_r_even + state(ExtendedKalmanFilter::DELTA_R);
+  const double r_even = left_odd ? right_radius : left_radius;
+  const double r_odd = left_odd ? left_radius : right_radius;
+  const double center_shift =
+      (center - Eigen::Vector2d(state(ExtendedKalmanFilter::X_CENTER),
+                                state(ExtendedKalmanFilter::Y_CENTER)))
+          .norm();
+  const double radius_shift =
+      std::max(std::abs(r_even - current_r_even),
+               std::abs(r_odd - current_r_odd));
+  if (!std::isfinite(center_shift) || !std::isfinite(radius_shift) ||
+      center_shift > SpPairGeometryMaxCenterShift() ||
+      radius_shift > SpPairGeometryMaxRadiusShift())
+  {
+    return false;
+  }
+
+  const int armor_count = std::max(1, static_cast<int>(rt_.tracked_armors_num));
+  const double angle_step = 2.0 * M_PI / armor_count;
+  const double current_yaw = state(ExtendedKalmanFilter::YAW);
+  const double left_yaw0 = armor_tracker::UnwrapYawNear(
+      left_measured_yaw - left_face * angle_step, current_yaw);
+  const double right_yaw0 = armor_tracker::UnwrapYawNear(
+      right_measured_yaw - right_face * angle_step, left_yaw0);
+  const double yaw = SpLimitRad(0.5 * (left_yaw0 + right_yaw0));
+
+  fit.valid = true;
+  fit.center = center;
+  fit.r_even = r_even;
+  fit.r_odd = SymmetricGeometryEnabled() ? r_even : r_odd;
+  fit.yaw = yaw;
+  fit.fit_error = fit_error;
+  fit.center_shift = center_shift;
+  fit.radius_shift = radius_shift;
   return true;
 }
 
@@ -604,11 +705,17 @@ bool ArmorTracker<CameraInfoV>::SpResolvePairMatch(
   constexpr double kPairFaceSwitchPenalty = 0.75;
   constexpr double kPairCenterConsistencyScale = 0.10;
   constexpr double kPairMaxCenterSplit = 0.20;
-  constexpr double kPairMaxScore = 3.5;
+  constexpr double kPairGeometryFitScale = 0.03;
+  constexpr double kPairGeometryCenterScale = 0.35;
+  constexpr double kPairGeometryRadiusScale = 0.18;
+  constexpr double kPairMaxScore = 4.5;
   constexpr double kPairMaxXyzError = 0.45;
 
   pair_match = SpPairMatch{};
-  if (!SpPairDeltaZEnabled() || rt_.tracked_id == ArmorNumber::INVALID ||
+  const bool pair_geometry_enabled = SpPairGeometryEnabled();
+  const bool pair_dz_enabled = SpPairDeltaZEnabled();
+  if ((!pair_geometry_enabled && !pair_dz_enabled) ||
+      rt_.tracked_id == ArmorNumber::INVALID ||
       rt_.tracked_armors_num != ArmorsNum::NORMAL_4)
   {
     return false;
@@ -643,187 +750,201 @@ bool ArmorTracker<CameraInfoV>::SpResolvePairMatch(
     return false;
   }
 
-  std::size_t low_index = 0;
-  std::size_t high_index = 1;
-  double best_gap = -1.0;
-  for (std::size_t lhs = 0; lhs < observations.size(); ++lhs)
-  {
-    for (std::size_t rhs = lhs + 1; rhs < observations.size(); ++rhs)
-    {
-      const double gap =
-          std::abs(observations[lhs].xyz.z() - observations[rhs].xyz.z());
-      if (gap > best_gap)
-      {
-        best_gap = gap;
-        if (observations[lhs].xyz.z() <= observations[rhs].xyz.z())
-        {
-          low_index = lhs;
-          high_index = rhs;
-        }
-        else
-        {
-          low_index = rhs;
-          high_index = lhs;
-        }
-      }
-    }
-  }
-
-  if (best_gap < SpPairDeltaZMinHeight())
-  {
-    return false;
-  }
-
-  const SpPairObservation* low = &observations[low_index];
-  const SpPairObservation* high = &observations[high_index];
-  const SpPairObservation* left = low;
-  const SpPairObservation* right = high;
-  if (high->armor.center.x < low->armor.center.x)
-  {
-    left = high;
-    right = low;
-  }
-  else if (std::abs(high->armor.center.x - low->armor.center.x) < 1e-3 &&
-           high->xyz.x() < low->xyz.x())
-  {
-    left = high;
-    right = low;
-  }
-
-  const bool left_is_high = left == high;
-  const bool right_is_high = !left_is_high;
-  const double dz_observed = std::clamp(best_gap, 0.0, SpPairDeltaZMaxAbs());
   const int armor_count = std::max(1, static_cast<int>(rt_.tracked_armors_num));
   const double angle_step = 2.0 * M_PI / armor_count;
   const double current_yaw = state(ExtendedKalmanFilter::YAW);
   SpPairMatch best{};
 
-  for (int left_face = 0; left_face < armor_count; ++left_face)
+  for (std::size_t lhs = 0; lhs < observations.size(); ++lhs)
   {
-    for (int right_face = 0; right_face < armor_count; ++right_face)
+    for (std::size_t rhs = lhs + 1; rhs < observations.size(); ++rhs)
     {
-      if (left_face == right_face)
+      const SpPairObservation* left = &observations[lhs];
+      const SpPairObservation* right = &observations[rhs];
+      if (right->armor.center.x < left->armor.center.x ||
+          (std::abs(right->armor.center.x - left->armor.center.x) < 1e-3 &&
+           right->xyz.x() < left->xyz.x()))
       {
-        continue;
-      }
-      const int face_delta = std::abs(left_face - right_face);
-      if (!(face_delta == 1 || face_delta == armor_count - 1))
-      {
-        continue;
-      }
-      if (((left_face % 2) == 1) != left_is_high ||
-          ((right_face % 2) == 1) != right_is_high)
-      {
-        continue;
+        std::swap(left, right);
       }
 
-      const double left_ref_yaw =
-          SpLimitRad(current_yaw + left_face * angle_step);
-      const double right_ref_yaw =
-          SpLimitRad(current_yaw + right_face * angle_step);
-      const double left_measured_yaw =
-          SpDetectorYawNear(left->armor, left_ref_yaw);
-      const double right_measured_yaw =
-          SpDetectorYawNear(right->armor, right_ref_yaw);
-      const double left_yaw0 = armor_tracker::UnwrapYawNear(
-          left_measured_yaw - left_face * angle_step, current_yaw);
-      const double right_yaw0 = armor_tracker::UnwrapYawNear(
-          right_measured_yaw - right_face * angle_step, current_yaw);
-      const double yaw = SpLimitRad(0.5 * (left_yaw0 + right_yaw0));
+      for (int left_face = 0; left_face < armor_count; ++left_face)
+      {
+        for (int right_face = 0; right_face < armor_count; ++right_face)
+        {
+          if (left_face == right_face)
+          {
+            continue;
+          }
+          const int face_delta = std::abs(left_face - right_face);
+          if (!(face_delta == 1 || face_delta == armor_count - 1))
+          {
+            continue;
+          }
+          if (((left_face % 2) == 1) == ((right_face % 2) == 1))
+          {
+            continue;
+          }
 
-      Eigen::VectorXd candidate = state;
-      candidate(ExtendedKalmanFilter::Z_ARMOR) = low->xyz.z();
-      candidate(ExtendedKalmanFilter::YAW) = yaw;
-      candidate(ExtendedKalmanFilter::DELTA_Z) = dz_observed;
+          const double left_ref_yaw =
+              SpLimitRad(current_yaw + left_face * angle_step);
+          const double right_ref_yaw =
+              SpLimitRad(current_yaw + right_face * angle_step);
+          const double left_measured_yaw =
+              SpDetectorYawNear(left->armor, left_ref_yaw);
+          const double right_measured_yaw =
+              SpDetectorYawNear(right->armor, right_ref_yaw);
+          const double left_yaw0 = armor_tracker::UnwrapYawNear(
+              left_measured_yaw - left_face * angle_step, current_yaw);
+          const double right_yaw0 = armor_tracker::UnwrapYawNear(
+              right_measured_yaw - right_face * angle_step, left_yaw0);
+          const double yaw = SpLimitRad(0.5 * (left_yaw0 + right_yaw0));
 
-      auto estimate_center = [this, angle_step, armor_count](
-                                 const SpPairObservation& observation,
-                                 const Eigen::VectorXd& candidate_state,
-                                 int face_index)
-      {
-        const Eigen::Vector3d measured_xyz(observation.armor.pose.translation.x(),
-                                           observation.armor.pose.translation.y(),
-                                           observation.armor.pose.translation.z());
-        const bool use_length_height =
-            armor_count == 4 && (face_index == 1 || face_index == 3);
-        const double radius =
-            candidate_state(ExtendedKalmanFilter::ROBOT_R) +
-            (use_length_height ? candidate_state(ExtendedKalmanFilter::DELTA_R)
-                               : 0.0);
-        const double angle = SpLimitRad(
-            candidate_state(ExtendedKalmanFilter::YAW) + face_index * angle_step);
-        const double z_offset =
-            use_length_height ? candidate_state(ExtendedKalmanFilter::DELTA_Z) : 0.0;
-        return Eigen::Vector3d(measured_xyz.x() - radius * std::cos(angle),
-                               measured_xyz.y() - radius * std::sin(angle),
-                               measured_xyz.z() - z_offset);
-      };
+          SpPairGeometryFit geometry{};
+          const bool geometry_valid =
+              pair_geometry_enabled &&
+              SpSolvePairGeometry(*left, left_face, left_measured_yaw, *right,
+                                  right_face, right_measured_yaw, state,
+                                  geometry);
+          if (pair_geometry_enabled && !geometry_valid)
+          {
+            continue;
+          }
 
-      const SpArmorMatch left_match =
-          SpMatchArmorToFace(left->armor, candidate, left_face);
-      const SpArmorMatch right_match =
-          SpMatchArmorToFace(right->armor, candidate, right_face);
-      const Eigen::Vector3d left_center =
-          estimate_center(*left, candidate, left_face);
-      const Eigen::Vector3d right_center =
-          estimate_center(*right, candidate, right_face);
-      const double center_split = (left_center - right_center).norm();
-      if (center_split > kPairMaxCenterSplit)
-      {
-        continue;
-      }
-      double score = 0.5 * (left_match.score + right_match.score);
-      score += center_split / kPairCenterConsistencyScale;
-      if (rt_.update_count > 0 && rt_.tracked_face_index != left_face &&
-          rt_.tracked_face_index != right_face)
-      {
-        score += kPairFaceSwitchPenalty;
-      }
-      const double yaw_delta = std::abs(SpLimitRad(yaw - current_yaw));
-      const double best_yaw_delta =
-          best.valid ? std::abs(SpLimitRad(best.yaw - current_yaw))
-                     : std::numeric_limits<double>::infinity();
-      const bool better =
-          score < best.score - 1e-6 ||
-          (std::abs(score - best.score) <= 1e-6 && yaw_delta < best_yaw_delta);
-      if (!better)
-      {
-        continue;
-      }
+          const bool left_odd = (left_face % 2) == 1;
+          const double even_z = left_odd ? right->xyz.z() : left->xyz.z();
+          const double odd_z = left_odd ? left->xyz.z() : right->xyz.z();
+          const double observed_dz = std::clamp(
+              odd_z - even_z, -SpPairDeltaZMaxAbs(), SpPairDeltaZMaxAbs());
+          const bool dz_valid =
+              pair_dz_enabled && std::abs(observed_dz) >= SpPairDeltaZMinHeight();
 
-      best.valid = true;
-      best.left = *left;
-      best.right = *right;
-      best.left_face = left_face;
-      best.right_face = right_face;
-      best.left_match = left_match;
-      best.right_match = right_match;
-      best.score = score;
-      best.yaw = yaw;
-      best.dz_observed = dz_observed;
-      best.low_z = low->xyz.z();
-      best.high_z = high->xyz.z();
-      best.left_is_high = left_is_high;
+          if (!geometry_valid && !dz_valid)
+          {
+            continue;
+          }
 
-      const bool previous_is_left = rt_.tracked_face_index == left_face;
-      const bool previous_is_right = rt_.tracked_face_index == right_face;
-      const bool track_left =
-          (previous_is_left && !previous_is_right) ||
-          (!previous_is_left && !previous_is_right &&
-           left_match.score <= right_match.score);
-      if (track_left)
-      {
-        best.tracked_face = left_face;
-        best.tracked_armor_index = left->armor_index;
-        best.tracked_armor = left->armor;
-        best.tracked_match = left_match;
-      }
-      else
-      {
-        best.tracked_face = right_face;
-        best.tracked_armor_index = right->armor_index;
-        best.tracked_armor = right->armor;
-        best.tracked_match = right_match;
+          Eigen::VectorXd candidate = state;
+          candidate(ExtendedKalmanFilter::Z_ARMOR) = even_z;
+          candidate(ExtendedKalmanFilter::YAW) =
+              geometry_valid ? geometry.yaw : yaw;
+          candidate(ExtendedKalmanFilter::DELTA_Z) = observed_dz;
+          if (geometry_valid)
+          {
+            candidate(ExtendedKalmanFilter::X_CENTER) = geometry.center.x();
+            candidate(ExtendedKalmanFilter::Y_CENTER) = geometry.center.y();
+            candidate(ExtendedKalmanFilter::ROBOT_R) = geometry.r_even;
+            candidate(ExtendedKalmanFilter::DELTA_R) =
+                SymmetricGeometryEnabled() ? 0.0 : (geometry.r_odd - geometry.r_even);
+          }
+
+          const SpArmorMatch left_match =
+              SpMatchArmorToFace(left->armor, candidate, left_face);
+          const SpArmorMatch right_match =
+              SpMatchArmorToFace(right->armor, candidate, right_face);
+          double score = 0.5 * (left_match.score + right_match.score);
+          if (geometry_valid)
+          {
+            score += geometry.fit_error / kPairGeometryFitScale;
+            score += geometry.center_shift / kPairGeometryCenterScale;
+            score += geometry.radius_shift / kPairGeometryRadiusScale;
+          }
+          else
+          {
+            auto estimate_center = [this, angle_step, armor_count](
+                                       const SpPairObservation& observation,
+                                       const Eigen::VectorXd& candidate_state,
+                                       int face_index)
+            {
+              const Eigen::Vector3d measured_xyz(
+                  observation.armor.pose.translation.x(),
+                  observation.armor.pose.translation.y(),
+                  observation.armor.pose.translation.z());
+              const bool use_length_height =
+                  armor_count == 4 && (face_index == 1 || face_index == 3);
+              const double radius =
+                  candidate_state(ExtendedKalmanFilter::ROBOT_R) +
+                  (use_length_height
+                       ? candidate_state(ExtendedKalmanFilter::DELTA_R)
+                       : 0.0);
+              const double angle = SpLimitRad(
+                  candidate_state(ExtendedKalmanFilter::YAW) +
+                  face_index * angle_step);
+              const double z_offset =
+                  use_length_height
+                      ? candidate_state(ExtendedKalmanFilter::DELTA_Z)
+                      : 0.0;
+              return Eigen::Vector3d(measured_xyz.x() -
+                                         radius * std::cos(angle),
+                                     measured_xyz.y() -
+                                         radius * std::sin(angle),
+                                     measured_xyz.z() - z_offset);
+            };
+            const double center_split =
+                (estimate_center(*left, candidate, left_face) -
+                 estimate_center(*right, candidate, right_face))
+                    .norm();
+            if (center_split > kPairMaxCenterSplit)
+            {
+              continue;
+            }
+            score += center_split / kPairCenterConsistencyScale;
+          }
+          if (rt_.update_count > 0 && rt_.tracked_face_index != left_face &&
+              rt_.tracked_face_index != right_face)
+          {
+            score += kPairFaceSwitchPenalty;
+          }
+          const double yaw_delta = std::abs(SpLimitRad(
+              candidate(ExtendedKalmanFilter::YAW) - current_yaw));
+          const double best_yaw_delta =
+              best.valid ? std::abs(SpLimitRad(best.yaw - current_yaw))
+                         : std::numeric_limits<double>::infinity();
+          const bool better =
+              score < best.score - 1e-6 ||
+              (std::abs(score - best.score) <= 1e-6 &&
+               yaw_delta < best_yaw_delta);
+          if (!better)
+          {
+            continue;
+          }
+
+          best.valid = true;
+          best.geometry_valid = geometry_valid;
+          best.dz_valid = dz_valid;
+          best.left = *left;
+          best.right = *right;
+          best.left_face = left_face;
+          best.right_face = right_face;
+          best.left_match = left_match;
+          best.right_match = right_match;
+          best.score = score;
+          best.yaw = candidate(ExtendedKalmanFilter::YAW);
+          best.dz_observed = observed_dz;
+          best.even_z_observed = even_z;
+          best.geometry = geometry;
+
+          const bool previous_is_left = rt_.tracked_face_index == left_face;
+          const bool previous_is_right = rt_.tracked_face_index == right_face;
+          const bool track_left =
+              (previous_is_left && !previous_is_right) ||
+              (!previous_is_left && !previous_is_right &&
+               left_match.score <= right_match.score);
+          if (track_left)
+          {
+            best.tracked_face = left_face;
+            best.tracked_armor_index = left->armor_index;
+            best.tracked_armor = left->armor;
+            best.tracked_match = left_match;
+          }
+          else
+          {
+            best.tracked_face = right_face;
+            best.tracked_armor_index = right->armor_index;
+            best.tracked_armor = right->armor;
+            best.tracked_match = right_match;
+          }
+        }
       }
     }
   }
@@ -845,102 +966,206 @@ bool ArmorTracker<CameraInfoV>::SpResolvePairMatch(
 }
 
 template <CameraTypes::CameraInfo CameraInfoV>
-void ArmorTracker<CameraInfoV>::SpUpdatePair(const SpPairMatch& pair_match)
+void ArmorTracker<CameraInfoV>::SpCanonicalizePairPhaseForPositiveDz()
 {
-  // Keep the body-state update anchored to the currently tracked face.
-  // The second face is used only to recover the high/low geometry signal.
-  if (SpPairDualUpdateEnabled())
+  if (rt_.tracked_armors_num != ArmorsNum::NORMAL_4 ||
+      SymmetricGeometryEnabled() || !SpCanonicalInitPreferPositiveDz() ||
+      ekf_.state(ExtendedKalmanFilter::DELTA_Z) >= 0.0)
   {
-    SpUpdate(pair_match.left.armor, pair_match.left_match, true);
-    SpUpdate(pair_match.right.armor, pair_match.right_match, true);
+    return;
   }
-  else if (pair_match.tracked_face == pair_match.left_face)
+
+  Eigen::MatrixXd transform =
+      Eigen::MatrixXd::Identity(ekf_.covariance.rows(), ekf_.covariance.cols());
+  transform(ExtendedKalmanFilter::Z_ARMOR, ExtendedKalmanFilter::DELTA_Z) = 1.0;
+  transform(ExtendedKalmanFilter::ROBOT_R, ExtendedKalmanFilter::DELTA_R) = 1.0;
+  transform(ExtendedKalmanFilter::DELTA_Z, ExtendedKalmanFilter::DELTA_Z) = -1.0;
+  transform(ExtendedKalmanFilter::DELTA_R, ExtendedKalmanFilter::DELTA_R) = -1.0;
+
+  ekf_.state(ExtendedKalmanFilter::YAW) =
+      SpLimitRad(ekf_.state(ExtendedKalmanFilter::YAW) + 0.5 * M_PI);
+  ekf_.state(ExtendedKalmanFilter::Z_ARMOR) +=
+      ekf_.state(ExtendedKalmanFilter::DELTA_Z);
+  ekf_.state(ExtendedKalmanFilter::DELTA_Z) =
+      -ekf_.state(ExtendedKalmanFilter::DELTA_Z);
+  ekf_.state(ExtendedKalmanFilter::ROBOT_R) +=
+      ekf_.state(ExtendedKalmanFilter::DELTA_R);
+  ekf_.state(ExtendedKalmanFilter::DELTA_R) =
+      -ekf_.state(ExtendedKalmanFilter::DELTA_R);
+  ekf_.covariance = transform * ekf_.covariance * transform.transpose();
+
+  rt_.tracked_face_index =
+      armor_tracker::NormalizeFaceIndex(rt_.tracked_face_index - 1, 4);
+  ekf_.measurement_face_index =
+      armor_tracker::NormalizeFaceIndex(ekf_.measurement_face_index - 1, 4);
+
+  const auto old_valid = rt_.face_track_id_valid;
+  const auto old_ids = rt_.face_track_id;
+  for (int face = 0; face < 4; ++face)
   {
-    SpUpdate(pair_match.left.armor, pair_match.left_match, true);
+    const int old_face = armor_tracker::NormalizeFaceIndex(face + 1, 4);
+    rt_.face_track_id_valid[face] = old_valid[old_face];
+    rt_.face_track_id[face] = old_ids[old_face];
+  }
+  if (rt_.face_track_id_valid[rt_.tracked_face_index])
+  {
+    rt_.tracked_face_track_id_valid = true;
+    rt_.tracked_face_track_id = rt_.face_track_id[rt_.tracked_face_index];
   }
   else
   {
-    SpUpdate(pair_match.right.armor, pair_match.right_match, true);
+    rt_.tracked_face_track_id_valid = false;
+    rt_.tracked_face_track_id = 0;
   }
 
-  const double alpha = rt_.sp_pair_delta_z_valid ? SpPairDeltaZAlpha() : 1.0;
-  ekf_.state(ExtendedKalmanFilter::Z_ARMOR) =
-      (1.0 - alpha) * ekf_.state(ExtendedKalmanFilter::Z_ARMOR) +
-      alpha * pair_match.low_z;
-  ekf_.state(ExtendedKalmanFilter::DELTA_Z) =
-      (1.0 - alpha) * ekf_.state(ExtendedKalmanFilter::DELTA_Z) +
-      alpha * pair_match.dz_observed;
+  SyncGeometryRuntimeFromState();
+  ekf_.ekf.SetState(ekf_.state);
+}
 
-  const double pair_recenter_alpha = SpPairRecenterAlpha();
-  if (pair_recenter_alpha > 0.0 && rt_.tracked_armors_num == ArmorsNum::NORMAL_4)
+template <CameraTypes::CameraInfo CameraInfoV>
+void ArmorTracker<CameraInfoV>::SpApplyPairGeometryUpdate(
+    const SpPairMatch& pair_match)
+{
+  if (!pair_match.geometry_valid && !pair_match.dz_valid)
   {
-    const int armor_count = std::max(1, static_cast<int>(rt_.tracked_armors_num));
-    const double angle_step = 2.0 * M_PI / armor_count;
-    const auto estimate_center =
-        [this, armor_count, angle_step](const SpPairObservation& observation,
-                                        double measured_yaw, int face_index)
-    {
-      const Eigen::Vector3d measured_xyz(observation.armor.pose.translation.x(),
-                                         observation.armor.pose.translation.y(),
-                                         observation.armor.pose.translation.z());
-      const bool odd_face = armor_count == 4 && (face_index == 1 || face_index == 3);
-      const double radius =
-          ekf_.state(ExtendedKalmanFilter::ROBOT_R) +
-          (odd_face ? ekf_.state(ExtendedKalmanFilter::DELTA_R) : 0.0);
-      const double yaw0 = armor_tracker::UnwrapYawNear(
-          measured_yaw - face_index * angle_step,
-          ekf_.state(ExtendedKalmanFilter::YAW));
-      const double z_offset =
-          odd_face ? ekf_.state(ExtendedKalmanFilter::DELTA_Z) : 0.0;
-      return std::pair<Eigen::Vector3d, double>(
-          Eigen::Vector3d(measured_xyz.x() -
-                              radius * std::cos(measured_yaw),
-                          measured_xyz.y() -
-                              radius * std::sin(measured_yaw),
-                          measured_xyz.z() - z_offset),
-          yaw0);
-    };
-
-    const auto left_anchor =
-        estimate_center(pair_match.left, pair_match.left_match.measured_yaw,
-                        pair_match.left_face);
-    const auto right_anchor =
-        estimate_center(pair_match.right, pair_match.right_match.measured_yaw,
-                        pair_match.right_face);
-    const Eigen::Vector3d center_anchor =
-        0.5 * (left_anchor.first + right_anchor.first);
-    const double yaw_anchor = SpLimitRad(
-        0.5 * (left_anchor.second +
-               armor_tracker::UnwrapYawNear(right_anchor.second, left_anchor.second)));
-
-    const double correction_x =
-        pair_recenter_alpha *
-        (center_anchor.x() - ekf_.state(ExtendedKalmanFilter::X_CENTER));
-    const double correction_y =
-        pair_recenter_alpha *
-        (center_anchor.y() - ekf_.state(ExtendedKalmanFilter::Y_CENTER));
-    const double correction_z =
-        pair_recenter_alpha *
-        (center_anchor.z() - ekf_.state(ExtendedKalmanFilter::Z_ARMOR));
-    const double correction_yaw =
-        pair_recenter_alpha *
-        SpLimitRad(yaw_anchor - ekf_.state(ExtendedKalmanFilter::YAW));
-    ekf_.state(ExtendedKalmanFilter::X_CENTER) += correction_x;
-    ekf_.state(ExtendedKalmanFilter::Y_CENTER) += correction_y;
-    ekf_.state(ExtendedKalmanFilter::Z_ARMOR) += correction_z;
-    ekf_.state(ExtendedKalmanFilter::YAW) =
-        SpLimitRad(ekf_.state(ExtendedKalmanFilter::YAW) + correction_yaw);
-
+    return;
   }
 
-  const int dz_index = ExtendedKalmanFilter::DELTA_Z;
-  const double variance =
-      std::max(1e-8, std::min(ekf_.covariance(dz_index, dz_index),
-                              SpPairDeltaZVariance()));
-  ekf_.covariance.row(dz_index).setZero();
-  ekf_.covariance.col(dz_index).setZero();
-  ekf_.covariance(dz_index, dz_index) = variance;
-  rt_.sp_pair_delta_z_valid = true;
+  constexpr int kMaxRows = 4;
+  Eigen::MatrixXd h = Eigen::MatrixXd::Zero(kMaxRows, 11);
+  Eigen::VectorXd z = Eigen::VectorXd::Zero(kMaxRows);
+  Eigen::VectorXd r_diag = Eigen::VectorXd::Zero(kMaxRows);
+  int rows = 0;
+
+  const auto add_scalar = [&](int state_index, double measurement,
+                              double variance)
+  {
+    h(rows, state_index) = 1.0;
+    z(rows) = measurement;
+    r_diag(rows) = variance;
+    ++rows;
+  };
+
+  if (pair_match.geometry_valid)
+  {
+    const double covariance_floor = SpPairGeometryCovarianceFloor();
+    ekf_.covariance(ExtendedKalmanFilter::ROBOT_R,
+                    ExtendedKalmanFilter::ROBOT_R) =
+        std::max(ekf_.covariance(ExtendedKalmanFilter::ROBOT_R,
+                                 ExtendedKalmanFilter::ROBOT_R),
+                 covariance_floor);
+    ekf_.covariance(ExtendedKalmanFilter::DELTA_R,
+                    ExtendedKalmanFilter::DELTA_R) =
+        std::max(ekf_.covariance(ExtendedKalmanFilter::DELTA_R,
+                                 ExtendedKalmanFilter::DELTA_R),
+                 covariance_floor);
+
+    // 双面 PnP yaw 的射线交点对系统偏差很敏感：两条方向线总能交出一个
+    // 中心，fit_error 很小也可能得到错误的长短半径。相邻两板的 XY 弦长
+    // 不依赖对手车宽先验，也不直接信任 PnP yaw；这里只用它弱约束平均半径，
+    // 半径差仍交给后续单面观测和状态协方差慢慢收敛。
+    const double pair_dx = pair_match.left.xyz.x() - pair_match.right.xyz.x();
+    const double pair_dy = pair_match.left.xyz.y() - pair_match.right.xyz.y();
+    const double chord_radius = std::hypot(pair_dx, pair_dy) / std::sqrt(2.0);
+    const double min_radius =
+        std::min(cfg_.geometry.min_radius, cfg_.geometry.max_radius);
+    const double max_radius =
+        std::max(cfg_.geometry.min_radius, cfg_.geometry.max_radius);
+    if (std::isfinite(chord_radius) && chord_radius >= min_radius &&
+        chord_radius <= max_radius)
+    {
+      // The adjacent-face chord observes only the average radius.  Updating
+      // DELTA_R from this scalar would let the EKF invent a long/short split
+      // from an unobservable measurement, so shift ROBOT_R while preserving
+      // the current delta until a real delta observation is available.
+      h(rows, ExtendedKalmanFilter::ROBOT_R) = 1.0;
+      z(rows) =
+          SymmetricGeometryEnabled()
+              ? chord_radius
+              : (chord_radius -
+                 0.5 * ekf_.state(ExtendedKalmanFilter::DELTA_R));
+      r_diag(rows) = SpPairGeometryRadiusVariance();
+      ++rows;
+    }
+  }
+
+  if (pair_match.dz_valid)
+  {
+    const int z_index = ExtendedKalmanFilter::Z_ARMOR;
+    const int dz_index = ExtendedKalmanFilter::DELTA_Z;
+    const double dz_variance = SpPairDeltaZVariance();
+    ekf_.covariance(z_index, z_index) =
+        std::max(ekf_.covariance(z_index, z_index), dz_variance);
+    ekf_.covariance(dz_index, dz_index) =
+        std::max(ekf_.covariance(dz_index, dz_index), dz_variance);
+    add_scalar(z_index, pair_match.even_z_observed,
+               SpPairGeometryCenterVariance());
+    add_scalar(dz_index, pair_match.dz_observed, dz_variance);
+  }
+
+  if (rows <= 0)
+  {
+    return;
+  }
+
+  h.conservativeResize(rows, Eigen::NoChange);
+  z.conservativeResize(rows);
+  r_diag.conservativeResize(rows);
+
+  const Eigen::VectorXd predicted = h * ekf_.state;
+  Eigen::VectorXd innovation = z - predicted;
+
+  const Eigen::MatrixXd r = r_diag.asDiagonal();
+  const Eigen::MatrixXd innovation_cov =
+      h * ekf_.covariance * h.transpose() + r;
+  const Eigen::MatrixXd kalman_gain =
+      ekf_.covariance * h.transpose() * innovation_cov.inverse();
+  const Eigen::MatrixXd identity =
+      Eigen::MatrixXd::Identity(ekf_.covariance.rows(), ekf_.covariance.cols());
+
+  ekf_.state = ekf_.state + kalman_gain * innovation;
+  ekf_.state(ExtendedKalmanFilter::YAW) =
+      SpLimitRad(ekf_.state(ExtendedKalmanFilter::YAW));
+  ekf_.covariance = (identity - kalman_gain * h) * ekf_.covariance *
+                        (identity - kalman_gain * h).transpose() +
+                    kalman_gain * r * kalman_gain.transpose();
+  ClampGeometryState();
+  if (pair_match.dz_valid)
+  {
+    SpCanonicalizePairPhaseForPositiveDz();
+  }
+}
+
+template <CameraTypes::CameraInfo CameraInfoV>
+void ArmorTracker<CameraInfoV>::SpUpdatePair(const SpPairMatch& pair_match,
+                                             uint64_t image_timestamp_us,
+                                             CandidateDebugMsg* candidate_debug)
+{
+  // 单装甲板只能约束“当前可见板”；双板几何才约束整车中心和半径。
+  SpApplyPairGeometryUpdate(pair_match);
+
+  if (SpPairDualUpdateEnabled())
+  {
+    SpUpdate(pair_match.left.armor, pair_match.left_match, true,
+             image_timestamp_us, candidate_debug);
+    SpUpdate(pair_match.right.armor, pair_match.right_match, true,
+             image_timestamp_us, candidate_debug);
+  }
+  else if (pair_match.tracked_face == pair_match.left_face)
+  {
+    SpUpdate(pair_match.left.armor, pair_match.left_match, true,
+             image_timestamp_us, candidate_debug);
+  }
+  else
+  {
+    SpUpdate(pair_match.right.armor, pair_match.right_match, true,
+             image_timestamp_us, candidate_debug);
+  }
+
+  if (pair_match.dz_valid)
+  {
+    rt_.sp_pair_delta_z_valid = true;
+  }
   ekf_.measurement_face_index = pair_match.tracked_face;
   const Eigen::Vector3d tracked_xyz(
       pair_match.tracked_armor.pose.translation.x(),
@@ -961,7 +1186,7 @@ void ArmorTracker<CameraInfoV>::SpPredict()
   f(ExtendedKalmanFilter::Z_ARMOR, ExtendedKalmanFilter::V_Z_ARMOR) = dt;
   f(ExtendedKalmanFilter::YAW, ExtendedKalmanFilter::V_YAW) = dt;
 
-  double linear_variance = 300.0;
+  double linear_variance = 100.0;
   double angular_variance = 400.0;
   if (rt_.tracked_id == ArmorNumber::OUTPOST)
   {
@@ -995,6 +1220,9 @@ void ArmorTracker<CameraInfoV>::SpPredict()
   q(6, 7) = b * angular_variance;
   q(7, 6) = b * angular_variance;
   q(7, 7) = c * angular_variance;
+  q(ExtendedKalmanFilter::DELTA_R, ExtendedKalmanFilter::DELTA_R) =
+      std::max(0.0, armor_tracker_detail::ParseEnvDouble(
+                        "XR_TRACKER_SP_DELTA_R_Q", 1.0e-5));
   q(ExtendedKalmanFilter::DELTA_Z, ExtendedKalmanFilter::DELTA_Z) =
       SpDeltaZProcessVariance();
 
@@ -1016,15 +1244,116 @@ void ArmorTracker<CameraInfoV>::SpPredict()
 template <CameraTypes::CameraInfo CameraInfoV>
 void ArmorTracker<CameraInfoV>::SpUpdate(const ArmorDetectorResult& armor,
                                          const SpArmorMatch& match,
-                                         bool freeze_delta_z)
+                                         bool freeze_delta_z,
+                                         uint64_t image_timestamp_us,
+                                         CandidateDebugMsg* candidate_debug)
 {
-  const Eigen::Vector3d armor_xyz(armor.pose.translation.x(),
-                                  armor.pose.translation.y(),
-                                  armor.pose.translation.z());
+  const Eigen::Vector3d raw_armor_xyz(armor.pose.translation.x(),
+                                      armor.pose.translation.y(),
+                                      armor.pose.translation.z());
+  Eigen::Vector3d armor_xyz = raw_armor_xyz;
+  const double raw_range = raw_armor_xyz.norm();
+  bool range_clamped = false;
+  // Keep the measured bearing, but reject same-face depth jumps that exceed
+  // physically plausible target motion; PnP range is the noisiest component.
+  if (std::isfinite(raw_range) && raw_range > 1e-6 && image_timestamp_us > 0)
+  {
+    if (rt_.sp_range_filter_valid && rt_.sp_range_filter_face == match.id &&
+        image_timestamp_us > rt_.sp_range_filter_timestamp_us)
+    {
+      const double dt =
+          static_cast<double>(image_timestamp_us -
+                              rt_.sp_range_filter_timestamp_us) *
+          1.0e-6;
+      constexpr double kMinDt = 0.002;
+      constexpr double kMaxDt = 0.080;
+      if (dt >= kMinDt && dt <= kMaxDt)
+      {
+        constexpr double kMaxRangeRate = 2.0;
+        constexpr double kBaseRangeStep = 0.03;
+        const double max_delta = kBaseRangeStep + kMaxRangeRate * dt;
+        const double delta = raw_range - rt_.sp_range_filter_distance;
+        if (std::abs(delta) > max_delta)
+        {
+          const double filtered_range =
+              rt_.sp_range_filter_distance + std::copysign(max_delta, delta);
+          armor_xyz = raw_armor_xyz * (filtered_range / raw_range);
+          range_clamped = true;
+        }
+      }
+    }
+    rt_.sp_range_filter_valid = true;
+    rt_.sp_range_filter_timestamp_us = image_timestamp_us;
+    rt_.sp_range_filter_face = match.id;
+    rt_.sp_range_filter_distance = armor_xyz.norm();
+  }
   ekf_.measurement_face_index = match.id;
   const double base_z_before_update = ekf_.state(ExtendedKalmanFilter::Z_ARMOR);
   const Eigen::Vector3d armor_ypd = SpXyzToYpd(armor_xyz);
   Eigen::MatrixXd h = SpObservationJacobian(ekf_.state, match.id);
+  const Eigen::Vector3d predicted_xyz_before =
+      SpArmorPosition(ekf_.state, match.id);
+  const Eigen::Vector3d pre_residual_xyz = armor_xyz - predicted_xyz_before;
+  const auto fill_update_debug =
+      [this, candidate_debug, &armor_xyz, &pre_residual_xyz, &match,
+       freeze_delta_z, raw_range, range_clamped](
+          uint8_t update_mode, const Eigen::VectorXd& innovation,
+          const Eigen::VectorXd& r_diag,
+          const Eigen::MatrixXd& innovation_cov)
+  {
+    if (candidate_debug == nullptr)
+    {
+      return;
+    }
+    const Eigen::Vector3d post_residual_xyz =
+        armor_xyz - SpArmorPosition(ekf_.state, match.id);
+    double mahalanobis = 0.0;
+    if (innovation.size() > 0 && innovation_cov.rows() == innovation.size() &&
+        innovation_cov.cols() == innovation.size() && innovation.allFinite() &&
+        innovation_cov.allFinite())
+    {
+      const Eigen::VectorXd solved = innovation_cov.ldlt().solve(innovation);
+      if (solved.allFinite())
+      {
+        mahalanobis = innovation.dot(solved);
+      }
+    }
+
+    candidate_debug->ekf_update_valid = 1;
+    candidate_debug->ekf_update_mode = update_mode;
+    candidate_debug->ekf_update_face = static_cast<int8_t>(match.id);
+    candidate_debug->ekf_freeze_delta_z = freeze_delta_z ? 1 : 0;
+    candidate_debug->ekf_range_clamped = range_clamped ? 1 : 0;
+    candidate_debug->ekf_raw_range_m = static_cast<float>(raw_range);
+    candidate_debug->ekf_range_m = static_cast<float>(armor_xyz.norm());
+    candidate_debug->ekf_mahalanobis = static_cast<float>(mahalanobis);
+    candidate_debug->ekf_pre_res_x = static_cast<float>(pre_residual_xyz.x());
+    candidate_debug->ekf_pre_res_y = static_cast<float>(pre_residual_xyz.y());
+    candidate_debug->ekf_pre_res_z = static_cast<float>(pre_residual_xyz.z());
+    candidate_debug->ekf_pre_res_norm =
+        static_cast<float>(pre_residual_xyz.norm());
+    candidate_debug->ekf_post_res_x = static_cast<float>(post_residual_xyz.x());
+    candidate_debug->ekf_post_res_y = static_cast<float>(post_residual_xyz.y());
+    candidate_debug->ekf_post_res_z = static_cast<float>(post_residual_xyz.z());
+    candidate_debug->ekf_post_res_norm =
+        static_cast<float>(post_residual_xyz.norm());
+    candidate_debug->ekf_innov_0 =
+        innovation.size() > 0 ? static_cast<float>(innovation[0]) : 0.0F;
+    candidate_debug->ekf_innov_1 =
+        innovation.size() > 1 ? static_cast<float>(innovation[1]) : 0.0F;
+    candidate_debug->ekf_innov_2 =
+        innovation.size() > 2 ? static_cast<float>(innovation[2]) : 0.0F;
+    candidate_debug->ekf_innov_3 =
+        innovation.size() > 3 ? static_cast<float>(innovation[3]) : 0.0F;
+    candidate_debug->ekf_r_0 =
+        r_diag.size() > 0 ? static_cast<float>(r_diag[0]) : 0.0F;
+    candidate_debug->ekf_r_1 =
+        r_diag.size() > 1 ? static_cast<float>(r_diag[1]) : 0.0F;
+    candidate_debug->ekf_r_2 =
+        r_diag.size() > 2 ? static_cast<float>(r_diag[2]) : 0.0F;
+    candidate_debug->ekf_r_3 =
+        r_diag.size() > 3 ? static_cast<float>(r_diag[3]) : 0.0F;
+  };
   const double dz_before_update =
       ekf_.state(ExtendedKalmanFilter::DELTA_Z);
   const double dz_variance_before_update =
@@ -1033,6 +1362,13 @@ void ArmorTracker<CameraInfoV>::SpUpdate(const ArmorDetectorResult& armor,
   if (freeze_delta_z && rt_.tracked_armors_num == ArmorsNum::NORMAL_4)
   {
     h.col(ExtendedKalmanFilter::DELTA_Z).setZero();
+  }
+  if (rt_.tracked_armors_num == ArmorsNum::NORMAL_4 &&
+      !SpXyzMeasurementFullGeometryEnabled())
+  {
+    // 单装甲板观测无法区分整车中心平移和半径误差；半径只由多装甲几何更新。
+    h.col(ExtendedKalmanFilter::ROBOT_R).setZero();
+    h.col(ExtendedKalmanFilter::DELTA_R).setZero();
   }
 
   if (SpXyzMeasurementUpdateEnabled())
@@ -1073,18 +1409,21 @@ void ArmorTracker<CameraInfoV>::SpUpdate(const ArmorDetectorResult& armor,
     }
 
     const double range = std::max(1e-6, armor_xyz.norm());
+    const double detector_variance_scale =
+        armor_tracker::DetectorObservationVarianceScale(armor);
     const double position_sigma =
+        std::sqrt(detector_variance_scale) *
         std::max(0.005, SpXyzMeasurementRFactor(cfg_.noise.r_xyz_factor) * range);
     Eigen::VectorXd r_diag(4);
     r_diag << position_sigma * position_sigma,
         position_sigma * position_sigma, position_sigma * position_sigma,
-        SpXyzMeasurementYawVariance(cfg_.noise.r_yaw);
+        detector_variance_scale * SpXyzMeasurementYawVariance(cfg_.noise.r_yaw);
 
     Eigen::VectorXd z(4);
     z << armor_xyz.x(), armor_xyz.y(), armor_xyz.z(), match.measured_yaw;
     Eigen::VectorXd predicted(4);
-    const Eigen::Vector3d predicted_xyz = SpArmorPosition(ekf_.state, match.id);
-    predicted << predicted_xyz.x(), predicted_xyz.y(), predicted_xyz.z(), angle;
+    predicted << predicted_xyz_before.x(), predicted_xyz_before.y(),
+        predicted_xyz_before.z(), angle;
     Eigen::VectorXd innovation = z - predicted;
     innovation[3] = SpLimitRad(innovation[3]);
 
@@ -1115,6 +1454,12 @@ void ArmorTracker<CameraInfoV>::SpUpdate(const ArmorDetectorResult& armor,
           (1.0 - alpha) * ekf_.state(ExtendedKalmanFilter::DELTA_Z) +
           alpha * observed_dz;
     }
+    if (rt_.tracked_armors_num == ArmorsNum::NORMAL_4 &&
+        !SymmetricGeometryEnabled())
+    {
+      ekf_.state(ExtendedKalmanFilter::DELTA_R) *=
+          (1.0 - SpDeltaRadiusShrinkAlpha());
+    }
     ekf_.covariance = (identity - kalman_gain * h_xyz) * ekf_.covariance *
                           (identity - kalman_gain * h_xyz).transpose() +
                       kalman_gain * r * kalman_gain.transpose();
@@ -1128,16 +1473,22 @@ void ArmorTracker<CameraInfoV>::SpUpdate(const ArmorDetectorResult& armor,
     ekf_.measurement =
         Eigen::Vector4d(armor_xyz.x(), armor_xyz.y(), armor_xyz.z(),
                         match.measured_yaw);
+    fill_update_debug(2, innovation, r_diag, innovation_cov);
     return;
   }
 
   const double center_yaw = std::atan2(armor_xyz.y(), armor_xyz.x());
   const double delta_angle = SpLimitRad(match.measured_yaw - center_yaw);
+  const double detector_variance_scale =
+      armor_tracker::DetectorObservationVarianceScale(armor);
   Eigen::VectorXd r_diag(4);
-  r_diag << 4e-3, 4e-3 * SpPitchVarianceScale(),
-      (std::log(std::abs(delta_angle) + 1.0) + 1.0) *
+  r_diag << detector_variance_scale * 4e-3,
+      detector_variance_scale * 4e-3 * SpPitchVarianceScale(),
+      detector_variance_scale *
+          (std::log(std::abs(delta_angle) + 1.0) + 1.0) *
           SpYpdDistanceVarianceScale(),
-      (std::log(std::abs(armor_ypd.z()) + 1.0) / 200.0 + 9e-2) *
+      detector_variance_scale *
+          (std::log(std::abs(armor_ypd.z()) + 1.0) / 200.0 + 9e-2) *
           SpYpdArmorYawVarianceScale();
   const Eigen::MatrixXd r = r_diag.asDiagonal();
 
@@ -1192,6 +1543,12 @@ void ArmorTracker<CameraInfoV>::SpUpdate(const ArmorDetectorResult& armor,
     ekf_.state(ExtendedKalmanFilter::DELTA_Z) =
         (1.0 - alpha) * ekf_.state(ExtendedKalmanFilter::DELTA_Z) +
         alpha * observed_dz;
+  }
+  if (rt_.tracked_armors_num == ArmorsNum::NORMAL_4 &&
+      !SymmetricGeometryEnabled())
+  {
+    ekf_.state(ExtendedKalmanFilter::DELTA_R) *=
+        (1.0 - SpDeltaRadiusShrinkAlpha());
   }
   ekf_.covariance = (identity - kalman_gain * h) * ekf_.covariance *
                         (identity - kalman_gain * h).transpose() +
@@ -1305,6 +1662,270 @@ void ArmorTracker<CameraInfoV>::SpUpdate(const ArmorDetectorResult& armor,
   ekf_.measurement =
       Eigen::Vector4d(armor_xyz.x(), armor_xyz.y(), armor_xyz.z(),
                       match.measured_yaw);
+  fill_update_debug(1, innovation, r_diag, innovation_cov);
+}
+
+template <CameraTypes::CameraInfo CameraInfoV>
+void ArmorTracker<CameraInfoV>::SpUpdateCenterMotionObserver(
+    const ArmorDetectorResult& armor, const SpArmorMatch& match,
+    uint64_t image_timestamp_us)
+{
+  (void)armor;
+  (void)match;
+  if (rt_.tracked_id == ArmorNumber::OUTPOST ||
+      ekf_.state.size() <= ExtendedKalmanFilter::DELTA_Z)
+  {
+    return;
+  }
+
+  const Eigen::Vector3d anchor(
+      ekf_.state(ExtendedKalmanFilter::X_CENTER),
+      ekf_.state(ExtendedKalmanFilter::Y_CENTER),
+      ekf_.state(ExtendedKalmanFilter::Z_ARMOR));
+
+  if (!anchor.allFinite())
+  {
+    return;
+  }
+
+  if (!rt_.center_motion_observer_valid ||
+      image_timestamp_us <= rt_.center_motion_observer_timestamp_us)
+  {
+    rt_.center_motion_observer_valid = true;
+    rt_.center_motion_observer_timestamp_us = image_timestamp_us;
+    rt_.center_motion_observer_anchor = anchor;
+    rt_.center_motion_observer_velocity =
+        Eigen::Vector3d(ekf_.state(ExtendedKalmanFilter::V_X_CENTER),
+                        ekf_.state(ExtendedKalmanFilter::V_Y_CENTER),
+                        ekf_.state(ExtendedKalmanFilter::V_Z_ARMOR));
+    rt_.center_motion_observer_raw_velocity =
+        rt_.center_motion_observer_velocity;
+    rt_.center_motion_observer_confidence = 0.0;
+    rt_.center_motion_observer_samples = 0;
+    return;
+  }
+
+  const double dt =
+      static_cast<double>(image_timestamp_us -
+                          rt_.center_motion_observer_timestamp_us) *
+      1.0e-6;
+  constexpr double kMinDt = 0.002;
+  constexpr double kMaxDt = 0.080;
+  if (dt < kMinDt || dt > kMaxDt)
+  {
+    rt_.center_motion_observer_timestamp_us = image_timestamp_us;
+    rt_.center_motion_observer_anchor = anchor;
+    rt_.center_motion_observer_velocity =
+        Eigen::Vector3d(ekf_.state(ExtendedKalmanFilter::V_X_CENTER),
+                        ekf_.state(ExtendedKalmanFilter::V_Y_CENTER),
+                        ekf_.state(ExtendedKalmanFilter::V_Z_ARMOR));
+    rt_.center_motion_observer_raw_velocity =
+        rt_.center_motion_observer_velocity;
+    rt_.center_motion_observer_confidence = 0.0;
+    rt_.center_motion_observer_samples = 0;
+    return;
+  }
+
+  Eigen::Vector3d raw_velocity =
+      (anchor - rt_.center_motion_observer_anchor) / dt;
+  if (!raw_velocity.allFinite())
+  {
+    rt_.center_motion_observer_confidence = 0.0;
+    return;
+  }
+  constexpr double kMaxObservedSpeed = 4.0;
+  const double raw_speed = raw_velocity.head<2>().norm();
+  const bool raw_speed_clamped = raw_speed > kMaxObservedSpeed;
+  if (raw_speed > kMaxObservedSpeed)
+  {
+    raw_velocity.x() *= kMaxObservedSpeed / raw_speed;
+    raw_velocity.y() *= kMaxObservedSpeed / raw_speed;
+  }
+  rt_.center_motion_observer_raw_velocity = raw_velocity;
+
+  const Eigen::Vector2d anchor_xy(anchor.x(), anchor.y());
+  const double range_xy = anchor_xy.norm();
+  if (!std::isfinite(range_xy) || range_xy < 1e-6)
+  {
+    rt_.center_motion_observer_timestamp_us = image_timestamp_us;
+    rt_.center_motion_observer_anchor = anchor;
+    rt_.center_motion_observer_confidence = 0.0;
+    rt_.center_motion_observer_samples = 0;
+    return;
+  }
+
+  const Eigen::Vector2d radial = anchor_xy / range_xy;
+  const Eigen::Vector2d tangential(-radial.y(), radial.x());
+  const Eigen::Vector2d raw_xy(raw_velocity.x(), raw_velocity.y());
+  const Eigen::Vector2d previous_xy(rt_.center_motion_observer_velocity.x(),
+                                    rt_.center_motion_observer_velocity.y());
+
+  // Use the post-update center as a measurement-derived anchor for output
+  // velocity only; the EKF geometry state remains measurement-driven.
+  constexpr double kTangentialTau = 0.020;
+  constexpr double kVerticalTau = 0.100;
+  const double tangential_alpha = dt / (kTangentialTau + dt);
+  const double vertical_alpha = dt / (kVerticalTau + dt);
+
+  const double tangential_speed =
+      (1.0 - tangential_alpha) * previous_xy.dot(tangential) +
+      tangential_alpha * raw_xy.dot(tangential);
+  const double previous_tangential = previous_xy.dot(tangential);
+  const double raw_tangential = raw_xy.dot(tangential);
+  double radial_speed = previous_xy.dot(radial);
+  if (SpCenterMotionObserverRadialVelocityEnabled())
+  {
+    radial_speed =
+        (1.0 - tangential_alpha) * radial_speed +
+        tangential_alpha * raw_xy.dot(radial);
+  }
+  else
+  {
+    radial_speed = 0.0;
+  }
+  const Eigen::Vector2d observed_xy =
+      tangential_speed * tangential + radial_speed * radial;
+  const double observed_z =
+      (1.0 - vertical_alpha) * rt_.center_motion_observer_velocity.z() +
+      vertical_alpha * raw_velocity.z();
+
+  rt_.center_motion_observer_velocity =
+      Eigen::Vector3d(observed_xy.x(), observed_xy.y(), observed_z);
+  const double tangential_jump =
+      std::abs(raw_tangential - previous_tangential);
+  constexpr double kGoodTangentialJump = 0.25;
+  constexpr double kBadTangentialJump = 1.20;
+  double instant_confidence =
+      std::clamp((kBadTangentialJump - tangential_jump) /
+                     (kBadTangentialJump - kGoodTangentialJump),
+                 0.0, 1.0);
+  constexpr double kSignFlipSpeed = 0.10;
+  if (previous_tangential * raw_tangential < 0.0 &&
+      std::abs(previous_tangential) > kSignFlipSpeed &&
+      std::abs(raw_tangential) > kSignFlipSpeed)
+  {
+    instant_confidence = 0.0;
+  }
+  if (raw_speed_clamped)
+  {
+    instant_confidence = 0.0;
+  }
+  if (rt_.center_motion_observer_samples < UINT32_MAX)
+  {
+    ++rt_.center_motion_observer_samples;
+  }
+  const double warmup =
+      std::clamp(static_cast<double>(rt_.center_motion_observer_samples) / 4.0,
+                 0.0, 1.0);
+  instant_confidence *= warmup;
+  const double old_confidence = rt_.center_motion_observer_confidence;
+  const double confidence_alpha =
+      instant_confidence < old_confidence ? 0.65 : 0.20;
+  rt_.center_motion_observer_confidence =
+      (1.0 - confidence_alpha) * old_confidence +
+      confidence_alpha * instant_confidence;
+  rt_.center_motion_observer_timestamp_us = image_timestamp_us;
+  rt_.center_motion_observer_anchor = anchor;
+}
+
+template <CameraTypes::CameraInfo CameraInfoV>
+void ArmorTracker<CameraInfoV>::SpApplyYawRateObserver(
+    double output_yaw, uint64_t image_timestamp_us,
+    SolveTrajectory::Target& target_msg)
+{
+  (void)output_yaw;
+  if (!SpYawRateObserverEnabled() || !target_msg.tracking ||
+      target_msg.armors_num <= 1 || image_timestamp_us == 0 ||
+      !std::isfinite(target_msg.v_yaw))
+  {
+    rt_.yaw_rate_observer_valid = false;
+    rt_.yaw_rate_observer_samples = 0;
+    return;
+  }
+
+  if (!target_msg.measured_face_valid || target_msg.measured_face_index < 0 ||
+      target_msg.measured_face_index >= target_msg.armors_num ||
+      !std::isfinite(target_msg.measured_face_yaw))
+  {
+    rt_.yaw_rate_observer_valid = false;
+    rt_.yaw_rate_observer_samples = 0;
+    return;
+  }
+
+  const double ekf_vyaw = target_msg.v_yaw;
+  const double angle_step =
+      2.0 * M_PI / std::max(1, target_msg.armors_num);
+  const double measured_center_yaw =
+      target_msg.measured_face_yaw -
+      static_cast<double>(target_msg.measured_face_index) * angle_step;
+  if (!rt_.yaw_rate_observer_valid ||
+      image_timestamp_us <= rt_.yaw_rate_observer_timestamp_us)
+  {
+    rt_.yaw_rate_observer_valid = true;
+    rt_.yaw_rate_observer_timestamp_us = image_timestamp_us;
+    rt_.yaw_rate_observer_yaw =
+        armor_tracker::UnwrapYawNear(measured_center_yaw, target_msg.yaw);
+    rt_.yaw_rate_observer_value = ekf_vyaw;
+    rt_.yaw_rate_observer_samples = 0;
+    return;
+  }
+
+  const double dt =
+      static_cast<double>(image_timestamp_us -
+                          rt_.yaw_rate_observer_timestamp_us) *
+      1.0e-6;
+  constexpr double kMinDt = 0.002;
+  constexpr double kMaxDt = 0.080;
+  const double unwrapped_yaw =
+      armor_tracker::UnwrapYawNear(measured_center_yaw,
+                                   rt_.yaw_rate_observer_yaw);
+  if (dt < kMinDt || dt > kMaxDt)
+  {
+    rt_.yaw_rate_observer_timestamp_us = image_timestamp_us;
+    rt_.yaw_rate_observer_yaw = unwrapped_yaw;
+    rt_.yaw_rate_observer_value = ekf_vyaw;
+    rt_.yaw_rate_observer_samples = 0;
+    return;
+  }
+
+  const double raw_yaw_rate =
+      (unwrapped_yaw - rt_.yaw_rate_observer_yaw) / dt;
+  rt_.yaw_rate_observer_timestamp_us = image_timestamp_us;
+  rt_.yaw_rate_observer_yaw = unwrapped_yaw;
+  if (!std::isfinite(raw_yaw_rate) ||
+      std::abs(raw_yaw_rate) > SpYawRateObserverMaxRaw())
+  {
+    rt_.yaw_rate_observer_value = ekf_vyaw;
+    rt_.yaw_rate_observer_samples = 0;
+    return;
+  }
+
+  const double alpha =
+      std::clamp(dt / (SpYawRateObserverTau() + dt), 0.0, 1.0);
+  if (rt_.yaw_rate_observer_samples == 0)
+  {
+    rt_.yaw_rate_observer_value = raw_yaw_rate;
+  }
+  else
+  {
+    rt_.yaw_rate_observer_value =
+        (1.0 - alpha) * rt_.yaw_rate_observer_value + alpha * raw_yaw_rate;
+  }
+  if (rt_.yaw_rate_observer_samples < UINT32_MAX)
+  {
+    ++rt_.yaw_rate_observer_samples;
+  }
+
+  const double observer_vyaw = rt_.yaw_rate_observer_value;
+  if (rt_.yaw_rate_observer_samples < SpYawRateObserverMinSamples() ||
+      !std::isfinite(observer_vyaw) ||
+      std::abs(observer_vyaw - ekf_vyaw) > SpYawRateObserverMaxBlendDelta())
+  {
+    return;
+  }
+
+  const double blend = SpYawRateObserverBlend();
+  target_msg.v_yaw = (1.0 - blend) * ekf_vyaw + blend * observer_vyaw;
 }
 
 template <CameraTypes::CameraInfo CameraInfoV>

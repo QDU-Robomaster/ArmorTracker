@@ -8,7 +8,7 @@
 
 #include <opencv2/imgproc.hpp>
 
-#include "armor.hpp"
+#include "ArmorDetectorTypes.hpp"
 
 namespace armor_tracker
 {

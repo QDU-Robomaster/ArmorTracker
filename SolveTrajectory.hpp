@@ -9,7 +9,7 @@
 #include <vector>
 
 #include "TrajectoryCompensationTable.hpp"
-#include "armor.hpp"
+#include "ArmorDetectorTypes.hpp"
 
 /**
  * @brief Solve projectile pitch/yaw aiming for rotating multi-armor targets.
@@ -74,7 +74,7 @@ class SolveTrajectory
   {
     uint64_t image_timestamp_us{};          ///< 图像传感器时间戳 [us]
     bool tracking;                         ///< 是否正在追踪
-    ArmorNumber id;                        ///< 目标ID（来自 armor.hpp）
+    ArmorNumber id;                        ///< 目标ID（来自 ArmorDetectorTypes.hpp）
     int armors_num;                        ///< 装甲板数量（3 或 4）
     Eigen::Matrix<double, 3, 1> position;  ///< 世界系目标中心位置 [m]
     Eigen::Matrix<double, 3, 1> velocity;  ///< 世界系目标线速度 [m/s]
@@ -83,11 +83,17 @@ class SolveTrajectory
     double radius_1;                       ///< 旋转半径1 [m]
     double radius_2;                       ///< 旋转半径2 [m]
     double dz;                             ///< 竖直偏差（保留）
+    int tracked_face_index{0};             ///< Tracker 当前绑定的装甲板面索引
+    bool face_switch_observed{false};      ///< 当前目标建立以来是否曾观测到换面
     bool measured_face_valid{false};       ///< 当前帧可见面锚点是否有效
+    bool use_measured_face_anchor{false};  ///< 弹道解算是否强制使用当前观测面锚点
     int measured_face_index{-1};           ///< 当前帧可见面索引
     Eigen::Matrix<double, 3, 1> measured_face_position =
         Eigen::Matrix<double, 3, 1>::Zero();  ///< 当前帧可见面世界坐标
     double measured_face_yaw{};                ///< 当前帧可见面 yaw [rad]
+    Eigen::Matrix<double, 3, 1> velocity_variance =
+        Eigen::Matrix<double, 3, 1>::Zero();  ///< 线速度状态方差 [m^2/s^2]
+    double velocity_confidence{1.0};          ///< 线速度可外推置信度 [0,1]
   };
 
   /**

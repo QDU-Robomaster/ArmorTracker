@@ -73,6 +73,9 @@ inline void LogRejectedSelection(const FaceSelectionResult& selection,
   const auto& best_candidate = selection.best_candidate;
   const auto& best_same_face_candidate = selection.best_same_face_candidate;
   const auto& best_switch_candidate = selection.best_switch_candidate;
+  UNUSED(best_candidate);
+  UNUSED(best_same_face_candidate);
+  UNUSED(best_switch_candidate);
   XR_LOG_DEBUG(
       "No matched armor found! same_number=%d best_face=%d score=%.3f pos_diff=%.3f yaw_diff=%.3f same_score=%.3f switch_score=%.3f cooldown=%.3f image_track=%d confirmed=%d persistent=%d img_diff=%.1f area_log=%.3f",
       selection.has_same_number_candidate ? 1 : 0, best_candidate.face_index,
@@ -91,10 +94,12 @@ inline void LogAcceptedSelection(const FaceSelectionResult& selection,
   const auto& best_same_face_candidate = selection.best_same_face_candidate;
   const auto& best_switch_candidate = selection.best_switch_candidate;
   const bool did_face_switch = selected_candidate.face_index != 0;
+  UNUSED(best_same_face_candidate);
+  UNUSED(best_switch_candidate);
 
   XR_LOG_DEBUG(
-      "Tracker pick: armor=%zu num=%d face=%d same=%d score=%.3f pos_diff=%.3f yaw_diff=%.3f view_bonus=%.3f area=%.3f frontality=%.3f cooldown=%.3f",
-      selected_candidate.armor_index,
+      "Tracker pick: armor=%u num=%d face=%d same=%d score=%.3f pos_diff=%.3f yaw_diff=%.3f view_bonus=%.3f area=%.3f frontality=%.3f cooldown=%.3f",
+      static_cast<unsigned>(selected_candidate.armor_index),
       static_cast<int>(selected_candidate.armor.number),
       selected_candidate.face_index, selected_candidate.same_number ? 1 : 0,
       selected_candidate.score, selected_candidate.position_diff,

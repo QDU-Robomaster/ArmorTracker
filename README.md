@@ -3,6 +3,7 @@
 `ArmorTracker` 是 Webots/Linux 自瞄链路里的目标级跟踪模块。输入来自
 `ArmorDetector` 发布的检测结果和 `CameraFrameSync` 同步帧，输出 tracker
 域下的目标状态和调试信息。云台角、发送包和开火判定由后级 Aimer 负责。
+需要实时预览时，tracker 可直接组合 `VisionPreview`，把当前同步图像和绘制回调提交到预览线程。
 
 ## 文件结构
 
@@ -18,6 +19,22 @@
 - `SolveTrajectory.*`、`TrajectoryCompensationTable.hpp`、`table.bin`：保留 `Target` 消息定义和旧弹道工具，当前 tracker 主流程不再发布弹道命令。
 - `extended_kalman_filter.*`：通用 EKF 实现。
 
+## 实时预览
+
+`cfg.preview` 默认关闭。设置 `enabled: true` 后，tracker 在处理完一帧 detector packet 后提交该帧图像，
+预览线程绘制 detector 角点、EKF 投影点、tracking 状态和候选摘要。
+
+配置项含义：
+
+- `enabled`：实时预览总开关；`false` 时不启动预览线程。
+- `preview_window_name`：OpenCV 窗口名。
+- `preview_scale`：显示缩放比例，只影响窗口画面。
+- `preview_wait_key_ms`：OpenCV 窗口事件轮询时间，单位 ms。
+- `queue_capacity`：预览任务队列长度，队列满时丢弃旧帧。
+
+预览只显示窗口，不订阅 topic、不录像、不写 TSV。图像深拷贝发生在 tracker 回调线程，后续 overlay 绘制发生在
+`VisionPreview` 自己的预览线程，避免 OpenCV 窗口阻塞跟踪主链路。
+
 ## 构建边界
 
 运行时只编译：
@@ -27,8 +44,9 @@
 
 `ArmorTracker` 主体是模板头文件实现。`TableGenerator.cpp` 是离线弹道表生成工具，不应链接进运行时目标。
 
-tracker 日志会输出 `double` 观测量和 `uint64_t` 图像时间戳，模块 CMake 会显式打开 libxr 的
-`LIBXR_PRINT_FLOAT_ENABLE_DOUBLE` 和 `LIBXR_PRINT_INTEGER_ENABLE_64BIT`。
+tracker 日志会输出 `double` 观测量和 `uint64_t` 图像时间戳。BSP 或 CI 的顶层 CMake 必须在
+`add_subdirectory(libxr)` 前显式打开 `LIBXR_PRINT_FLOAT_ENABLE_DOUBLE` 和
+`LIBXR_PRINT_INTEGER_ENABLE_64BIT`。
 
 ## 弹道表
 

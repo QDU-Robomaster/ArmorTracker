@@ -61,8 +61,8 @@ void ArmorTracker<CameraInfoV>::UpdateSingleArmorMode(
       if (yaw_delta > yaw_gate)
       {
         XR_LOG_DEBUG(
-            "SingleArmor yaw hold: idx=%zu track=%d yaw_prev=%.3f yaw_raw=%.3f yaw_meas=%.3f yaw_delta=%.3f gate=%.3f",
-            selected_index, detection_track_id, rt_.last_yaw, raw_measured_yaw,
+            "SingleArmor yaw hold: idx=%u track=%d yaw_prev=%.3f yaw_raw=%.3f yaw_meas=%.3f yaw_delta=%.3f gate=%.3f",
+            static_cast<unsigned>(selected_index), detection_track_id, rt_.last_yaw, raw_measured_yaw,
             measured_yaw,
             yaw_delta, yaw_gate);
         measured_yaw = rt_.last_yaw;
@@ -70,8 +70,8 @@ void ArmorTracker<CameraInfoV>::UpdateSingleArmorMode(
     }
 
     XR_LOG_DEBUG(
-        "SingleArmor match: idx=%zu track=%d confirmed=%d num=%d type=%d center=(%.1f,%.1f) pos=(%.3f,%.3f,%.3f) score=%.3f center_diff=%.1f area_log=%.3f yaw_prev=%.3f yaw_raw=%.3f yaw_meas=%.3f",
-        selected_index, detection_track_id, confirmed_track ? 1 : 0,
+        "SingleArmor match: idx=%u track=%d confirmed=%d num=%d type=%d center=(%.1f,%.1f) pos=(%.3f,%.3f,%.3f) score=%.3f center_diff=%.1f area_log=%.3f yaw_prev=%.3f yaw_raw=%.3f yaw_meas=%.3f",
+        static_cast<unsigned>(selected_index), detection_track_id, confirmed_track ? 1 : 0,
         static_cast<int>(armor.number), static_cast<int>(armor.type),
         static_cast<double>(armor.center.x),
         static_cast<double>(armor.center.y),

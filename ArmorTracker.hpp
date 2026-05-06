@@ -51,8 +51,15 @@ constructor_args:
 
     sp:
       enable_pair_dz: false
-      measurement_recenter_alpha: 1.0
+      measurement_recenter_alpha: 0.25
       quality_recenter: false
+      enable_pair_geometry: true
+    preview:
+      enabled: false
+      preview_window_name: "armor_tracker_preview"
+      preview_scale: 0.5
+      preview_wait_key_ms: 1
+      queue_capacity: 1
   sync: '@camera_frame_sync'
 template_args:
   - Info:
@@ -60,15 +67,16 @@ template_args:
       height: 720
       step: 3840
       encoding: CameraTypes::Encoding::BGR8
-      camera_matrix: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+      camera_matrix: [800.0, 0.0, 640.0, 0.0, 800.0, 360.0, 0.0, 0.0, 1.0]
       distortion_model: CameraTypes::DistortionModel::PLUMB_BOB
       distortion_coefficients: [0.0, 0.0, 0.0, 0.0, 0.0]
       rectification_matrix: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
-      projection_matrix: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+      projection_matrix: [800.0, 0.0, 640.0, 0.0, 0.0, 800.0, 360.0, 0.0, 0.0, 0.0, 1.0, 0.0]
 required_hardware: []
 depends:
   - qdu-future/ArmorDetector
   - qdu-future/CameraFrameSync
+  - qdu-future/VisionPreview@codex/composable-preview-20260506
 === END MANIFEST === */
 // clang-format on
 
@@ -89,6 +97,9 @@ depends:
 #include <vector>
 
 #include <Eigen/Eigen>
+#include <opencv2/calib3d.hpp>
+#include <opencv2/core.hpp>
+#include <opencv2/imgproc.hpp>
 
 // 框架与外部依赖头
 #include "ArmorTrackerCommon.hpp"
@@ -98,9 +109,11 @@ depends:
 #include "ArmorTrackerRuntimeSupport.hpp"
 #include "ArmorTrackerSelectionSupport.hpp"
 #include "CameraFrameSync.hpp"
+#include "RobotGameReferee.hpp"
 #include "SolveTrajectory.hpp"
 #include "app_framework.hpp"
-#include "armor.hpp"
+#include "ArmorDetectorTypes.hpp"
+#include "ArmorDetectorDetail.hpp"
 #include "cycle_value.hpp"
 #include "extended_kalman_filter.hpp"
 #include "libxr_time.hpp"
@@ -110,6 +123,7 @@ depends:
 #include "thread.hpp"
 #include "timebase.hpp"
 #include "transform.hpp"
+#include "VisionPreview.hpp"
 
 namespace cv
 {
@@ -203,9 +217,12 @@ class ArmorTracker : public LibXR::Application
     struct SpTuning
     {
       bool enable_pair_dz = false;               // 双装甲高低差软融合
-      double measurement_recenter_alpha = 1.0;  // 单装甲测量重定位权重
+      double measurement_recenter_alpha = 0.25;  // 单装甲测量重定位权重
       bool quality_recenter = false;             // 按匹配质量调节重定位权重
+      bool enable_pair_geometry = true;          // 双装甲显式估计整车中心与长短半径
     } sp;
+
+    VisionPreview::RuntimeParam preview{};       // 可选 tracker 实时预览。
   };
 
   // ====================== 公共类型 ======================
@@ -305,6 +322,30 @@ class ArmorTracker : public LibXR::Application
     uint8_t switch_face_matched{};
     uint8_t switch_blocked_by_timeout{};
     uint8_t switch_allowed{};
+    uint8_t ekf_update_valid{};
+    uint8_t ekf_update_mode{};  // 1: YPD observation, 2: XYZ observation.
+    int8_t ekf_update_face{-1};
+    uint8_t ekf_freeze_delta_z{};
+    uint8_t ekf_range_clamped{};
+    float ekf_raw_range_m{};
+    float ekf_range_m{};
+    float ekf_mahalanobis{};
+    float ekf_pre_res_x{};
+    float ekf_pre_res_y{};
+    float ekf_pre_res_z{};
+    float ekf_pre_res_norm{};
+    float ekf_post_res_x{};
+    float ekf_post_res_y{};
+    float ekf_post_res_z{};
+    float ekf_post_res_norm{};
+    float ekf_innov_0{};
+    float ekf_innov_1{};
+    float ekf_innov_2{};
+    float ekf_innov_3{};
+    float ekf_r_0{};
+    float ekf_r_1{};
+    float ekf_r_2{};
+    float ekf_r_3{};
     std::array<int16_t, kMaxDetections> detection_track_ids{};
     std::array<uint8_t, kMaxDetections> detection_track_confirmed{};
     CandidateDebugItem items[kMaxItems]{};
@@ -355,7 +396,7 @@ class ArmorTracker : public LibXR::Application
   void AdvanceTrackerState(bool matched);
   bool ApplyFaceSelection(const armor_tracker::FaceSelectionResult& selection,
                           CandidateDebugMsg& candidate_debug,
-                          bool freeze_delta_z);
+                          bool freeze_delta_z, uint64_t image_timestamp_us);
   bool TryRecoverTempLost(const ArmorDetectorResults& armors_msg,
                           CandidateDebugMsg& candidate_debug);
   armor_tracker::ObserverPolicy BuildObserverPolicy() const;
@@ -373,6 +414,11 @@ class ArmorTracker : public LibXR::Application
   // ====================== IO 与回调（原 Node 逻辑） ======================
   void VelocityCallback(double velocity_msg);
   void ArmorsCallback(DetectionPacket* packet);
+  void SubmitPreview(const ImageFrame& image_frame,
+                     const ArmorDetectorResults& detector_armors,
+                     const SolveTrajectory::Target& target_msg,
+                     const EkfPointsMsg& ekf_msg,
+                     const CandidateDebugMsg& candidate_debug_msg);
 
   // ====================== 辅助函数 ======================
   void InitEKF(const ArmorDetectorResult& a);
@@ -381,6 +427,16 @@ class ArmorTracker : public LibXR::Application
                                          int observed_face_index,
                                          double measured_yaw);
   int LocalFaceToCanonicalFace(int local_face_index) const;
+  void OptimizeArmorYawMeasurements(
+      ArmorDetectorResults& armors_msg,
+      const LibXR::Transform<double>& camera_pose_world) const;
+  bool OptimizeSingleArmorYawMeasurement(
+      ArmorDetectorResult& armor,
+      const LibXR::Transform<double>& camera_pose_world) const;
+  double ArmorYawReprojectionError(
+      const ArmorDetectorResult& armor,
+      const LibXR::Transform<double>& camera_pose_world,
+      double yaw_rad, double pitch_rad) const;
   void SyncGeometryRuntimeFromState();
   void ClampGeometryState();
   double GetArmorYawFromState(const Eigen::VectorXd& x, int face_index = 0) const;
@@ -406,9 +462,23 @@ class ArmorTracker : public LibXR::Application
     Eigen::Vector3d xyz = Eigen::Vector3d::Zero();
   };
 
+  struct SpPairGeometryFit
+  {
+    bool valid = false;
+    Eigen::Vector2d center = Eigen::Vector2d::Zero();
+    double r_even = 0.0;
+    double r_odd = 0.0;
+    double yaw = 0.0;
+    double fit_error = 0.0;
+    double center_shift = 0.0;
+    double radius_shift = 0.0;
+  };
+
   struct SpPairMatch
   {
     bool valid = false;
+    bool geometry_valid = false;
+    bool dz_valid = false;
     SpPairObservation left{};
     SpPairObservation right{};
     int left_face = 0;
@@ -418,9 +488,8 @@ class ArmorTracker : public LibXR::Application
     double score = std::numeric_limits<double>::infinity();
     double yaw = 0.0;
     double dz_observed = 0.0;
-    double low_z = 0.0;
-    double high_z = 0.0;
-    bool left_is_high = false;
+    double even_z_observed = 0.0;
+    SpPairGeometryFit geometry{};
     int tracked_face = 0;
     std::size_t tracked_armor_index = 0;
     ArmorDetectorResult tracked_armor{};
@@ -450,12 +519,29 @@ class ArmorTracker : public LibXR::Application
   bool SpResolvePairMatch(const ArmorDetectorResults& armors_msg,
                           const Eigen::VectorXd& state,
                           SpPairMatch& pair_match) const;
+  bool SpSolvePairGeometry(const SpPairObservation& left, int left_face,
+                           double left_measured_yaw,
+                           const SpPairObservation& right, int right_face,
+                           double right_measured_yaw,
+                           const Eigen::VectorXd& state,
+                           SpPairGeometryFit& fit) const;
+  void SpApplyPairGeometryUpdate(const SpPairMatch& pair_match);
+  void SpCanonicalizePairPhaseForPositiveDz();
   void SpPredict();
-  void SpUpdatePair(const SpPairMatch& pair_match);
+  void SpUpdatePair(const SpPairMatch& pair_match,
+                    uint64_t image_timestamp_us = 0,
+                    CandidateDebugMsg* candidate_debug = nullptr);
   void SpUpdate(const ArmorDetectorResult& armor, const SpArmorMatch& match,
-                bool freeze_delta_z);
+                bool freeze_delta_z, uint64_t image_timestamp_us = 0,
+                CandidateDebugMsg* candidate_debug = nullptr);
+  void SpUpdateCenterMotionObserver(const ArmorDetectorResult& armor,
+                                    const SpArmorMatch& match,
+                                    uint64_t image_timestamp_us);
+  void SpApplyYawRateObserver(double output_yaw, uint64_t image_timestamp_us,
+                              SolveTrajectory::Target& target_msg);
   bool SpStateDiverged() const;
   bool SpPairDeltaZEnabled() const;
+  bool SpPairGeometryEnabled() const;
   double SpMeasurementRecenterAlpha() const;
   bool SpMeasurementRecenterQualityEnabled() const;
   // ====================== 内部聚合成员（类内聚合） ======================
@@ -506,6 +592,22 @@ class ArmorTracker : public LibXR::Application
     bool sp_initial_phase_resolved = false;
     bool sp_pair_delta_z_valid = false;
     bool measurement_valid_current_frame = false;
+    bool center_motion_observer_valid = false;
+    uint64_t center_motion_observer_timestamp_us = 0;
+    Eigen::Vector3d center_motion_observer_anchor = Eigen::Vector3d::Zero();
+    Eigen::Vector3d center_motion_observer_velocity = Eigen::Vector3d::Zero();
+    Eigen::Vector3d center_motion_observer_raw_velocity = Eigen::Vector3d::Zero();
+    double center_motion_observer_confidence = 0.0;
+    std::uint32_t center_motion_observer_samples = 0;
+    bool yaw_rate_observer_valid = false;
+    uint64_t yaw_rate_observer_timestamp_us = 0;
+    double yaw_rate_observer_yaw = 0.0;
+    double yaw_rate_observer_value = 0.0;
+    std::uint32_t yaw_rate_observer_samples = 0;
+    bool sp_range_filter_valid = false;
+    uint64_t sp_range_filter_timestamp_us = 0;
+    int sp_range_filter_face = -1;
+    double sp_range_filter_distance = 0.0;
 
     // 另一片装甲板信息
     double dz = 0.0;
@@ -527,6 +629,7 @@ class ArmorTracker : public LibXR::Application
     LibXR::Transform<double> gimbal_to_camera_transform_static{};
     LibXR::Transform<double> current_camera_pose{};
     bool current_camera_pose_valid = false;
+    armor_tracker_detail::CameraPoseRuntime camera_pose_runtime{};
 
     // tracker 只发布跟踪状态和调试信息；云台命令由 Aimer 发布。
     LibXR::Topic::Domain tracker_domain = LibXR::Topic::Domain("tracker");
@@ -552,6 +655,7 @@ class ArmorTracker : public LibXR::Application
   // 保存配置（类内聚合）
   Config cfg_;
   Config::Solver solver_cfg_;
+  VisionPreview preview_{};
 
   const char* name_ = "armor_tracker";
   LibXR::RamFS::File cmd_file_;
@@ -592,6 +696,7 @@ using armor_tracker_detail::SingleArmorModeEnabled;
 using armor_tracker_detail::SymmetricGeometryEnabled;
 using armor_tracker_detail::SpDeltaZInitialVariance;
 using armor_tracker_detail::SpDeltaZProcessVariance;
+using armor_tracker_detail::SpDeltaRadiusShrinkAlpha;
 using armor_tracker_detail::SpDirectDeltaZAlpha;
 using armor_tracker_detail::SpDirectDeltaZEnabled;
 using armor_tracker_detail::SpDirectDeltaZMaxAbs;
@@ -604,13 +709,34 @@ using armor_tracker_detail::SpCanonicalInitPreferPositiveDz;
 using armor_tracker_detail::SpPitchVarianceScale;
 using armor_tracker_detail::SpYpdArmorYawVarianceScale;
 using armor_tracker_detail::SpYpdDistanceVarianceScale;
-using armor_tracker_detail::SpPairDeltaZAlpha;
 using armor_tracker_detail::SpPairDeltaZMaxAbs;
 using armor_tracker_detail::SpPairDeltaZMinHeight;
 using armor_tracker_detail::SpPairDeltaZVariance;
 using armor_tracker_detail::SpPairDualUpdateEnabled;
-using armor_tracker_detail::SpPairRecenterAlpha;
+using armor_tracker_detail::SpPairGeometryCenterVariance;
+using armor_tracker_detail::SpPairGeometryCovarianceFloor;
+using armor_tracker_detail::SpPairGeometryMaxCenterShift;
+using armor_tracker_detail::SpPairGeometryMaxFitError;
+using armor_tracker_detail::SpPairGeometryMaxRadiusShift;
+using armor_tracker_detail::SpPairGeometryMinDeterminant;
+using armor_tracker_detail::SpPairGeometryRadiusVariance;
+using armor_tracker_detail::SpPairGeometryYawVariance;
 using armor_tracker_detail::SpMeasurementAnchoredOutputEnabled;
+using armor_tracker_detail::SpFixedPoseYawCoarseStepDeg;
+using armor_tracker_detail::SpFixedPoseYawFineStepDeg;
+using armor_tracker_detail::SpFixedPoseYawMinGainPx;
+using armor_tracker_detail::SpFixedPoseYawOptimizeEnabled;
+using armor_tracker_detail::SpFixedPoseYawPitchDeg;
+using armor_tracker_detail::SpFixedPoseYawRangeDeg;
+using armor_tracker_detail::SpCenterMotionObserverEnabled;
+using armor_tracker_detail::SpCenterMotionObserverRadialVelocityEnabled;
+using armor_tracker_detail::SpYawRateObserverAlpha;
+using armor_tracker_detail::SpYawRateObserverBlend;
+using armor_tracker_detail::SpYawRateObserverEnabled;
+using armor_tracker_detail::SpYawRateObserverMaxBlendDelta;
+using armor_tracker_detail::SpYawRateObserverMaxRaw;
+using armor_tracker_detail::SpYawRateObserverMinSamples;
+using armor_tracker_detail::SpYawRateObserverTau;
 using armor_tracker_detail::SpOutputExtrapolateSeconds;
 using armor_tracker_detail::SpMeasurementRecenterAlphaBad;
 using armor_tracker_detail::SpMeasurementRecenterAlphaGood;
@@ -652,6 +778,20 @@ bool ArmorTracker<CameraInfoV>::SpPairDeltaZEnabled() const
 }
 
 template <CameraTypes::CameraInfo CameraInfoV>
+bool ArmorTracker<CameraInfoV>::SpPairGeometryEnabled() const
+{
+  if (armor_tracker_detail::EnvFlagEnabled("XR_TRACKER_SP_DISABLE_PAIR_GEOMETRY"))
+  {
+    return false;
+  }
+  if (armor_tracker_detail::EnvFlagEnabled("XR_TRACKER_SP_ENABLE_PAIR_GEOMETRY"))
+  {
+    return true;
+  }
+  return cfg_.sp.enable_pair_geometry;
+}
+
+template <CameraTypes::CameraInfo CameraInfoV>
 double ArmorTracker<CameraInfoV>::SpMeasurementRecenterAlpha() const
 {
   return std::clamp(
@@ -690,6 +830,7 @@ ArmorTracker<CameraInfoV>::ArmorTracker(LibXR::HardwareContainer& hw,
       sync_(sync)
 {
   XR_LOG_INFO("Starting ArmorTracker!");
+  preview_.Start(cfg_.preview);
 
   hw.template FindOrExit<LibXR::RamFS>({"ramfs"})->Add(cmd_file_);
 
@@ -865,18 +1006,19 @@ ArmorTracker<CameraInfoV>::ArmorTracker(LibXR::HardwareContainer& hw,
       this);
   armors_topic.RegisterCallback(armors_cb);
 
-  // 弹丸速度订阅（用于弹道解算初始化）
-  LibXR::Topic::Domain referee_domain = LibXR::Topic::Domain("referee");
-  LibXR::Topic bullet_speed_tp =
-      LibXR::Topic::FindOrCreate<float>("bullet_speed", &referee_domain);
+  // 裁判系统摘要包订阅，用完整大包更新弹道解算弹速。
+  LibXR::Topic::Domain host_domain = LibXR::Topic::Domain("host");
+  LibXR::Topic robot_game_ref_tp =
+      LibXR::Topic::FindOrCreate<RobotGameReferee::Pack>("robot_game_ref",
+                                                         &host_domain);
   auto velocity_cb = LibXR::Topic::Callback::Create(
       [](bool, ArmorTracker* self, LibXR::RawData& data)
       {
-        auto velocity_msg = reinterpret_cast<float*>(data.addr_);
-        self->VelocityCallback(*velocity_msg);
+        auto* referee_msg = reinterpret_cast<RobotGameReferee::Pack*>(data.addr_);
+        self->VelocityCallback(referee_msg->launcher_data.bullet_speed);
       },
       this);
-  bullet_speed_tp.RegisterCallback(velocity_cb);
+  robot_game_ref_tp.RegisterCallback(velocity_cb);
 
   if (const char* audit_env = std::getenv("XR_TRACKER_STATE_AUDIT_PATH"))
   {
@@ -1151,8 +1293,8 @@ std::optional<ArmorDetectorResult> ArmorTracker<CameraInfoV>::SelectSingleArmorO
       if (suspicious_pose_jump)
       {
         XR_LOG_DEBUG(
-            "SingleArmor reject pose jump: idx=%zu track=%d yaw_jump=%.3f center_diff=%.1f area_log=%.3f prev=(%.3f,%.3f,%.3f) now=(%.3f,%.3f,%.3f)",
-            armor_index, detection_track_id, yaw_jump,
+            "SingleArmor reject pose jump: idx=%u track=%d yaw_jump=%.3f center_diff=%.1f area_log=%.3f prev=(%.3f,%.3f,%.3f) now=(%.3f,%.3f,%.3f)",
+            static_cast<unsigned>(armor_index), detection_track_id, yaw_jump,
             static_cast<double>(center_diff), static_cast<double>(area_log), rt_.tracked_armor.pose.translation.x(),
             rt_.tracked_armor.pose.translation.y(), rt_.tracked_armor.pose.translation.z(),
             armor.pose.translation.x(), armor.pose.translation.y(),
@@ -1230,6 +1372,8 @@ void ArmorTracker<CameraInfoV>::SetConfig(const Config& cfg)
     rt_.tracking_thres = cfg.thresholds.tracking_thres;
   }
   cfg_ = cfg;
+  preview_.Stop();
+  preview_.Start(cfg_.preview);
   if (cfg.solver.bias_time != solver_cfg_.bias_time ||
       cfg.solver.s_bias != solver_cfg_.s_bias || cfg.solver.z_bias != solver_cfg_.z_bias)
   {
@@ -1314,6 +1458,11 @@ int ArmorTracker<CameraInfoV>::CommandFun(ArmorTracker<CameraInfoV>* self, int a
       LibXR::STDIO::Printf<"      - %f\r\n">(self->cfg_.frames.translation[0]);
       LibXR::STDIO::Printf<"      - %f\r\n">(self->cfg_.frames.translation[1]);
       LibXR::STDIO::Printf<"      - %f\r\n">(self->cfg_.frames.translation[2]);
+      LibXR::STDIO::Printf<"  sp:\r\n">();
+      LibXR::STDIO::Printf<"    enable_pair_dz: %d\r\n">(self->cfg_.sp.enable_pair_dz ? 1 : 0);
+      LibXR::STDIO::Printf<"    measurement_recenter_alpha: %f\r\n">(self->cfg_.sp.measurement_recenter_alpha);
+      LibXR::STDIO::Printf<"    quality_recenter: %d\r\n">(self->cfg_.sp.quality_recenter ? 1 : 0);
+      LibXR::STDIO::Printf<"    enable_pair_geometry: %d\r\n">(self->cfg_.sp.enable_pair_geometry ? 1 : 0);
       // clang-format on
     }
     return 0;

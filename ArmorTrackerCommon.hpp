@@ -7,7 +7,7 @@
 
 #include <opencv2/imgproc.hpp>
 
-#include "armor.hpp"
+#include "ArmorDetectorTypes.hpp"
 #include "cycle_value.hpp"
 #include "logger.hpp"
 #include "transform.hpp"
@@ -70,8 +70,8 @@ inline void LogImpossibleYawDiff(const char* tag, std::size_t armor_index,
   const double wrapped_measured = LibXR::CycleValue<double>(measured_yaw);
   const double wrapped_predicted = LibXR::CycleValue<double>(predicted_yaw);
   XR_LOG_ERROR(
-      "Impossible yaw diff[%s]: armor=%zu face=%d measured=%.6f predicted=%.6f wrapped_measured=%.6f wrapped_predicted=%.6f yaw_diff=%.6f direct_cycle_sub=%.6f raw_sub=%.6f",
-      tag, armor_index, face_index, measured_yaw, predicted_yaw, wrapped_measured,
+      "Impossible yaw diff[%s]: armor=%u face=%d measured=%.6f predicted=%.6f wrapped_measured=%.6f wrapped_predicted=%.6f yaw_diff=%.6f direct_cycle_sub=%.6f raw_sub=%.6f",
+      tag, static_cast<unsigned>(armor_index), face_index, measured_yaw, predicted_yaw, wrapped_measured,
       wrapped_predicted, yaw_diff,
       std::abs(LibXR::CycleValue<double>(measured_yaw) -
                LibXR::CycleValue<double>(predicted_yaw)),
@@ -88,5 +88,17 @@ inline double ArmorImageArea(const ArmorDetectorResult& armor)
   return std::max(
       1.0, std::abs(cv::contourArea(std::vector<cv::Point2f>(
                armor.points.begin(), armor.points.end()))));
+}
+
+inline double DetectorObservationVarianceScale(const ArmorDetectorResult& armor)
+{
+  if (!armor.pnp_valid || !std::isfinite(armor.pnp_reprojection_error_px))
+  {
+    return 4.0;
+  }
+
+  const double excess_error =
+      std::max(0.0, std::clamp(armor.pnp_reprojection_error_px, 0.0, 8.0) - 1.5);
+  return std::clamp(1.0 + 0.02 * excess_error * excess_error, 1.0, 1.5);
 }
 }  // namespace armor_tracker

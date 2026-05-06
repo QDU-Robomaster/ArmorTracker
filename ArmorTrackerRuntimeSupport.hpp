@@ -4,12 +4,30 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 
 #include "ArmorTrackerCommon.hpp"
 #include "CameraBase.hpp"
 
 namespace armor_tracker_detail
 {
+enum class CameraPoseMode : uint8_t
+{
+  FULL,
+  STATIC_ONLY,
+  YAW_ONLY,
+  RELATIVE_IMU,
+  RELATIVE_YAW_ONLY,
+};
+
+struct CameraPoseRuntime
+{
+  bool relative_rotation_initialized = false;
+  LibXR::Quaternion<double> initial_camera_rotation_inverse{};
+  bool relative_yaw_initialized = false;
+  double initial_camera_yaw = 0.0;
+};
+
 inline LibXR::Quaternion<double> PackedCameraRotation(
     const std::array<float, 4>& rotation_wxyz)
 {
@@ -24,13 +42,105 @@ inline LibXR::Position<double> PackedCameraTranslation(
                                  translation_xyz[2]);
 }
 
-inline LibXR::Transform<double> ArmorTrackerCameraRotationToTrackerWorldPose(
-    const LibXR::Quaternion<double>& camera_rotation,
+inline CameraPoseMode ParseCameraPoseMode()
+{
+  const char* env = std::getenv("XR_TRACKER_CAMERA_POSE_MODE");
+  if (env == nullptr || env[0] == '\0' || std::strcmp(env, "full") == 0 ||
+      std::strcmp(env, "default") == 0)
+  {
+    return CameraPoseMode::FULL;
+  }
+  if (std::strcmp(env, "static_only") == 0 || std::strcmp(env, "static") == 0)
+  {
+    return CameraPoseMode::STATIC_ONLY;
+  }
+  if (std::strcmp(env, "yaw_only") == 0 || std::strcmp(env, "yaw") == 0)
+  {
+    return CameraPoseMode::YAW_ONLY;
+  }
+  if (std::strcmp(env, "relative_imu") == 0)
+  {
+    return CameraPoseMode::RELATIVE_IMU;
+  }
+  if (std::strcmp(env, "relative_yaw_only") == 0 ||
+      std::strcmp(env, "relative_yaw") == 0)
+  {
+    return CameraPoseMode::RELATIVE_YAW_ONLY;
+  }
+  return CameraPoseMode::FULL;
+}
+
+inline LibXR::Quaternion<double> CameraYawOnlyRotation(
+    const LibXR::Quaternion<double>& camera_rotation)
+{
+  const Eigen::Vector3d euler =
+      LibXR::RotationMatrix<double>(camera_rotation.ToRotationMatrix()).ToEulerAngle();
+  return LibXR::Quaternion<double>(
+      LibXR::EulerAngle<double>(0.0, 0.0, euler.z()).ToQuaternion());
+}
+
+inline double CameraYaw(const LibXR::Quaternion<double>& camera_rotation)
+{
+  const Eigen::Vector3d euler =
+      LibXR::RotationMatrix<double>(camera_rotation.ToRotationMatrix()).ToEulerAngle();
+  return euler.z();
+}
+
+inline LibXR::Transform<double> ComposeCameraPose(
+    const LibXR::Quaternion<double>& dynamic_rotation,
     const LibXR::Position<double>& camera_translation,
     const LibXR::Transform<double>& gimbal_to_camera_transform_static)
 {
-  return LibXR::Transform<double>(camera_rotation, camera_translation) +
+  return LibXR::Transform<double>(dynamic_rotation, camera_translation) +
          gimbal_to_camera_transform_static;
+}
+
+inline LibXR::Transform<double> ArmorTrackerCameraRotationToTrackerWorldPose(
+    const LibXR::Quaternion<double>& camera_rotation,
+    const LibXR::Position<double>& camera_translation,
+    const LibXR::Transform<double>& gimbal_to_camera_transform_static,
+    CameraPoseRuntime& runtime)
+{
+  switch (ParseCameraPoseMode())
+  {
+    case CameraPoseMode::STATIC_ONLY:
+      return ComposeCameraPose(LibXR::Quaternion<double>(), camera_translation,
+                               gimbal_to_camera_transform_static);
+    case CameraPoseMode::YAW_ONLY:
+      return ComposeCameraPose(CameraYawOnlyRotation(camera_rotation),
+                               camera_translation,
+                               gimbal_to_camera_transform_static);
+    case CameraPoseMode::RELATIVE_IMU:
+    {
+      if (!runtime.relative_rotation_initialized)
+      {
+        runtime.initial_camera_rotation_inverse = -camera_rotation;
+        runtime.relative_rotation_initialized = true;
+      }
+      return ComposeCameraPose(
+          runtime.initial_camera_rotation_inverse * camera_rotation,
+          camera_translation, gimbal_to_camera_transform_static);
+    }
+    case CameraPoseMode::RELATIVE_YAW_ONLY:
+    {
+      const double yaw = CameraYaw(camera_rotation);
+      if (!runtime.relative_yaw_initialized)
+      {
+        runtime.initial_camera_yaw = yaw;
+        runtime.relative_yaw_initialized = true;
+      }
+      return ComposeCameraPose(
+          LibXR::Quaternion<double>(
+              LibXR::EulerAngle<double>(0.0, 0.0,
+                                        yaw - runtime.initial_camera_yaw)
+                  .ToQuaternion()),
+          camera_translation, gimbal_to_camera_transform_static);
+    }
+    case CameraPoseMode::FULL:
+    default:
+      return ComposeCameraPose(camera_rotation, camera_translation,
+                               gimbal_to_camera_transform_static);
+  }
 }
 
 inline bool SingleArmorModeEnabled()
@@ -251,7 +361,7 @@ inline double SpPitchVarianceScale()
 inline double SpYpdDistanceVarianceScale()
 {
   return std::max(1e-4,
-                  ParseEnvDouble("XR_TRACKER_SP_DISTANCE_R_SCALE", 1.0));
+                  ParseEnvDouble("XR_TRACKER_SP_DISTANCE_R_SCALE", 0.1));
 }
 
 inline double SpYpdArmorYawVarianceScale()
@@ -314,9 +424,68 @@ inline bool SpPairDeltaZEnabled()
   return EnvFlagEnabled("XR_TRACKER_SP_ENABLE_PAIR_DZ");
 }
 
-inline double SpPairDeltaZAlpha()
+inline double SpPairGeometryMinDeterminant()
 {
-  return std::clamp(ParseEnvDouble("XR_TRACKER_SP_PAIR_DZ_ALPHA", 0.40), 0.0, 1.0);
+  return std::clamp(
+      ParseEnvDouble("XR_TRACKER_SP_PAIR_GEOMETRY_MIN_DET", 0.35), 0.0, 1.0);
+}
+
+inline double SpPairGeometryMaxFitError()
+{
+  return std::max(
+      0.0, ParseEnvDouble("XR_TRACKER_SP_PAIR_GEOMETRY_MAX_FIT_ERROR", 0.035));
+}
+
+inline double SpPairGeometryMaxCenterShift()
+{
+  return std::max(
+      0.0, ParseEnvDouble("XR_TRACKER_SP_PAIR_GEOMETRY_MAX_CENTER_SHIFT", 0.60));
+}
+
+inline double SpPairGeometryMaxRadiusShift()
+{
+  return std::max(
+      0.0, ParseEnvDouble("XR_TRACKER_SP_PAIR_GEOMETRY_MAX_RADIUS_SHIFT", 0.30));
+}
+
+inline double SpPairGeometryCenterVariance()
+{
+  const double sigma =
+      std::max(1e-4, ParseEnvDouble("XR_TRACKER_SP_PAIR_GEOMETRY_CENTER_SIGMA", 0.025));
+  return sigma * sigma;
+}
+
+inline double SpPairGeometryYawVariance()
+{
+  const double sigma =
+      std::max(1e-4, ParseEnvDouble("XR_TRACKER_SP_PAIR_GEOMETRY_YAW_SIGMA", 0.025));
+  return sigma * sigma;
+}
+
+inline double SpPairGeometryRadiusVariance()
+{
+  const double sigma =
+      std::max(1e-4, ParseEnvDouble("XR_TRACKER_SP_PAIR_GEOMETRY_RADIUS_SIGMA", 0.100));
+  return sigma * sigma;
+}
+
+inline double SpPairGeometryFallbackMaxScore()
+{
+  return std::max(
+      0.0, ParseEnvDouble("XR_TRACKER_SP_PAIR_GEOMETRY_FALLBACK_MAX_SCORE", 1.20));
+}
+
+inline double SpPairGeometryCovarianceFloor()
+{
+  const double sigma =
+      std::max(1e-4, ParseEnvDouble("XR_TRACKER_SP_PAIR_GEOMETRY_STATE_SIGMA", 0.050));
+  return sigma * sigma;
+}
+
+inline double SpDeltaRadiusShrinkAlpha()
+{
+  return std::clamp(ParseEnvDouble("XR_TRACKER_SP_DELTA_R_SHRINK_ALPHA", 0.03),
+                    0.0, 1.0);
 }
 
 inline double SpPairDeltaZMinHeight()
@@ -334,12 +503,6 @@ inline double SpPairDeltaZVariance()
   return std::max(1e-8, ParseEnvDouble("XR_TRACKER_SP_PAIR_DZ_VARIANCE", 4e-4));
 }
 
-inline double SpPairRecenterAlpha()
-{
-  return std::clamp(ParseEnvDouble("XR_TRACKER_SP_PAIR_RECENTER_ALPHA", 0.5),
-                    0.0, 1.0);
-}
-
 inline bool SpPairDualUpdateEnabled()
 {
   return EnvFlagEnabled("XR_TRACKER_SP_PAIR_DUAL_UPDATE");
@@ -348,6 +511,95 @@ inline bool SpPairDualUpdateEnabled()
 inline bool SpMeasurementAnchoredOutputEnabled()
 {
   return EnvFlagEnabled("XR_TRACKER_SP_ENABLE_OUTPUT_MEAS_ANCHOR");
+}
+
+inline bool SpFixedPoseYawOptimizeEnabled()
+{
+  return EnvFlagEnabled("XR_TRACKER_SP_ENABLE_FIXED_POSE_YAW_OPT");
+}
+
+inline double SpFixedPoseYawPitchDeg()
+{
+  return std::clamp(
+      ParseEnvDouble("XR_TRACKER_SP_FIXED_POSE_YAW_PITCH_DEG", 15.0), 0.0, 45.0);
+}
+
+inline double SpFixedPoseYawRangeDeg()
+{
+  return std::clamp(
+      ParseEnvDouble("XR_TRACKER_SP_FIXED_POSE_YAW_RANGE_DEG", 70.0), 1.0, 180.0);
+}
+
+inline double SpFixedPoseYawCoarseStepDeg()
+{
+  return std::clamp(
+      ParseEnvDouble("XR_TRACKER_SP_FIXED_POSE_YAW_COARSE_STEP_DEG", 2.0),
+      0.2, 20.0);
+}
+
+inline double SpFixedPoseYawFineStepDeg()
+{
+  return std::clamp(
+      ParseEnvDouble("XR_TRACKER_SP_FIXED_POSE_YAW_FINE_STEP_DEG", 0.2),
+      0.05, 5.0);
+}
+
+inline double SpFixedPoseYawMinGainPx()
+{
+  return std::max(
+      0.0, ParseEnvDouble("XR_TRACKER_SP_FIXED_POSE_YAW_MIN_GAIN_PX", 0.05));
+}
+
+inline bool SpCenterMotionObserverEnabled()
+{
+  return !EnvFlagEnabled("XR_TRACKER_SP_DISABLE_CENTER_MOTION_OBSERVER");
+}
+
+inline bool SpCenterMotionObserverRadialVelocityEnabled()
+{
+  return EnvFlagEnabled("XR_TRACKER_SP_CENTER_MOTION_OBSERVER_RADIAL");
+}
+
+inline bool SpYawRateObserverEnabled()
+{
+  if (EnvFlagEnabled("XR_TRACKER_SP_DISABLE_YAW_RATE_OBSERVER"))
+  {
+    return false;
+  }
+  return EnvFlagEnabled("XR_TRACKER_SP_ENABLE_YAW_RATE_OBSERVER");
+}
+
+inline double SpYawRateObserverAlpha()
+{
+  return std::clamp(ParseEnvDouble("XR_TRACKER_SP_YAW_RATE_OBSERVER_ALPHA", 0.08),
+                    0.0, 1.0);
+}
+
+inline double SpYawRateObserverTau()
+{
+  return std::clamp(ParseEnvDouble("XR_TRACKER_SP_YAW_RATE_OBSERVER_TAU", 0.020),
+                    0.001, 0.500);
+}
+
+inline double SpYawRateObserverBlend()
+{
+  return std::clamp(ParseEnvDouble("XR_TRACKER_SP_YAW_RATE_OBSERVER_BLEND", 1.0),
+                    0.0, 1.0);
+}
+
+inline double SpYawRateObserverMaxRaw()
+{
+  return std::max(0.0, ParseEnvDouble("XR_TRACKER_SP_YAW_RATE_OBSERVER_MAX_RAW", 20.0));
+}
+
+inline double SpYawRateObserverMaxBlendDelta()
+{
+  return std::max(0.0, ParseEnvDouble("XR_TRACKER_SP_YAW_RATE_OBSERVER_MAX_BLEND_DELTA", 0.8));
+}
+
+inline std::uint32_t SpYawRateObserverMinSamples()
+{
+  return ParseEnvUint("XR_TRACKER_SP_YAW_RATE_OBSERVER_MIN_SAMPLES", 4U);
 }
 
 inline double SpOutputExtrapolateSeconds()
