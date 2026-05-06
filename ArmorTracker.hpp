@@ -54,6 +54,13 @@ constructor_args:
       measurement_recenter_alpha: 0.25
       quality_recenter: false
       enable_pair_geometry: true
+    preview:
+      enabled: false
+      realtime_preview: false
+      preview_window_name: "armor_tracker_preview"
+      preview_scale: 0.5
+      preview_wait_key_ms: 1
+      queue_capacity: 1
   sync: '@camera_frame_sync'
 template_args:
   - Info:
@@ -61,15 +68,16 @@ template_args:
       height: 720
       step: 3840
       encoding: CameraTypes::Encoding::BGR8
-      camera_matrix: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+      camera_matrix: [800.0, 0.0, 640.0, 0.0, 800.0, 360.0, 0.0, 0.0, 1.0]
       distortion_model: CameraTypes::DistortionModel::PLUMB_BOB
       distortion_coefficients: [0.0, 0.0, 0.0, 0.0, 0.0]
       rectification_matrix: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
-      projection_matrix: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+      projection_matrix: [800.0, 0.0, 640.0, 0.0, 0.0, 800.0, 360.0, 0.0, 0.0, 0.0, 1.0, 0.0]
 required_hardware: []
 depends:
   - qdu-future/ArmorDetector
   - qdu-future/CameraFrameSync
+  - qdu-future/VisionPreview@codex/composable-preview-20260506
 === END MANIFEST === */
 // clang-format on
 
@@ -91,6 +99,8 @@ depends:
 
 #include <Eigen/Eigen>
 #include <opencv2/calib3d.hpp>
+#include <opencv2/core.hpp>
+#include <opencv2/imgproc.hpp>
 
 // 框架与外部依赖头
 #include "ArmorTrackerCommon.hpp"
@@ -104,6 +114,7 @@ depends:
 #include "SolveTrajectory.hpp"
 #include "app_framework.hpp"
 #include "ArmorDetectorTypes.hpp"
+#include "ArmorDetectorDetail.hpp"
 #include "cycle_value.hpp"
 #include "extended_kalman_filter.hpp"
 #include "libxr_time.hpp"
@@ -113,6 +124,7 @@ depends:
 #include "thread.hpp"
 #include "timebase.hpp"
 #include "transform.hpp"
+#include "VisionPreview.hpp"
 
 namespace cv
 {
@@ -210,6 +222,8 @@ class ArmorTracker : public LibXR::Application
       bool quality_recenter = false;             // 按匹配质量调节重定位权重
       bool enable_pair_geometry = true;          // 双装甲显式估计整车中心与长短半径
     } sp;
+
+    VisionPreview::RuntimeParam preview{};       // 可选 tracker 实时预览。
   };
 
   // ====================== 公共类型 ======================
@@ -401,6 +415,11 @@ class ArmorTracker : public LibXR::Application
   // ====================== IO 与回调（原 Node 逻辑） ======================
   void VelocityCallback(double velocity_msg);
   void ArmorsCallback(DetectionPacket* packet);
+  void SubmitPreview(const ImageFrame& image_frame,
+                     const ArmorDetectorResults& detector_armors,
+                     const SolveTrajectory::Target& target_msg,
+                     const EkfPointsMsg& ekf_msg,
+                     const CandidateDebugMsg& candidate_debug_msg);
 
   // ====================== 辅助函数 ======================
   void InitEKF(const ArmorDetectorResult& a);
@@ -637,6 +656,7 @@ class ArmorTracker : public LibXR::Application
   // 保存配置（类内聚合）
   Config cfg_;
   Config::Solver solver_cfg_;
+  VisionPreview preview_{};
 
   const char* name_ = "armor_tracker";
   LibXR::RamFS::File cmd_file_;
@@ -811,6 +831,7 @@ ArmorTracker<CameraInfoV>::ArmorTracker(LibXR::HardwareContainer& hw,
       sync_(sync)
 {
   XR_LOG_INFO("Starting ArmorTracker!");
+  preview_.Start(cfg_.preview);
 
   hw.template FindOrExit<LibXR::RamFS>({"ramfs"})->Add(cmd_file_);
 
@@ -1352,6 +1373,8 @@ void ArmorTracker<CameraInfoV>::SetConfig(const Config& cfg)
     rt_.tracking_thres = cfg.thresholds.tracking_thres;
   }
   cfg_ = cfg;
+  preview_.Stop();
+  preview_.Start(cfg_.preview);
   if (cfg.solver.bias_time != solver_cfg_.bias_time ||
       cfg.solver.s_bias != solver_cfg_.s_bias || cfg.solver.z_bias != solver_cfg_.z_bias)
   {

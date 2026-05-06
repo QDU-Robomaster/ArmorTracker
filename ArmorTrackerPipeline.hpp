@@ -572,7 +572,8 @@ void ArmorTracker<CameraInfoV>::ArmorsCallback(DetectionPacket* packet)
     return;
   }
 
-  ArmorDetectorResults armors_msg = packet->detections->results;
+  const ArmorDetectorResults detector_preview_armors = packet->detections->results;
+  ArmorDetectorResults armors_msg = detector_preview_armors;
   armors_msg.erase(
       std::remove_if(armors_msg.begin(), armors_msg.end(),
                      [](const ArmorDetectorResult& armor)
@@ -886,4 +887,120 @@ void ArmorTracker<CameraInfoV>::ArmorsCallback(DetectionPacket* packet)
   // ekf_points 是运行期数据合约，供预览、录像和 truth 对齐工具消费。
   io_.ekf_points_topic.Publish(ekf_msg_);
   io_.target_topic.Publish(target_msg);
+  SubmitPreview(*source_frame.image_frame, detector_preview_armors, target_msg,
+                ekf_msg_, candidate_debug_msg_);
+}
+
+template <CameraTypes::CameraInfo CameraInfoV>
+void ArmorTracker<CameraInfoV>::SubmitPreview(
+    const ImageFrame& image_frame,
+    const ArmorDetectorResults& detector_armors,
+    const SolveTrajectory::Target& target_msg,
+    const EkfPointsMsg& ekf_msg,
+    const CandidateDebugMsg& candidate_debug_msg)
+{
+  if (!preview_.Running())
+  {
+    return;
+  }
+
+  const int cv_type = armor_detector_detail::CvTypeFromEncoding(kCameraInfo.encoding);
+  if (cv_type < 0)
+  {
+    return;
+  }
+
+  cv::Mat image(static_cast<int>(kCameraInfo.height),
+                static_cast<int>(kCameraInfo.width), cv_type,
+                const_cast<uint8_t*>(image_frame.data.data()),
+                static_cast<size_t>(kCameraInfo.step));
+  const cv::Mat bgr_image =
+      armor_detector_detail::ConvertToBgrWithEncoding(image, kCameraInfo.encoding);
+  if (bgr_image.empty())
+  {
+    return;
+  }
+
+  const auto camera_matrix = kCameraInfo.camera_matrix;
+  preview_.Submit(
+      bgr_image,
+      [detector_armors, target_msg, ekf_msg, candidate_debug_msg,
+       camera_matrix](cv::Mat& canvas)
+      {
+        for (const auto& armor : detector_armors)
+        {
+          const cv::Scalar color =
+              armor.pnp_valid ? cv::Scalar(80, 220, 255) : cv::Scalar(120, 120, 120);
+          for (std::size_t i = 0; i < armor.points.size(); ++i)
+          {
+            cv::line(canvas, armor.points[i],
+                     armor.points[(i + 1U) % armor.points.size()], color, 2,
+                     cv::LINE_AA);
+          }
+          cv::circle(canvas, armor.center, 4, color, -1, cv::LINE_AA);
+        }
+
+        const auto project = [&camera_matrix](const LibXR::Position<double>& point,
+                                              cv::Point& uv) -> bool
+        {
+          const double z = point.z();
+          if (!std::isfinite(z) || z <= 1e-6)
+          {
+            return false;
+          }
+          const double u = camera_matrix[0] * point.x() / z + camera_matrix[2];
+          const double v = camera_matrix[4] * point.y() / z + camera_matrix[5];
+          if (!std::isfinite(u) || !std::isfinite(v))
+          {
+            return false;
+          }
+          uv = cv::Point(static_cast<int>(std::lround(u)),
+                         static_cast<int>(std::lround(v)));
+          return true;
+        };
+
+        cv::Point center_uv;
+        if (ekf_msg.valid[0] && project(ekf_msg.center_cam, center_uv))
+        {
+          cv::drawMarker(canvas, center_uv, cv::Scalar(40, 255, 40),
+                         cv::MARKER_CROSS, 18, 2, cv::LINE_AA);
+          cv::putText(canvas, "TC", center_uv + cv::Point(8, -8),
+                      cv::FONT_HERSHEY_SIMPLEX, 0.55, cv::Scalar(40, 255, 40),
+                      2, cv::LINE_AA);
+        }
+        for (int i = 0; i < 4; ++i)
+        {
+          cv::Point armor_uv;
+          if (ekf_msg.valid[i + 1] && project(ekf_msg.armors_cam[i], armor_uv))
+          {
+            cv::circle(canvas, armor_uv, 5, cv::Scalar(255, 120, 40), -1,
+                       cv::LINE_AA);
+            cv::putText(canvas, "E" + std::to_string(i), armor_uv + cv::Point(6, 16),
+                        cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(255, 120, 40),
+                        2, cv::LINE_AA);
+          }
+        }
+
+        const auto id_index = static_cast<std::size_t>(target_msg.id);
+        const std::string id_name =
+            id_index < ARMOR_NUMBER_NAMES.size()
+                ? std::string(ARMOR_NUMBER_NAMES[id_index])
+                : std::string("invalid");
+        const std::string header =
+            std::string("tracker ") + (target_msg.tracking ? "TRACK" : "NO_TARGET") +
+            " id=" + id_name +
+            " face=" + std::to_string(target_msg.tracked_face_index) +
+            " det=" + std::to_string(detector_armors.size());
+        cv::putText(canvas, header, cv::Point(12, 28),
+                    cv::FONT_HERSHEY_SIMPLEX, 0.75, cv::Scalar(40, 240, 40),
+                    2, cv::LINE_AA);
+
+        const std::string debug_line =
+            "candidate count=" + std::to_string(candidate_debug_msg.count) +
+            " selected=" + std::to_string(candidate_debug_msg.selected_index) +
+            " matched=" + std::to_string(candidate_debug_msg.matched);
+        cv::putText(canvas, debug_line, cv::Point(12, 56),
+                    cv::FONT_HERSHEY_SIMPLEX, 0.58, cv::Scalar(230, 230, 230),
+                    2, cv::LINE_AA);
+      });
 }

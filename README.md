@@ -3,6 +3,7 @@
 `ArmorTracker` 是 Webots/Linux 自瞄链路里的目标级跟踪模块。输入来自
 `ArmorDetector` 发布的检测结果和 `CameraFrameSync` 同步帧，输出 tracker
 域下的目标状态和调试信息。云台角、发送包和开火判定由后级 Aimer 负责。
+需要实时预览时，tracker 可直接组合 `VisionPreview`，把当前同步图像和绘制回调提交到预览线程。
 
 ## 文件结构
 
@@ -17,6 +18,14 @@
 - `ArmorTrackerDebugSupport.hpp`、`ArmorTrackerStateAuditSupport.hpp`：调试 topic 组包和状态审计输出。
 - `SolveTrajectory.*`、`TrajectoryCompensationTable.hpp`、`table.bin`：保留 `Target` 消息定义和旧弹道工具，当前 tracker 主流程不再发布弹道命令。
 - `extended_kalman_filter.*`：通用 EKF 实现。
+
+## 实时预览
+
+`cfg.preview` 默认关闭。打开 `enabled` 和 `realtime_preview` 后，tracker 在处理完一帧
+detector packet 后提交该帧图像，预览线程绘制 detector 角点、EKF 投影点、tracking 状态和候选摘要。
+
+预览只显示窗口，不订阅 topic、不录像、不写 TSV。图像深拷贝发生在 tracker 回调线程，后续 overlay 绘制发生在
+`VisionPreview` 自己的预览线程，避免 OpenCV 窗口阻塞跟踪主链路。
 
 ## 构建边界
 
