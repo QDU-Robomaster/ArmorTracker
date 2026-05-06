@@ -1,5 +1,13 @@
 #pragma once
 
+/**
+ * @file ArmorTrackerFaceSelector.hpp
+ * @brief 多装甲面候选评分、换面门控和最终选面策略。
+ *
+ * FaceSelector 是纯算法层：输入 tracker 运行时状态、detector 观测和若干预测回调，
+ * 输出本帧最可信的装甲面候选与完整调试快照，不直接读写 topic 或 EKF 对象。
+ */
+
 #include <algorithm>
 #include <array>
 #include <cfloat>
@@ -11,10 +19,13 @@
 #include <opencv2/imgproc.hpp>
 
 #include "ArmorTrackerCommon.hpp"
-#include "armor.hpp"
+#include "ArmorDetectorTypes.hpp"
 
 namespace armor_tracker
 {
+/**
+ * @brief 按候选面索引给换面候选增加先验惩罚。
+ */
 inline double FaceSwitchPenalty(int face_index)
 {
   if (face_index == 0)
@@ -24,68 +35,110 @@ inline double FaceSwitchPenalty(int face_index)
   return face_index == 2 ? 0.45 : 0.20;
 }
 
+/**
+ * @brief 计算允许半径误差弱化后的三维位置残差。
+ *
+ * 四装甲目标的半径状态容易被单帧 PnP 尾部拉动；允许半径误差时会降低径向残差权重，
+ * 让切向和高度误差在选面中占主导。
+ */
+inline double RadiusInvariantPositionDiff(const Eigen::Vector3d& predicted,
+                                          const Eigen::Vector3d& measured,
+                                          double predicted_yaw,
+                                          bool allow_radius_error)
+{
+  const Eigen::Vector3d residual = predicted - measured;
+  if (!allow_radius_error)
+  {
+    return residual.norm();
+  }
+
+  const Eigen::Vector2d radial_dir(std::cos(predicted_yaw),
+                                   std::sin(predicted_yaw));
+  const Eigen::Vector2d xy_residual(residual.x(), residual.y());
+  const double radial_error = xy_residual.dot(radial_dir);
+  const Eigen::Vector2d tangent_error = xy_residual - radial_error * radial_dir;
+  constexpr double kRadialErrorWeight = 0.35;
+  return std::sqrt(tangent_error.squaredNorm() + residual.z() * residual.z() +
+                   std::pow(kRadialErrorWeight * radial_error, 2));
+}
+
+/**
+ * @brief 当前帧选面策略开关与阈值集合。
+ */
 struct FaceSelectionPolicy
 {
-  // 这些是“本帧允许怎么选”的策略开关和阈值。
-  // ArmorTracker 负责从配置/env 组装，FaceSelector 只消费，不自己读环境变量。
-  bool single_armor_mode = false;
-  bool id_assist_enabled = false;
-  bool face_switch_enabled = false;
-  bool relaxed_face_switch_enabled = false;
-  bool odd_face_switch_enabled = false;
-  bool view_priority_enabled = false;
-  bool directional_face_switch_enabled = false;
-  bool symmetric_geometry_enabled = false;
+  bool single_armor_mode = false;             ///< 是否只跟踪单块装甲。
+  bool id_assist_enabled = false;             ///< 是否使用图像 track id 辅助同面保持。
+  bool face_switch_enabled = false;           ///< 是否允许跨面匹配。
+  bool relaxed_face_switch_enabled = false;   ///< 是否允许放宽阈值换面。
+  bool odd_face_switch_enabled = false;       ///< 是否允许切到奇数高低面。
+  bool view_priority_enabled = false;         ///< 是否按视角和面积给候选加权。
+  bool directional_face_switch_enabled = false;  ///< 是否按 yaw 速度限制换面方向。
+  bool symmetric_geometry_enabled = false;       ///< 是否强制长短半径/高度对称。
+  bool observation_quality_enabled = true;       ///< 是否启用观测质量评分。
+  bool match_yaw_allow_pi_ambiguity = false;     ///< 是否允许 PnP yaw 折叠 pi。
 
-  double max_match_distance = 0.15;
-  double max_match_yaw_diff = 1.0;
-  double single_armor_image_center_gate_px = 180.0;
-  double single_armor_area_log_gate = 0.80;
-  double face_switch_score_deadzone = 0.15;
-  double face_switch_position_deadzone = 0.05;
-  double face_switch_yaw_deadzone = 0.35;
-  double face_switch_timeout_sec = 0.0;
-  double id_assist_same_face_center_gate_px = 85.0;
-  double id_assist_same_face_area_log_gate = 0.45;
-  double relaxed_same_face_image_gate_px = 90.0;
-  double relaxed_same_face_area_log_gate = 0.80;
+  double max_match_distance = 0.15;           ///< 严格位置匹配阈值，单位 m。
+  double max_match_yaw_diff = 1.0;            ///< 严格 yaw 匹配阈值，单位 rad。
+  double single_armor_image_center_gate_px = 180.0;  ///< 单装甲图像中心门限。
+  double single_armor_area_log_gate = 0.80;          ///< 单装甲面积比例对数门限。
+  double face_switch_score_deadzone = 0.15;          ///< 换面分数优势死区。
+  double face_switch_position_deadzone = 0.05;       ///< 换面位置优势死区。
+  double face_switch_yaw_deadzone = 0.35;            ///< 换面 yaw 优势死区。
+  double face_switch_timeout_sec = 0.0;              ///< 换面冷却时间，单位 s。
+  double id_assist_same_face_center_gate_px = 85.0;  ///< ID 辅助同面中心门限。
+  double id_assist_same_face_area_log_gate = 0.45;   ///< ID 辅助同面面积门限。
+  double relaxed_same_face_image_gate_px = 90.0;     ///< 放宽同面图像中心门限。
+  double relaxed_same_face_area_log_gate = 0.80;     ///< 放宽同面面积门限。
+  double stable_max_reprojection_px = 1.8;           ///< 稳定观测最大重投影误差。
+  double stable_min_area_px = 60.0;                  ///< 稳定观测最小图像面积。
+  double stable_min_confidence = 0.0;                ///< 稳定观测最小置信度。
+  double observation_quality_score_weight = 0.55;    ///< 观测质量惩罚权重。
+  double confirmed_track_bonus = 0.24;               ///< confirmed track 奖励。
 };
 
+/**
+ * @brief 选面器消费的当前 tracker 绑定状态。
+ */
 struct FaceSelectionTrackedState
 {
-  // 这是当前 tracker 对“正在跟谁”的最小认知，
-  // FaceSelector 不接触 EKF 内部状态，只吃这些稳定输入。
-  ArmorDetectorResult tracked_armor{};
-  ArmorNumber tracked_id = ArmorNumber::INVALID;
-  int tracked_armors_num = 1;
-  bool tracked_face_track_id_valid = false;
-  uint16_t tracked_face_track_id = 0;
-  double face_switch_cooldown_remaining = 0.0;
-  double dz_abs_ref = 0.0;
+  ArmorDetectorResult tracked_armor{};       ///< 上一帧绑定的装甲观测。
+  ArmorNumber tracked_id = ArmorNumber::INVALID;  ///< 当前跟踪数字 ID。
+  int tracked_armors_num = 1;                ///< 当前目标理论装甲面数量。
+  bool tracked_face_track_id_valid = false;  ///< 当前面 track id 是否有效。
+  uint16_t tracked_face_track_id = 0;        ///< 当前面图像 track id。
+  double face_switch_cooldown_remaining = 0.0;  ///< 剩余换面冷却时间。
+  double dz_abs_ref = 0.0;                   ///< 高低面高度差绝对值参考。
 };
 
+/**
+ * @brief 单条 detection 在某个 face 假设下的候选评分。
+ */
 struct FaceMatchCandidate
 {
-  // 一条 detection 在某个 face_index 假设下的完整匹配评分。
-  ArmorDetectorResult armor{};
-  std::size_t armor_index = 0;
-  uint8_t debug_index = 24;
-  int face_index = -1;
-  bool same_number = false;
-  int image_track_id = -1;
-  bool confirmed_image_track = false;
-  bool same_persistent_track = false;
-  double measured_yaw = 0.0;
-  double position_diff = DBL_MAX;
-  double yaw_diff = DBL_MAX;
-  double view_bonus = 0.0;
-  double area_score = 0.0;
-  double frontality = 0.0;
-  double image_center_diff = DBL_MAX;
-  double area_ratio_log = DBL_MAX;
-  double score = DBL_MAX;
+  ArmorDetectorResult armor{};        ///< 原始装甲观测。
+  std::size_t armor_index = 0;        ///< detection 在本帧列表中的索引。
+  uint8_t debug_index = 24;           ///< 调试数组中的索引。
+  int face_index = -1;                ///< 假设匹配的本地装甲面索引。
+  bool same_number = false;           ///< 数字 ID 是否与当前跟踪一致。
+  int image_track_id = -1;            ///< 图像域 track id。
+  bool confirmed_image_track = false; ///< 图像 track 是否已确认。
+  bool same_persistent_track = false; ///< 是否与当前绑定面同一个持续 track。
+  double measured_yaw = 0.0;          ///< 测得装甲面 yaw。
+  double position_diff = DBL_MAX;     ///< 位置残差。
+  double yaw_diff = DBL_MAX;          ///< yaw 残差。
+  double view_bonus = 0.0;            ///< 视角/面积奖励。
+  double area_score = 0.0;            ///< 图像面积归一化分数。
+  double frontality = 0.0;            ///< 装甲面朝向相机程度。
+  double observation_quality_penalty = 0.0;  ///< PnP/面积/置信度质量惩罚。
+  double image_center_diff = DBL_MAX;        ///< 图像中心连续性残差。
+  double area_ratio_log = DBL_MAX;           ///< 面积比例对数残差。
+  double score = DBL_MAX;                    ///< 综合候选分数，越小越好。
 };
 
+/**
+ * @brief 单个候选的紧凑调试载荷。
+ */
 struct FaceSelectionDebugItem
 {
   uint8_t armor_index{};
@@ -105,86 +158,95 @@ struct FaceSelectionDebugItem
   float view_bonus{};
   float area_score{};
   float frontality{};
+  float observation_quality_penalty{};
   float center_x{};
   float center_y{};
   float predicted_yaw{};
   float measured_yaw{};
 };
 
+/**
+ * @brief 本帧选面过程的完整调试快照。
+ */
 struct FaceSelectionDebugSnapshot
 {
-  // 调试快照只服务可视化与日志，不反向驱动算法。
-  static constexpr uint8_t kMaxItems = 24;
-  static constexpr uint8_t kMaxDetections = 8;
+  static constexpr uint8_t kMaxItems = 24;       ///< 最多记录的候选数量。
+  static constexpr uint8_t kMaxDetections = 8;   ///< 最多记录的 detection 数量。
 
-  uint8_t count = 0;
-  uint8_t selected_index = 255;
-  uint8_t detection_count = 0;
-  int8_t preferred_adjacent_face = -1;
-  uint8_t has_same_number_candidate = 0;
-  float relaxed_same_face_distance = 0.0f;
-  float relaxed_face_switch_distance = 0.0f;
-  float relaxed_face_switch_yaw_diff = 0.0f;
-  float best_same_face_score = -1.0f;
-  float best_switch_face_score = -1.0f;
-  uint8_t same_face_matched = 0;
-  uint8_t switch_face_matched = 0;
-  uint8_t switch_blocked_by_timeout = 0;
-  uint8_t switch_allowed = 0;
-  std::array<int16_t, kMaxDetections> detection_track_ids{};
-  std::array<uint8_t, kMaxDetections> detection_track_confirmed{};
-  std::array<FaceSelectionDebugItem, kMaxItems> items{};
+  uint8_t count = 0;                 ///< 已写入候选数量。
+  uint8_t selected_index = 255;      ///< 被选中候选的 debug index。
+  uint8_t detection_count = 0;       ///< 本帧 detection 记录数量。
+  int8_t preferred_adjacent_face = -1;   ///< 按旋转方向偏好的相邻面。
+  uint8_t has_same_number_candidate = 0; ///< 是否存在同数字候选。
+  float relaxed_same_face_distance = 0.0f;      ///< 放宽同面位置阈值。
+  float relaxed_face_switch_distance = 0.0f;    ///< 放宽换面位置阈值。
+  float relaxed_face_switch_yaw_diff = 0.0f;    ///< 放宽换面 yaw 阈值。
+  float best_same_face_score = -1.0f;           ///< 最佳同面分数。
+  float best_switch_face_score = -1.0f;         ///< 最佳换面分数。
+  uint8_t same_face_matched = 0;                ///< 是否同面匹配成功。
+  uint8_t switch_face_matched = 0;              ///< 是否存在换面匹配。
+  uint8_t switch_blocked_by_timeout = 0;        ///< 换面是否被冷却阻塞。
+  uint8_t switch_allowed = 0;                   ///< 本帧是否允许换面。
+  std::array<int16_t, kMaxDetections> detection_track_ids{};       ///< detection 对应 track id。
+  std::array<uint8_t, kMaxDetections> detection_track_confirmed{}; ///< detection track 确认标记。
+  std::array<FaceSelectionDebugItem, kMaxItems> items{};           ///< 候选调试项。
 };
 
+/**
+ * @brief 最终接受候选的原因枚举。
+ */
 enum class FaceSelectionAcceptedMode : std::uint8_t
 {
-  NONE = 0,
-  STRICT_SWITCH = 1,
-  RELAXED_SWITCH = 2,
-  ID_REBIND_SWITCH = 3,
-  ID_HANDOVER_SWITCH = 4,
-  STRICT_SAME_FACE = 5,
-  RELAXED_SAME_FACE = 6,
-  ID_ASSISTED_SAME_FACE = 7,
+  NONE = 0,                  ///< 未接受候选。
+  STRICT_SWITCH = 1,         ///< 严格阈值换面。
+  RELAXED_SWITCH = 2,        ///< 放宽阈值换面。
+  ID_REBIND_SWITCH = 3,      ///< ID 辅助重新绑定换面。
+  ID_HANDOVER_SWITCH = 4,    ///< ID 辅助交接换面。
+  STRICT_SAME_FACE = 5,      ///< 严格阈值保持同面。
+  RELAXED_SAME_FACE = 6,     ///< 放宽阈值保持同面。
+  ID_ASSISTED_SAME_FACE = 7, ///< ID 辅助保持同面。
 };
 
+/**
+ * @brief 选面器一帧的完整输出。
+ */
 struct FaceSelectionResult
 {
-  // 选面器的输出分两层：
-  // 1. 调试快照
-  // 2. 最终是否选中、为什么选中
-  FaceSelectionDebugSnapshot debug{};
+  FaceSelectionDebugSnapshot debug{};  ///< 可视化和日志使用的调试快照。
 
-  FaceMatchCandidate best_candidate{};
-  FaceMatchCandidate best_same_face_candidate{};
-  FaceMatchCandidate best_switch_candidate{};
-  FaceMatchCandidate selected_candidate{};
+  FaceMatchCandidate best_candidate{};            ///< 全局最佳候选。
+  FaceMatchCandidate best_same_face_candidate{};  ///< 最佳同面候选。
+  FaceMatchCandidate best_switch_candidate{};     ///< 最佳换面候选。
+  FaceMatchCandidate selected_candidate{};        ///< 最终接受候选。
 
-  bool has_selected_candidate = false;
-  bool has_same_number_candidate = false;
-  bool observed_persistent_track_this_frame = false;
+  bool has_selected_candidate = false;            ///< 是否有最终候选。
+  bool has_same_number_candidate = false;         ///< 是否存在同数字候选。
+  bool observed_persistent_track_this_frame = false;  ///< 是否观测到当前持续 track。
 
-  bool strict_same_face_match = false;
-  bool relaxed_same_face_match = false;
-  bool id_assisted_same_face_match = false;
-  bool id_assisted_same_face_hold = false;
-  bool matched_same_face = false;
+  bool strict_same_face_match = false;       ///< 严格同面匹配是否成立。
+  bool relaxed_same_face_match = false;      ///< 放宽同面匹配是否成立。
+  bool id_assisted_same_face_match = false;  ///< ID 辅助同面匹配是否成立。
+  bool id_assisted_same_face_hold = false;   ///< ID 强保持同面是否成立。
+  bool matched_same_face = false;            ///< 任一同面条件是否成立。
 
-  bool strict_face_switch_match = false;
-  bool relaxed_face_switch_match = false;
-  bool id_assisted_face_rebind_match = false;
-  bool id_assisted_face_handover_match = false;
-  bool matched_switch_face = false;
+  bool strict_face_switch_match = false;         ///< 严格换面匹配是否成立。
+  bool relaxed_face_switch_match = false;        ///< 放宽换面匹配是否成立。
+  bool id_assisted_face_rebind_match = false;    ///< ID 重绑定换面是否成立。
+  bool id_assisted_face_handover_match = false;  ///< ID 交接换面是否成立。
+  bool matched_switch_face = false;              ///< 任一换面条件是否成立。
 
-  bool switch_blocked_by_timeout = false;
-  bool switch_blocked_by_id_mismatch = false;
-  bool allow_face_switch = false;
+  bool switch_blocked_by_timeout = false;     ///< 换面是否被冷却时间阻塞。
+  bool switch_blocked_by_id_mismatch = false; ///< 换面是否被数字 ID 阻塞。
+  bool allow_face_switch = false;             ///< 本帧最终是否允许换面。
 
-  FaceSelectionAcceptedMode accepted_mode = FaceSelectionAcceptedMode::NONE;
-  double info_position_diff = DBL_MAX;
-  double info_yaw_diff = DBL_MAX;
+  FaceSelectionAcceptedMode accepted_mode = FaceSelectionAcceptedMode::NONE; ///< 接受模式。
+  double info_position_diff = DBL_MAX;  ///< 对外 info 的位置残差。
+  double info_yaw_diff = DBL_MAX;       ///< 对外 info 的 yaw 残差。
 };
 
+/**
+ * @brief 比较两个候选，判断 candidate 是否优于 best。
+ */
 inline bool IsBetterMatchCandidate(const FaceMatchCandidate& candidate,
                                    const FaceMatchCandidate& best)
 {
@@ -205,6 +267,14 @@ inline bool IsBetterMatchCandidate(const FaceMatchCandidate& candidate,
   return false;
 }
 
+/**
+ * @brief 执行本帧多 detection、多 face 假设枚举和最终选面。
+ *
+ * @tparam TrackIdGetter detection index -> 图像 track id 的回调。
+ * @tparam TrackConfirmedGetter detection index -> track confirmed 标记的回调。
+ * @tparam PredictPositionGetter face index -> 预测装甲位置的回调。
+ * @tparam PredictYawGetter face index -> 预测装甲 yaw 的回调。
+ */
 template <typename TrackIdGetter, typename TrackConfirmedGetter,
           typename PredictPositionGetter, typename PredictYawGetter>
 FaceSelectionResult SelectFaceMatch(
@@ -348,8 +418,13 @@ FaceSelectionResult SelectFaceMatch(
       const Eigen::Vector3d predicted_position = get_predicted_position(face_index);
       const double predicted_yaw = get_predicted_yaw(face_index);
       const double measured_yaw =
-          MeasuredArmorYawNear(armor, predicted_yaw);
-      const double position_diff = (predicted_position - position_vec).norm();
+          policy.match_yaw_allow_pi_ambiguity
+              ? MeasuredArmorYawNearAllowPi(armor, predicted_yaw)
+              : MeasuredArmorYawNear(armor, predicted_yaw);
+      const bool allow_radius_error =
+          !policy.single_armor_mode && tracked.tracked_armors_num == 4;
+      const double position_diff = RadiusInvariantPositionDiff(
+          predicted_position, position_vec, predicted_yaw, allow_radius_error);
       const double current_yaw_diff =
           AngularDiffAbs(measured_yaw, predicted_yaw);
       LogImpossibleYawDiff("match", armor_index, face_index, measured_yaw,
@@ -367,8 +442,8 @@ FaceSelectionResult SelectFaceMatch(
           !allow_number_mismatch_same_face)
       {
         XR_LOG_DEBUG(
-            "Tracker reject mismatched number: armor=%zu num=%d tracked=%d face=%d has_same=%d persistent=%d confirmed=%d img_diff=%.1f area_log=%.3f",
-            armor_index, static_cast<int>(armor.number),
+            "Tracker reject mismatched number: armor=%u num=%d tracked=%d face=%d has_same=%d persistent=%d confirmed=%d img_diff=%.1f area_log=%.3f",
+            static_cast<unsigned>(armor_index), static_cast<int>(armor.number),
             static_cast<int>(tracked.tracked_id), face_index,
             result.has_same_number_candidate ? 1 : 0,
             same_persistent_track ? 1 : 0, confirmed_image_track ? 1 : 0,
@@ -380,8 +455,8 @@ FaceSelectionResult SelectFaceMatch(
            area_ratio_log > policy.single_armor_area_log_gate))
       {
         XR_LOG_DEBUG(
-            "Tracker single-armor reject: armor=%zu num=%d img_diff=%.1f area_log=%.3f",
-            armor_index, static_cast<int>(armor.number), image_center_diff,
+            "Tracker single-armor reject: armor=%u num=%d img_diff=%.1f area_log=%.3f",
+            static_cast<unsigned>(armor_index), static_cast<int>(armor.number), image_center_diff,
             area_ratio_log);
         continue;
       }
@@ -415,11 +490,30 @@ FaceSelectionResult SelectFaceMatch(
       const double confirmed_switch_bonus =
           (policy.id_assist_enabled && face_index > 0 && confirmed_image_track) ? 0.16
                                                                                 : 0.0;
+      const double observation_quality_penalty =
+          policy.observation_quality_enabled
+              ? ArmorObservationQualityPenalty(
+                    armor, policy.stable_max_reprojection_px,
+                    policy.stable_min_area_px, policy.stable_min_confidence)
+              : 0.0;
+      const double stable_observation_bonus =
+          policy.observation_quality_enabled &&
+                  StableArmorObservation(armor, policy.stable_max_reprojection_px,
+                                         policy.stable_min_area_px,
+                                         policy.stable_min_confidence)
+              ? 0.12
+              : 0.0;
+      const double confirmed_track_quality_bonus =
+          policy.observation_quality_enabled && confirmed_image_track
+              ? policy.confirmed_track_bonus
+              : 0.0;
       const double score =
           position_score + 0.40 * yaw_score + FaceSwitchPenalty(face_index) +
           number_penalty - view_bonus + 0.35 * image_score +
           0.20 * area_ratio_score + dz_mismatch_penalty - persistent_track_bonus -
-          confirmed_switch_bonus;
+          confirmed_switch_bonus +
+          policy.observation_quality_score_weight * observation_quality_penalty -
+          stable_observation_bonus - confirmed_track_quality_bonus;
 
       uint8_t debug_index = FaceSelectionDebugSnapshot::kMaxItems;
       if (result.debug.count < FaceSelectionDebugSnapshot::kMaxItems)
@@ -441,6 +535,8 @@ FaceSelectionResult SelectFaceMatch(
         item.view_bonus = static_cast<float>(view_bonus);
         item.area_score = static_cast<float>(area_score);
         item.frontality = static_cast<float>(frontality);
+        item.observation_quality_penalty =
+            static_cast<float>(observation_quality_penalty);
         item.center_x = armor.center.x;
         item.center_y = armor.center.y;
         item.predicted_yaw = static_cast<float>(predicted_yaw);
@@ -448,10 +544,12 @@ FaceSelectionResult SelectFaceMatch(
       }
 
       XR_LOG_DEBUG(
-          "Tracker cand: armor=%zu num=%d face=%d same=%d score=%.3f pos_diff=%.3f yaw_diff=%.3f img_diff=%.1f area_log=%.3f view_bonus=%.3f area=%.3f frontality=%.3f",
-          armor_index, static_cast<int>(armor.number), face_index,
+          "Tracker cand: armor=%u num=%d face=%d same=%d score=%.3f pos_diff=%.3f yaw_diff=%.3f img_diff=%.1f area_log=%.3f view_bonus=%.3f area=%.3f frontality=%.3f q_pen=%.3f reproj=%.3f confirmed=%d",
+          static_cast<unsigned>(armor_index), static_cast<int>(armor.number), face_index,
           same_number ? 1 : 0, score, position_diff, current_yaw_diff,
-          image_center_diff, area_ratio_log, view_bonus, area_score, frontality);
+          image_center_diff, area_ratio_log, view_bonus, area_score, frontality,
+          observation_quality_penalty, armor.pnp_reprojection_error_px,
+          confirmed_image_track ? 1 : 0);
 
       FaceMatchCandidate candidate{};
       candidate.armor = armor;
@@ -468,6 +566,7 @@ FaceSelectionResult SelectFaceMatch(
       candidate.view_bonus = view_bonus;
       candidate.area_score = area_score;
       candidate.frontality = frontality;
+      candidate.observation_quality_penalty = observation_quality_penalty;
       candidate.image_center_diff = image_center_diff;
       candidate.area_ratio_log = area_ratio_log;
       candidate.score = score;
@@ -490,10 +589,13 @@ FaceSelectionResult SelectFaceMatch(
     }
   }
 
-  const double relaxed_same_face_distance = policy.max_match_distance * 1.25;
+  const double relaxed_same_face_distance =
+      std::max(policy.max_match_distance * 1.25, 0.45);
   const double relaxed_face_switch_distance = policy.max_match_distance * 1.25;
   const double relaxed_face_switch_yaw_diff =
       std::max(policy.max_match_yaw_diff * 1.2, policy.max_match_yaw_diff + 0.1);
+  const double relaxed_same_face_yaw_diff =
+      std::max(policy.max_match_yaw_diff, std::min(relaxed_face_switch_yaw_diff, 0.80));
   const double face_switch_position_tie_margin = 0.01;
 
   // 第二阶段：在“同面保持”和“切面”之间做最终决策。
@@ -527,13 +629,14 @@ FaceSelectionResult SelectFaceMatch(
   result.relaxed_same_face_match =
       result.best_same_face_candidate.face_index == 0 &&
       result.best_same_face_candidate.position_diff < relaxed_same_face_distance &&
-      result.best_same_face_candidate.yaw_diff < policy.max_match_yaw_diff &&
+      result.best_same_face_candidate.yaw_diff < relaxed_same_face_yaw_diff &&
       relaxed_same_face_image_consistent;
 
   const double id_assisted_same_face_distance =
-      std::min(relaxed_same_face_distance, policy.max_match_distance * 1.10);
+      std::max(relaxed_same_face_distance,
+               std::min(policy.max_match_distance * 3.0, 0.45));
   const double id_assisted_same_face_yaw_diff =
-      std::min(relaxed_face_switch_yaw_diff, policy.max_match_yaw_diff * 0.75);
+      std::max(policy.max_match_yaw_diff, std::min(relaxed_face_switch_yaw_diff, 0.80));
   result.id_assisted_same_face_match =
       policy.id_assist_enabled && result.best_same_face_candidate.face_index == 0 &&
       result.best_same_face_candidate.same_persistent_track &&
@@ -665,5 +768,216 @@ FaceSelectionResult SelectFaceMatch(
   }
 
   return result;
+}
+
+/**
+ * @brief 选面后维护 face 与 image-track 绑定所需的最小运行时状态。
+ */
+struct FaceBindingRuntime
+{
+  int tracked_armors_num = 4;                 ///< 当前目标装甲面数量。
+  bool tracked_face_track_id_valid = false;   ///< 当前绑定面 track id 是否有效。
+  uint16_t tracked_face_track_id = 0;         ///< 当前绑定面的图像 track id。
+  std::array<bool, 4> face_track_id_valid{};  ///< 各面 track id 是否有效。
+  std::array<uint16_t, 4> face_track_id{};    ///< 各面绑定的图像 track id。
+};
+
+/**
+ * @brief 根据选中的候选和是否换面更新 face-track 绑定。
+ */
+inline void ApplySelectedFaceBinding(FaceBindingRuntime& runtime,
+                                     const FaceMatchCandidate& selected_candidate,
+                                     bool did_face_switch)
+{
+  if (did_face_switch)
+  {
+    const int face_count = std::max(1, std::min(4, runtime.tracked_armors_num));
+    std::array<bool, 4> rotated_valid{};
+    std::array<uint16_t, 4> rotated_ids{};
+    for (int face_slot = 0; face_slot < face_count; ++face_slot)
+    {
+      const int old_slot = (face_slot + selected_candidate.face_index) % face_count;
+      rotated_valid[face_slot] = runtime.face_track_id_valid[old_slot];
+      rotated_ids[face_slot] = runtime.face_track_id[old_slot];
+    }
+    runtime.face_track_id_valid = rotated_valid;
+    runtime.face_track_id = rotated_ids;
+  }
+
+  if (runtime.face_track_id_valid[0])
+  {
+    runtime.tracked_face_track_id_valid = true;
+    runtime.tracked_face_track_id = runtime.face_track_id[0];
+  }
+  else
+  {
+    runtime.tracked_face_track_id_valid = false;
+  }
+
+  if (selected_candidate.image_track_id >= 0 &&
+      selected_candidate.confirmed_image_track)
+  {
+    runtime.tracked_face_track_id_valid = true;
+    runtime.tracked_face_track_id =
+        static_cast<uint16_t>(selected_candidate.image_track_id);
+    runtime.face_track_id_valid[0] = true;
+    runtime.face_track_id[0] = runtime.tracked_face_track_id;
+  }
+}
+
+/**
+ * @brief 选面日志所需的上下文信息。
+ */
+struct FaceSelectionLogContext
+{
+  ArmorNumber tracked_id = ArmorNumber::INVALID;  ///< 当前跟踪 ID。
+  double face_switch_timeout_sec = 0.0;           ///< 换面冷却时间阈值。
+  double face_switch_score_deadzone = 0.0;        ///< 换面分数死区。
+  double face_switch_position_deadzone = 0.0;     ///< 换面位置死区。
+  double face_switch_yaw_deadzone = 0.0;          ///< 换面 yaw 死区。
+  double face_switch_cooldown_remaining = 0.0;    ///< 当前剩余换面冷却时间。
+};
+
+/**
+ * @brief 记录未接受任何候选时的关键拒绝信息。
+ */
+inline void LogRejectedSelection(const FaceSelectionResult& selection,
+                                 const FaceSelectionLogContext& context)
+{
+  const auto& best_candidate = selection.best_candidate;
+  const auto& best_same_face_candidate = selection.best_same_face_candidate;
+  const auto& best_switch_candidate = selection.best_switch_candidate;
+  UNUSED(best_candidate);
+  UNUSED(best_same_face_candidate);
+  UNUSED(best_switch_candidate);
+  XR_LOG_DEBUG(
+      "No matched armor found! same_number=%d best_face=%d score=%.3f pos_diff=%.3f yaw_diff=%.3f same_score=%.3f switch_score=%.3f cooldown=%.3f image_track=%d confirmed=%d persistent=%d img_diff=%.1f area_log=%.3f q_pen=%.3f",
+      selection.has_same_number_candidate ? 1 : 0, best_candidate.face_index,
+      best_candidate.score, best_candidate.position_diff, best_candidate.yaw_diff,
+      best_same_face_candidate.score, best_switch_candidate.score,
+      context.face_switch_cooldown_remaining, best_candidate.image_track_id,
+      best_candidate.confirmed_image_track ? 1 : 0,
+      best_candidate.same_persistent_track ? 1 : 0,
+      best_candidate.image_center_diff, best_candidate.area_ratio_log,
+      best_candidate.observation_quality_penalty);
+}
+
+/**
+ * @brief 记录接受候选后的匹配模式和换面原因。
+ */
+inline void LogAcceptedSelection(const FaceSelectionResult& selection,
+                                 const FaceSelectionLogContext& context)
+{
+  const auto& selected_candidate = selection.selected_candidate;
+  const auto& best_same_face_candidate = selection.best_same_face_candidate;
+  const auto& best_switch_candidate = selection.best_switch_candidate;
+  const bool did_face_switch = selected_candidate.face_index != 0;
+  UNUSED(best_same_face_candidate);
+  UNUSED(best_switch_candidate);
+
+  XR_LOG_DEBUG(
+      "Tracker pick: armor=%u num=%d face=%d same=%d score=%.3f pos_diff=%.3f yaw_diff=%.3f view_bonus=%.3f area=%.3f frontality=%.3f q_pen=%.3f reproj=%.3f track=%d confirmed=%d cooldown=%.3f",
+      static_cast<unsigned>(selected_candidate.armor_index),
+      static_cast<int>(selected_candidate.armor.number),
+      selected_candidate.face_index, selected_candidate.same_number ? 1 : 0,
+      selected_candidate.score, selected_candidate.position_diff,
+      selected_candidate.yaw_diff, selected_candidate.view_bonus,
+      selected_candidate.area_score, selected_candidate.frontality,
+      selected_candidate.observation_quality_penalty,
+      selected_candidate.armor.pnp_reprojection_error_px,
+      selected_candidate.image_track_id,
+      selected_candidate.confirmed_image_track ? 1 : 0,
+      context.face_switch_cooldown_remaining);
+
+  if (did_face_switch)
+  {
+    if (!selection.strict_face_switch_match &&
+        !selection.relaxed_face_switch_match &&
+        selection.id_assisted_face_rebind_match)
+    {
+      XR_LOG_DEBUG(
+          "Tracker id-assisted face rebind: face=%d pos_diff=%.3f yaw_diff=%.3f number=%d cooldown=%.3f observed_persistent=%d",
+          selected_candidate.face_index, selected_candidate.position_diff,
+          selected_candidate.yaw_diff,
+          static_cast<int>(selected_candidate.armor.number),
+          context.face_switch_timeout_sec,
+          selection.observed_persistent_track_this_frame ? 1 : 0);
+      return;
+    }
+    if (!selection.strict_face_switch_match &&
+        !selection.relaxed_face_switch_match &&
+        selection.id_assisted_face_handover_match)
+    {
+      XR_LOG_DEBUG(
+          "Tracker id-assisted face handover: face=%d pos_diff=%.3f yaw_diff=%.3f number=%d cooldown=%.3f same_pos=%.3f",
+          selected_candidate.face_index, selected_candidate.position_diff,
+          selected_candidate.yaw_diff,
+          static_cast<int>(selected_candidate.armor.number),
+          context.face_switch_timeout_sec,
+          best_same_face_candidate.position_diff);
+      return;
+    }
+    if (!selection.strict_face_switch_match &&
+        selection.relaxed_face_switch_match)
+    {
+      XR_LOG_DEBUG(
+          "Tracker relaxed face switch: face=%d pos_diff=%.3f yaw_diff=%.3f number=%d cooldown=%.3f",
+          selected_candidate.face_index, selected_candidate.position_diff,
+          selected_candidate.yaw_diff,
+          static_cast<int>(selected_candidate.armor.number),
+          context.face_switch_timeout_sec);
+      return;
+    }
+
+    XR_LOG_DEBUG(
+        "Tracker face switch: face=%d pos_diff=%.3f yaw_diff=%.3f number=%d cooldown=%.3f",
+        selected_candidate.face_index, selected_candidate.position_diff,
+        selected_candidate.yaw_diff,
+        static_cast<int>(selected_candidate.armor.number),
+        context.face_switch_timeout_sec);
+    return;
+  }
+
+  if (!selection.strict_same_face_match && selection.relaxed_same_face_match)
+  {
+    XR_LOG_DEBUG("Tracker relaxed same-face match: pos_diff=%.3f yaw_diff=%.3f",
+                 selected_candidate.position_diff, selected_candidate.yaw_diff);
+    return;
+  }
+  if (selection.id_assisted_same_face_hold)
+  {
+    XR_LOG_DEBUG(
+        "Tracker hold same-face by persistent image id: pos_diff=%.3f yaw_diff=%.3f img_diff=%.1f area_log=%.3f",
+        selected_candidate.position_diff, selected_candidate.yaw_diff,
+        selected_candidate.image_center_diff, selected_candidate.area_ratio_log);
+    return;
+  }
+  if (selection.switch_blocked_by_timeout && selection.matched_switch_face)
+  {
+    XR_LOG_DEBUG(
+        "Tracker hold same-face by timeout: cooldown=%.3f same_score=%.3f switch_score=%.3f",
+        context.face_switch_cooldown_remaining, best_same_face_candidate.score,
+        best_switch_candidate.score);
+    return;
+  }
+  if (selection.switch_blocked_by_id_mismatch)
+  {
+    XR_LOG_DEBUG(
+        "Tracker hold same-face by id mismatch: tracked_num=%d switch_num=%d same_score=%.3f switch_score=%.3f",
+        static_cast<int>(context.tracked_id),
+        static_cast<int>(best_switch_candidate.armor.number),
+        best_same_face_candidate.score, best_switch_candidate.score);
+    return;
+  }
+  if (!selection.allow_face_switch && selection.matched_switch_face &&
+      selection.matched_same_face)
+  {
+    XR_LOG_DEBUG(
+        "Tracker hold same-face by deadzone: same_score=%.3f switch_score=%.3f score_dz=%.3f pos_dz=%.3f yaw_dz=%.3f",
+        best_same_face_candidate.score, best_switch_candidate.score,
+        context.face_switch_score_deadzone,
+        context.face_switch_position_deadzone,
+        context.face_switch_yaw_deadzone);
+  }
 }
 }  // namespace armor_tracker

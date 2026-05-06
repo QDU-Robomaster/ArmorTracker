@@ -1,5 +1,13 @@
 #pragma once
 
+/**
+ * @file ArmorTrackerObserver.hpp
+ * @brief 整车几何观测模型和 face 运行时状态的纯算法实现。
+ *
+ * Observer 层只关心“整车状态如何表达、如何被装甲观测修正”，不接触 topic、
+ * 配置文件或调试输出。
+ */
+
 #include <algorithm>
 #include <array>
 #include <cfloat>
@@ -13,34 +21,41 @@
 
 namespace armor_tracker
 {
-// Observer 层只关心“整车状态如何表达、如何被装甲观测修正”。
-// 它不接触 topic、不读配置文件，也不关心外部调试输出。
+/**
+ * @brief 整车观测模型使用的策略参数。
+ */
 struct ObserverPolicy
 {
-  bool single_armor_mode = false;
-  bool symmetric_geometry_enabled = false;
-  double max_match_distance = 0.15;
-  double max_match_yaw_diff = 1.0;
-  double initial_radius = 0.26;
+  bool single_armor_mode = false;        ///< 是否按单装甲目标建模。
+  bool symmetric_geometry_enabled = false; ///< 是否强制半径和高度对称。
+  double max_match_distance = 0.15;      ///< 位置匹配阈值，单位 m。
+  double max_match_yaw_diff = 1.0;       ///< yaw 匹配阈值，单位 rad。
+  double initial_radius = 0.26;          ///< EKF 初始化半径先验，单位 m。
 };
 
+/**
+ * @brief 整车观测模型需要读写的运行时绑定状态。
+ */
 struct ObserverRuntime
 {
-  ArmorNumber tracked_id = ArmorNumber::INVALID;
-  ArmorType tracked_armor_type = ArmorType::INVALID;
-  int tracked_armors_num = 4;
-  int tracked_face_index = 0;
-  bool tracked_face_track_id_valid = false;
-  uint16_t tracked_face_track_id = 0;
-  std::array<bool, 4> face_track_id_valid{};
-  std::array<uint16_t, 4> face_track_id{};
-  double last_yaw = 0.0;
-  double face_switch_cooldown_remaining = 0.0;
-  double dz = 0.0;
-  double dz_abs_ref = 0.0;
-  double another_r = 0.0;
+  ArmorNumber tracked_id = ArmorNumber::INVALID;  ///< 当前跟踪数字 ID。
+  ArmorType tracked_armor_type = ArmorType::INVALID; ///< 当前跟踪装甲类型。
+  int tracked_armors_num = 4;                     ///< 目标装甲面数量。
+  int tracked_face_index = 0;                     ///< 当前绑定面的本地索引。
+  bool tracked_face_track_id_valid = false;       ///< 当前绑定 track id 是否有效。
+  uint16_t tracked_face_track_id = 0;             ///< 当前绑定 track id。
+  std::array<bool, 4> face_track_id_valid{};      ///< 各面 track id 是否有效。
+  std::array<uint16_t, 4> face_track_id{};        ///< 各面 track id。
+  double last_yaw = 0.0;                          ///< 最近连续 yaw。
+  double face_switch_cooldown_remaining = 0.0;    ///< 换面冷却剩余时间。
+  double dz = 0.0;                                ///< 奇偶高低差。
+  double dz_abs_ref = 0.0;                        ///< 高低差绝对值参考。
+  double another_r = 0.0;                         ///< 第二半径缓存。
 };
 
+/**
+ * @brief 根据目标 ID 和策略同步理论装甲面数量。
+ */
 inline void UpdateArmorsNum(ObserverRuntime& runtime,
                             const ObserverPolicy& policy)
 {
@@ -63,12 +78,18 @@ inline void UpdateArmorsNum(ObserverRuntime& runtime,
       ((runtime.tracked_face_index % armor_count) + armor_count) % armor_count;
 }
 
+/**
+ * @brief 将任意 face index 规约到合法面索引。
+ */
 inline int NormalizeFaceIndex(int face_index, int armor_count)
 {
   const int bounded_count = std::max(1, armor_count);
   return ((face_index % bounded_count) + bounded_count) % bounded_count;
 }
 
+/**
+ * @brief 将姿态 yaw 展开到 runtime.last_yaw 附近并写回连续 yaw。
+ */
 inline double OrientationToYaw(const LibXR::Quaternion<double>& q,
                                ObserverRuntime& runtime)
 {
@@ -77,6 +98,9 @@ inline double OrientationToYaw(const LibXR::Quaternion<double>& q,
   return yaw;
 }
 
+/**
+ * @brief 从 EKF 状态中取指定面 yaw。
+ */
 inline double GetArmorYawFromState(const Eigen::VectorXd& state,
                                    const ObserverRuntime& runtime,
                                    int face_index = 0)
@@ -86,6 +110,9 @@ inline double GetArmorYawFromState(const Eigen::VectorXd& state,
   return state(6) + angle_step * face_index;
 }
 
+/**
+ * @brief 从 EKF 状态中取第二组装甲半径。
+ */
 inline double GetArmorSecondRadiusFromState(const Eigen::VectorXd& state,
                                             const ObserverPolicy& policy)
 {
@@ -96,6 +123,9 @@ inline double GetArmorSecondRadiusFromState(const Eigen::VectorXd& state,
   return state(8) + state(9);
 }
 
+/**
+ * @brief 从 EKF 状态中取高低面高度差。
+ */
 inline double GetArmorDzFromState(const Eigen::VectorXd& state,
                                   const ObserverPolicy& policy)
 {
@@ -106,6 +136,9 @@ inline double GetArmorDzFromState(const Eigen::VectorXd& state,
   return state(10);
 }
 
+/**
+ * @brief 从整车 EKF 状态重建指定装甲面的三维位置。
+ */
 inline Eigen::Vector3d GetArmorPositionFromState(const Eigen::VectorXd& state,
                                                  const ObserverRuntime& runtime,
                                                  const ObserverPolicy& policy,
@@ -129,6 +162,9 @@ inline Eigen::Vector3d GetArmorPositionFromState(const Eigen::VectorXd& state,
   return Eigen::Vector3d(xa, ya, za);
 }
 
+/**
+ * @brief 用首个装甲观测初始化整车 EKF 状态。
+ */
 inline void InitEkfState(Eigen::VectorXd& state, ObserverRuntime& runtime,
                          const ObserverPolicy& policy,
                          const ArmorDetectorResult& armor)
@@ -151,17 +187,26 @@ inline void InitEkfState(Eigen::VectorXd& state, ObserverRuntime& runtime,
   state << xc, 0, yc, 0, za, 0, yaw, 0, r, 0, 0;
 }
 
+/**
+ * @brief 将 runtime 中的高低差参考同步为当前 dz 绝对值。
+ */
 inline void SyncDzReferenceFromState(ObserverRuntime& runtime)
 {
   runtime.dz_abs_ref = std::abs(runtime.dz);
 }
 
+/**
+ * @brief 将本地相对 face index 转换为当前车体规范 face index。
+ */
 inline int LocalFaceToCanonicalFace(const ObserverRuntime& runtime, int face_index)
 {
   return NormalizeFaceIndex(runtime.tracked_face_index + face_index,
                             std::max(1, runtime.tracked_armors_num));
 }
 
+/**
+ * @brief 执行换面后的运行时绑定和连续 yaw 更新。
+ */
 inline void SwitchTrackedFace(ObserverRuntime& runtime, Eigen::VectorXd& state,
                               const ObserverPolicy& policy, int face_index,
                               double measured_yaw)
@@ -179,6 +224,12 @@ inline void SwitchTrackedFace(ObserverRuntime& runtime, Eigen::VectorXd& state,
   runtime.last_yaw = measured_yaw;
 }
 
+/**
+ * @brief 使用本帧多装甲观测修正整车状态中的身份、面索引和几何缓存。
+ *
+ * @tparam TrackIdGetter detection index -> 图像 track id 的回调。
+ * @tparam TrackConfirmedGetter detection index -> track confirmed 标记的回调。
+ */
 template <typename TrackIdGetter, typename TrackConfirmedGetter>
 bool FuseMultiArmorObservation(ObserverRuntime& runtime, Eigen::VectorXd& state,
                                const ObserverPolicy& policy,
@@ -196,27 +247,33 @@ bool FuseMultiArmorObservation(ObserverRuntime& runtime, Eigen::VectorXd& state,
     return false;
   }
 
+  /**
+   * @brief 多装甲融合时按 canonical 面保存的观测。
+   */
   struct FaceObservation
   {
-    bool valid = false;
-    ArmorDetectorResult armor{};
-    double measured_yaw = 0.0;
-    double position_diff = DBL_MAX;
-    int image_track_id = -1;
-    bool confirmed_image_track = false;
+    bool valid = false;                   ///< 该面是否已有观测。
+    ArmorDetectorResult armor{};          ///< detector 装甲结果。
+    double measured_yaw = 0.0;            ///< 展开后的测量 yaw。
+    double position_diff = DBL_MAX;       ///< 与预测面的三维距离。
+    int image_track_id = -1;              ///< 图像 track ID。
+    bool confirmed_image_track = false;   ///< 图像 track 是否已确认。
   };
 
+  /**
+   * @brief detector 装甲到 canonical 面的融合候选。
+   */
   struct FuseCandidate
   {
-    std::size_t armor_index = 0;
-    int face_index = -1;
-    ArmorDetectorResult armor{};
-    double measured_yaw = 0.0;
-    double position_diff = DBL_MAX;
-    double yaw_diff = DBL_MAX;
-    int image_track_id = -1;
-    bool confirmed_image_track = false;
-    bool same_persistent_track = false;
+    std::size_t armor_index = 0;         ///< detector 结果索引。
+    int face_index = -1;                 ///< 候选 canonical 面索引。
+    ArmorDetectorResult armor{};         ///< detector 装甲结果。
+    double measured_yaw = 0.0;           ///< 展开后的测量 yaw。
+    double position_diff = DBL_MAX;      ///< 与预测面的三维距离。
+    double yaw_diff = DBL_MAX;           ///< 与预测面的 yaw 差。
+    int image_track_id = -1;             ///< 图像 track ID。
+    bool confirmed_image_track = false;  ///< 图像 track 是否已确认。
+    bool same_persistent_track = false;  ///< 是否命中当前面绑定的持久 track。
   };
 
   std::array<FaceObservation, 4> faces{};

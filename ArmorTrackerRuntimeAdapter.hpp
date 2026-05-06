@@ -1,5 +1,16 @@
 #pragma once
 
+/**
+ * @file ArmorTrackerRuntimeAdapter.hpp
+ * @brief ArmorTracker 类状态与 observer / selector 纯算法运行态之间的适配层。
+ *
+ * 本文件只做成员变量到轻量 runtime 结构的组装、回写和局部几何辅助计算，
+ * 让 `ArmorTrackerObserver.hpp`、`ArmorTrackerFaceSelector.hpp` 保持无类依赖。
+ */
+
+/**
+ * @brief 根据当前配置和运行开关构造观测器策略。
+ */
 template <CameraTypes::CameraInfo CameraInfoV>
 armor_tracker::ObserverPolicy ArmorTracker<CameraInfoV>::BuildObserverPolicy() const
 {
@@ -12,6 +23,9 @@ armor_tracker::ObserverPolicy ArmorTracker<CameraInfoV>::BuildObserverPolicy() c
   return policy;
 }
 
+/**
+ * @brief 将类内跟踪状态打包为 observer helper 可消费的运行态。
+ */
 template <CameraTypes::CameraInfo CameraInfoV>
 armor_tracker::ObserverRuntime ArmorTracker<CameraInfoV>::BuildObserverRuntime() const
 {
@@ -32,6 +46,9 @@ armor_tracker::ObserverRuntime ArmorTracker<CameraInfoV>::BuildObserverRuntime()
   return runtime;
 }
 
+/**
+ * @brief 将 observer helper 修改后的运行态同步回类成员。
+ */
 template <CameraTypes::CameraInfo CameraInfoV>
 void ArmorTracker<CameraInfoV>::ApplyObserverRuntime(
     const armor_tracker::ObserverRuntime& runtime)
@@ -51,6 +68,9 @@ void ArmorTracker<CameraInfoV>::ApplyObserverRuntime(
   rt_.another_r = runtime.another_r;
 }
 
+/**
+ * @brief 打包装甲面与图像 track 绑定运行态。
+ */
 template <CameraTypes::CameraInfo CameraInfoV>
 armor_tracker::FaceBindingRuntime ArmorTracker<CameraInfoV>::BuildFaceBindingRuntime() const
 {
@@ -63,6 +83,9 @@ armor_tracker::FaceBindingRuntime ArmorTracker<CameraInfoV>::BuildFaceBindingRun
   return runtime;
 }
 
+/**
+ * @brief 将装甲面绑定 helper 的结果写回类成员。
+ */
 template <CameraTypes::CameraInfo CameraInfoV>
 void ArmorTracker<CameraInfoV>::ApplyFaceBindingRuntime(
     const armor_tracker::FaceBindingRuntime& runtime)
@@ -73,6 +96,9 @@ void ArmorTracker<CameraInfoV>::ApplyFaceBindingRuntime(
   rt_.face_track_id = runtime.face_track_id;
 }
 
+/**
+ * @brief 按候选观测刷新当前目标身份，同时避免被非同号观测覆盖。
+ */
 template <CameraTypes::CameraInfo CameraInfoV>
 void ArmorTracker<CameraInfoV>::ApplySelectedIdentity(
     const armor_tracker::FaceMatchCandidate& selected_candidate)
@@ -93,6 +119,9 @@ void ArmorTracker<CameraInfoV>::ApplySelectedIdentity(
   }
 }
 
+/**
+ * @brief 将已接受候选同步到装甲面和图像 track 绑定表。
+ */
 template <CameraTypes::CameraInfo CameraInfoV>
 void ArmorTracker<CameraInfoV>::ApplySelectedFaceBinding(
     const armor_tracker::FaceMatchCandidate& selected_candidate, bool did_face_switch)
@@ -100,6 +129,7 @@ void ArmorTracker<CameraInfoV>::ApplySelectedFaceBinding(
   const int tracked_face_track_before =
       rt_.tracked_face_track_id_valid ? static_cast<int>(rt_.tracked_face_track_id)
                                       : -1;
+  UNUSED(tracked_face_track_before);
   auto binding_runtime = BuildFaceBindingRuntime();
   armor_tracker::ApplySelectedFaceBinding(binding_runtime, selected_candidate,
                                           did_face_switch);
@@ -127,6 +157,9 @@ void ArmorTracker<CameraInfoV>::ApplySelectedFaceBinding(
   }
 }
 
+/**
+ * @brief 汇总当前环境变量和配置，构造换面选择策略。
+ */
 template <CameraTypes::CameraInfo CameraInfoV>
 armor_tracker::FaceSelectionPolicy ArmorTracker<CameraInfoV>::BuildFaceSelectionPolicy() const
 {
@@ -139,6 +172,9 @@ armor_tracker::FaceSelectionPolicy ArmorTracker<CameraInfoV>::BuildFaceSelection
   face_policy.view_priority_enabled = ViewPriorityEnabled();
   face_policy.directional_face_switch_enabled = DirectionalFaceSwitchEnabled();
   face_policy.symmetric_geometry_enabled = SymmetricGeometryEnabled();
+  face_policy.observation_quality_enabled = ObservationQualityEnabled();
+  face_policy.match_yaw_allow_pi_ambiguity =
+      MatchYawAllowPiAmbiguityEnabled();
   face_policy.max_match_distance = cfg_.match.max_match_distance;
   face_policy.max_match_yaw_diff = cfg_.match.max_match_yaw_diff;
   face_policy.single_armor_image_center_gate_px = SingleArmorImageCenterGatePx();
@@ -149,9 +185,18 @@ armor_tracker::FaceSelectionPolicy ArmorTracker<CameraInfoV>::BuildFaceSelection
   face_policy.face_switch_timeout_sec = FaceSwitchTimeoutSec();
   face_policy.id_assist_same_face_center_gate_px = IdAssistSameFaceCenterGatePx();
   face_policy.id_assist_same_face_area_log_gate = IdAssistSameFaceAreaLogGate();
+  face_policy.stable_max_reprojection_px = ObservationStableMaxReprojectionPx();
+  face_policy.stable_min_area_px = ObservationStableMinAreaPx();
+  face_policy.stable_min_confidence = ObservationStableMinConfidence();
+  face_policy.observation_quality_score_weight =
+      ObservationQualityScoreWeight();
+  face_policy.confirmed_track_bonus = ObservationConfirmedTrackBonus();
   return face_policy;
 }
 
+/**
+ * @brief 打包当前跟踪目标状态，供换面选择器计算候选分数。
+ */
 template <CameraTypes::CameraInfo CameraInfoV>
 armor_tracker::FaceSelectionTrackedState
 ArmorTracker<CameraInfoV>::BuildFaceSelectionTrackedState() const
@@ -168,6 +213,9 @@ ArmorTracker<CameraInfoV>::BuildFaceSelectionTrackedState() const
   return tracked_state;
 }
 
+/**
+ * @brief 获取 tracker 世界系中的当前相机位置。
+ */
 template <CameraTypes::CameraInfo CameraInfoV>
 Eigen::Vector3d ArmorTracker<CameraInfoV>::GetCameraWorldPosition()
 {
@@ -178,10 +226,14 @@ Eigen::Vector3d ArmorTracker<CameraInfoV>::GetCameraWorldPosition()
                          t_wc.translation.z());
 }
 
+/**
+ * @brief 应用换面选择结果，并在接受观测时执行整车模型 EKF 更新。
+ */
 template <CameraTypes::CameraInfo CameraInfoV>
 bool ArmorTracker<CameraInfoV>::ApplyFaceSelection(
     const armor_tracker::FaceSelectionResult& selection,
-    CandidateDebugMsg& candidate_debug, bool freeze_delta_z)
+    CandidateDebugMsg& candidate_debug, bool freeze_delta_z,
+    uint64_t image_timestamp_us)
 {
   rt_.info_position_diff = selection.info_position_diff;
   rt_.info_yaw_diff = selection.info_yaw_diff;
@@ -205,8 +257,8 @@ bool ArmorTracker<CameraInfoV>::ApplyFaceSelection(
   const bool did_face_switch = selected_candidate.face_index != 0;
   const int observed_face_index =
       LocalFaceToCanonicalFace(selected_candidate.face_index);
-  const SpArmorMatch sp_match =
-      SpMatchArmorToFace(selected_candidate.armor, ekf_.state, observed_face_index);
+  const VehicleArmorMatch model_match =
+      VehicleMatchArmorToFace(selected_candidate.armor, ekf_.state, observed_face_index);
   candidate_debug.matched = 1;
   candidate_debug.accepted_mode =
       static_cast<uint8_t>(selection.accepted_mode);
@@ -221,19 +273,28 @@ bool ArmorTracker<CameraInfoV>::ApplyFaceSelection(
 
   ApplySelectedIdentity(selected_candidate);
   ApplySelectedFaceBinding(selected_candidate, did_face_switch);
-  SpUpdate(selected_candidate.armor, sp_match, freeze_delta_z);
+  VehicleUpdate(selected_candidate.armor, model_match, freeze_delta_z, image_timestamp_us,
+           &candidate_debug);
+  if (VehicleCenterMotionObserverEnabled())
+  {
+    VehicleUpdateCenterMotionObserver(selected_candidate.armor, model_match,
+                                 image_timestamp_us);
+  }
   rt_.tracked_armor = selected_candidate.armor;
   rt_.tracked_armors_num =
-      static_cast<ArmorsNum>(SpArmorCountFor(selected_candidate.armor));
+      static_cast<ArmorsNum>(VehicleArmorCountFor(selected_candidate.armor));
   rt_.tracked_face_index = observed_face_index;
-  rt_.last_yaw = sp_match.measured_yaw;
-  rt_.info_position_diff = sp_match.xyz_error;
-  rt_.info_yaw_diff = sp_match.angle_error;
+  rt_.last_yaw = model_match.measured_yaw;
+  rt_.info_position_diff = model_match.xyz_error;
+  rt_.info_yaw_diff = model_match.angle_error;
   SyncGeometryRuntimeFromState();
   ekf_.ekf.SetState(ekf_.state);
   return true;
 }
 
+/**
+ * @brief 从 EKF 几何状态同步高低差参考量。
+ */
 template <CameraTypes::CameraInfo CameraInfoV>
 void ArmorTracker<CameraInfoV>::SyncDzReferenceFromState()
 {
@@ -242,6 +303,9 @@ void ArmorTracker<CameraInfoV>::SyncDzReferenceFromState()
   ApplyObserverRuntime(runtime);
 }
 
+/**
+ * @brief 用当前测量装甲板刚性重定位整车中心、yaw 和基础高度。
+ */
 template <CameraTypes::CameraInfo CameraInfoV>
 void ArmorTracker<CameraInfoV>::RecenterTrackedStateToMeasurement(
     const ArmorDetectorResult& armor, int observed_face_index,
@@ -276,6 +340,9 @@ void ArmorTracker<CameraInfoV>::RecenterTrackedStateToMeasurement(
   SyncGeometryRuntimeFromState();
 }
 
+/**
+ * @brief 将候选选择器返回的局部面索引转换为当前 canonical 面索引。
+ */
 template <CameraTypes::CameraInfo CameraInfoV>
 int ArmorTracker<CameraInfoV>::LocalFaceToCanonicalFace(int local_face_index) const
 {
@@ -284,6 +351,9 @@ int ArmorTracker<CameraInfoV>::LocalFaceToCanonicalFace(int local_face_index) co
       std::max(1, static_cast<int>(rt_.tracked_armors_num)));
 }
 
+/**
+ * @brief 从 EKF 状态同步半径、高低差等几何运行态缓存。
+ */
 template <CameraTypes::CameraInfo CameraInfoV>
 void ArmorTracker<CameraInfoV>::SyncGeometryRuntimeFromState()
 {
@@ -296,6 +366,9 @@ void ArmorTracker<CameraInfoV>::SyncGeometryRuntimeFromState()
   rt_.dz_abs_ref = std::abs(rt_.dz);
 }
 
+/**
+ * @brief 将 EKF 几何状态限制在配置允许的物理范围内。
+ */
 template <CameraTypes::CameraInfo CameraInfoV>
 void ArmorTracker<CameraInfoV>::ClampGeometryState()
 {
@@ -321,19 +394,226 @@ void ArmorTracker<CameraInfoV>::ClampGeometryState()
   SyncGeometryRuntimeFromState();
 }
 
+/**
+ * @brief 从整车状态向量计算指定装甲面的 yaw。
+ */
 template <CameraTypes::CameraInfo CameraInfoV>
 double ArmorTracker<CameraInfoV>::GetArmorYawFromState(const Eigen::VectorXd& x,
                                                        int face_index) const
 {
   const int armor_count =
       std::max(1, static_cast<int>(rt_.tracked_armors_num));
-  return SpLimitRad(x(ExtendedKalmanFilter::YAW) +
+  return VehicleLimitRad(x(ExtendedKalmanFilter::YAW) +
                     face_index * 2.0 * M_PI / armor_count);
 }
 
+/**
+ * @brief 从整车状态向量计算指定装甲面的 tracker 世界系位置。
+ */
 template <CameraTypes::CameraInfo CameraInfoV>
 Eigen::Vector3d ArmorTracker<CameraInfoV>::GetArmorPositionFromState(const Eigen::VectorXd& x,
                                                         int face_index) const
 {
-  return SpArmorPosition(x, face_index);
+  return VehicleArmorPosition(x, face_index);
+}
+
+/**
+ * @brief 对一帧 detector 结果批量执行固定姿态 yaw 重投影优化。
+ */
+template <CameraTypes::CameraInfo CameraInfoV>
+void ArmorTracker<CameraInfoV>::OptimizeArmorYawMeasurements(
+    ArmorDetectorResults& armors_msg,
+    const LibXR::Transform<double>& camera_pose_world) const
+{
+  if (!VehicleFixedPoseYawOptimizeEnabled())
+  {
+    return;
+  }
+
+  for (auto& armor : armors_msg)
+  {
+    OptimizeSingleArmorYawMeasurement(armor, camera_pose_world);
+  }
+}
+
+/**
+ * @brief 尝试用固定 pitch 假设重估单个装甲板 yaw。
+ */
+template <CameraTypes::CameraInfo CameraInfoV>
+bool ArmorTracker<CameraInfoV>::OptimizeSingleArmorYawMeasurement(
+    ArmorDetectorResult& armor,
+    const LibXR::Transform<double>& camera_pose_world) const
+{
+  if (!armor.pnp_valid)
+  {
+    return false;
+  }
+
+  const bool is_balance =
+      armor.type == ArmorType::LARGE &&
+      (armor.number == ArmorNumber::THREE ||
+       armor.number == ArmorNumber::FOUR ||
+       armor.number == ArmorNumber::FIVE);
+  if (is_balance)
+  {
+    return false;
+  }
+
+  const double raw_yaw = armor_tracker::QuaternionToYaw(armor.pose.rotation);
+  if (!std::isfinite(raw_yaw))
+  {
+    return false;
+  }
+
+  const double pitch_abs = VehicleFixedPoseYawPitchDeg() * M_PI / 180.0;
+  const std::array<double, 2> pitch_candidates = {pitch_abs, -pitch_abs};
+  double raw_fixed_error = std::numeric_limits<double>::infinity();
+  for (const double pitch : pitch_candidates)
+  {
+    raw_fixed_error =
+        std::min(raw_fixed_error,
+                 ArmorYawReprojectionError(armor, camera_pose_world, raw_yaw, pitch));
+  }
+  if (!std::isfinite(raw_fixed_error))
+  {
+    return false;
+  }
+
+  double best_yaw = raw_yaw;
+  double best_pitch = pitch_candidates[0];
+  double best_error = raw_fixed_error;
+  const double search_range = VehicleFixedPoseYawRangeDeg() * M_PI / 180.0;
+  const double coarse_step = VehicleFixedPoseYawCoarseStepDeg() * M_PI / 180.0;
+  const double fine_step = VehicleFixedPoseYawFineStepDeg() * M_PI / 180.0;
+
+  auto try_candidate = [&](double yaw, double pitch)
+  {
+    const double error =
+        ArmorYawReprojectionError(armor, camera_pose_world, yaw, pitch);
+    if (std::isfinite(error) && error < best_error)
+    {
+      best_error = error;
+      best_yaw = yaw;
+      best_pitch = pitch;
+    }
+  };
+
+  for (const double pitch : pitch_candidates)
+  {
+    for (double offset = -search_range; offset <= search_range + 1e-9;
+         offset += coarse_step)
+    {
+      try_candidate(raw_yaw + offset, pitch);
+    }
+  }
+
+  const double fine_range = std::max(coarse_step, 4.0 * fine_step);
+  for (const double pitch : pitch_candidates)
+  {
+    for (double offset = -fine_range; offset <= fine_range + 1e-9;
+         offset += fine_step)
+    {
+      try_candidate(best_yaw + offset, pitch);
+    }
+  }
+
+  if (raw_fixed_error - best_error < VehicleFixedPoseYawMinGainPx())
+  {
+    return false;
+  }
+
+  const Eigen::AngleAxisd yaw_rotation(best_yaw, Eigen::Vector3d::UnitZ());
+  const Eigen::AngleAxisd pitch_rotation(best_pitch, Eigen::Vector3d::UnitY());
+  armor.pose.rotation =
+      LibXR::Quaternion<double>((yaw_rotation * pitch_rotation).toRotationMatrix());
+  return true;
+}
+
+/**
+ * @brief 计算给定 yaw/pitch 假设下装甲四点的重投影误差。
+ */
+template <CameraTypes::CameraInfo CameraInfoV>
+double ArmorTracker<CameraInfoV>::ArmorYawReprojectionError(
+    const ArmorDetectorResult& armor,
+    const LibXR::Transform<double>& camera_pose_world,
+    double yaw_rad, double pitch_rad) const
+{
+  const double half_width_m =
+      ((armor.type == ArmorType::LARGE) ? 225.0 : 135.0) * 0.5 / 1000.0;
+  constexpr double half_height_m = 56.0 * 0.5 / 1000.0;
+  const std::vector<cv::Point3f> object_points = {
+      {0.0F, static_cast<float>(half_width_m), static_cast<float>(-half_height_m)},
+      {0.0F, static_cast<float>(half_width_m), static_cast<float>(half_height_m)},
+      {0.0F, static_cast<float>(-half_width_m), static_cast<float>(half_height_m)},
+      {0.0F, static_cast<float>(-half_width_m), static_cast<float>(-half_height_m)}};
+  const std::vector<cv::Point2f> image_points = {
+      armor.points[3], armor.points[0], armor.points[1], armor.points[2]};
+
+  const auto r_wc = camera_pose_world.rotation.ToRotationMatrix();
+  const Eigen::Matrix3d r_cw = r_wc.transpose();
+  const Eigen::Vector3d t_wc(camera_pose_world.translation.x(),
+                             camera_pose_world.translation.y(),
+                             camera_pose_world.translation.z());
+  const Eigen::Vector3d t_aw(armor.pose.translation.x(),
+                             armor.pose.translation.y(),
+                             armor.pose.translation.z());
+  const Eigen::Vector3d t_ac = r_cw * (t_aw - t_wc);
+  if (!t_ac.allFinite() || t_ac.z() <= 1e-6)
+  {
+    return std::numeric_limits<double>::infinity();
+  }
+
+  const Eigen::AngleAxisd yaw_rotation(yaw_rad, Eigen::Vector3d::UnitZ());
+  const Eigen::AngleAxisd pitch_rotation(pitch_rad, Eigen::Vector3d::UnitY());
+  const Eigen::Matrix3d r_aw =
+      (yaw_rotation * pitch_rotation).toRotationMatrix();
+  const Eigen::Matrix3d r_ac = r_cw * r_aw;
+
+  cv::Mat rmat(3, 3, CV_64F);
+  for (int row = 0; row < 3; ++row)
+  {
+    for (int col = 0; col < 3; ++col)
+    {
+      rmat.at<double>(row, col) = r_ac(row, col);
+    }
+  }
+  cv::Mat rvec;
+  cv::Rodrigues(rmat, rvec);
+  const cv::Mat tvec =
+      (cv::Mat_<double>(3, 1) << t_ac.x(), t_ac.y(), t_ac.z());
+  const cv::Mat camera_matrix =
+      cv::Mat(3, 3, CV_64F,
+              const_cast<double*>(kCameraInfo.camera_matrix.data()))
+          .clone();
+
+  cv::Mat dist_coeffs;
+  constexpr auto dist_info =
+      armor_tracker_detail::BuildTrackerPnPDistCoeffs(kCameraInfo);
+  if constexpr (!dist_info.requires_undistort_first && dist_info.size > 0)
+  {
+    dist_coeffs =
+        cv::Mat(1, static_cast<int>(dist_info.size), CV_64F,
+                const_cast<double*>(dist_info.values.data()))
+            .clone();
+  }
+
+  std::vector<cv::Point2f> projected;
+  cv::projectPoints(object_points, rvec, tvec, camera_matrix, dist_coeffs,
+                    projected);
+  if (projected.size() != image_points.size())
+  {
+    return std::numeric_limits<double>::infinity();
+  }
+
+  double error = 0.0;
+  for (std::size_t index = 0; index < image_points.size(); ++index)
+  {
+    const double point_error = cv::norm(projected[index] - image_points[index]);
+    if (!std::isfinite(point_error))
+    {
+      return std::numeric_limits<double>::infinity();
+    }
+    error += point_error;
+  }
+  return error;
 }

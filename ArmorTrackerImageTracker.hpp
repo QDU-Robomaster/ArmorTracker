@@ -1,5 +1,13 @@
 #pragma once
 
+/**
+ * @file ArmorTrackerImageTracker.hpp
+ * @brief 图像域短时装甲身份跟踪器。
+ *
+ * 该跟踪器只在二维图像层维护 detection 到短生命周期 track id 的对应关系，
+ * 用于辅助同一装甲板判断，不参与三维整车几何估计。
+ */
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -8,51 +16,62 @@
 
 #include <opencv2/imgproc.hpp>
 
-#include "armor.hpp"
+#include "ArmorDetectorTypes.hpp"
 
 namespace armor_tracker
 {
-// 图像域短时身份跟踪参数。只负责“这是不是同一块装甲板”，不参与整车几何估计。
+/**
+ * @brief 图像域 track 的生命周期和确认阈值。
+ */
 struct ImageTrackConfig
 {
-  std::uint32_t appear_hits{2};
-  double appear_timeout_sec{0.01};
-  std::uint32_t tentative_misses{2};
-  double tentative_timeout_sec{0.03};
-  std::uint32_t disappear_misses{3};
-  double disappear_timeout_sec{0.06};
+  std::uint32_t appear_hits{2};        ///< 进入 confirmed 需要的命中次数。
+  double appear_timeout_sec{0.01};     ///< 进入 confirmed 需要跨过的最短时间。
+  std::uint32_t tentative_misses{2};   ///< tentative track 丢失多少次后删除。
+  double tentative_timeout_sec{0.03};  ///< tentative 删除前的最短丢失时间。
+  std::uint32_t disappear_misses{3};   ///< confirmed track 丢失多少次后删除。
+  double disappear_timeout_sec{0.06};  ///< confirmed 删除前的最短丢失时间。
 };
 
+/**
+ * @brief 单条图像域 track 的状态。
+ */
 struct ImageTrack
 {
-  bool active = false;
-  bool confirmed = false;
-  uint16_t track_id = 0;
-  ArmorColor color = ArmorColor::UNKNOWN;
-  ArmorNumber number = ArmorNumber::INVALID;
-  ArmorType type = ArmorType::INVALID;
-  float confidence = 0.0f;
-  cv::Point2f image_center{};
-  cv::Point2f image_velocity{};
-  double area = 0.0;
-  double area_rate = 0.0;
-  uint64_t first_timestamp_us = 0;
-  uint64_t last_timestamp_us = 0;
-  uint64_t last_seen_timestamp_us = 0;
-  uint32_t age = 0;
-  uint32_t hit_count = 0;
-  uint32_t miss_count = 0;
-  bool matched_this_frame = false;
-  uint8_t matched_armor_index = 255;
+  bool active = false;                       ///< 槽位是否正在使用。
+  bool confirmed = false;                    ///< track 是否已确认。
+  uint16_t track_id = 0;                     ///< 单调递增 track id。
+  ArmorColor color = ArmorColor::UNKNOWN;    ///< 最近可信颜色标签。
+  ArmorNumber number = ArmorNumber::INVALID; ///< 最近可信数字标签。
+  ArmorType type = ArmorType::INVALID;       ///< 最近可信大小装甲类型。
+  float confidence = 0.0f;                   ///< 最近 detection 置信度。
+  cv::Point2f image_center{};                ///< 图像中心位置，单位 px。
+  cv::Point2f image_velocity{};              ///< 图像中心速度，单位 px/s。
+  double area = 0.0;                         ///< 轮廓面积，单位 px^2。
+  double area_rate = 0.0;                    ///< 面积变化率，单位 px^2/s。
+  uint64_t first_timestamp_us = 0;           ///< 首次创建时间戳。
+  uint64_t last_timestamp_us = 0;            ///< 最近预测或更新的时间戳。
+  uint64_t last_seen_timestamp_us = 0;       ///< 最近被 detection 命中的时间戳。
+  uint32_t age = 0;                          ///< 更新年龄。
+  uint32_t hit_count = 0;                    ///< 连续命中计数。
+  uint32_t miss_count = 0;                   ///< 连续丢失计数。
+  bool matched_this_frame = false;           ///< 本帧是否匹配到 detection。
+  uint8_t matched_armor_index = 255;         ///< 本帧匹配的 detection 索引。
 };
 
-// 纯图像层的装甲板身份管理器。
-// 输入 detector 结果，输出每个 detection 对应的稳定 track id 及 confirmed 状态。
+/**
+ * @brief 纯图像层装甲身份管理器。
+ *
+ * 输入 detector 结果，输出每个 detection 对应的稳定 track id 及 confirmed 状态。
+ */
 class ImageTrackManager
 {
  public:
-  static constexpr std::size_t kMaxTracks = 8;
+  static constexpr std::size_t kMaxTracks = 8;  ///< 同时维护的最大 track 数。
 
+  /**
+   * @brief 清空所有 track 和 detection 映射。
+   */
   void Reset()
   {
     tracks_.fill(ImageTrack{});
@@ -61,6 +80,12 @@ class ImageTrackManager
     next_track_id_ = 0;
   }
 
+  /**
+   * @brief 用当前帧 detection 更新图像域 track 集合。
+   * @param armors 当前帧 detector 输出。
+   * @param image_timestamp_us 当前图像时间戳。
+   * @param cfg 生命周期和门控参数。
+   */
   void Update(const ArmorDetectorResults& armors, uint64_t image_timestamp_us,
               const ImageTrackConfig& cfg)
   {
@@ -372,13 +397,16 @@ class ImageTrackManager
       }
     }
 
+    /**
+     * @brief 一个旧图像 track 与一个当前 detector 装甲的匹配候选。
+     */
     struct MatchCandidate
     {
-      std::size_t track_slot = 0;
-      std::size_t armor_index = 0;
-      double score = 0.0;
-      double center_diff = 0.0;
-      double area_log = 0.0;
+      std::size_t track_slot = 0;  ///< tracks_ 中的 track 槽位。
+      std::size_t armor_index = 0; ///< 当前帧 detector 结果索引。
+      double score = 0.0;          ///< 匹配分，越小越好。
+      double center_diff = 0.0;    ///< 预测中心与检测中心的像素距离。
+      double area_log = 0.0;       ///< 预测面积与检测面积比例的对数差。
     };
     std::vector<MatchCandidate> candidates;
 
@@ -538,12 +566,15 @@ class ImageTrackManager
     const std::size_t unique_detection_count = unique_detection_indices.size();
     if (!assignment_track_slots.empty() && unique_detection_count <= 16U)
     {
+      /**
+       * @brief 动态规划分配中的中间状态。
+       */
       struct AssignmentState
       {
-        bool valid{false};
-        uint16_t matched_count{0};
-        uint16_t confirmed_matched_count{0};
-        double total_score{0.0};
+        bool valid{false};                   ///< 状态是否可达。
+        uint16_t matched_count{0};           ///< 已分配的 track 数。
+        uint16_t confirmed_matched_count{0}; ///< 其中已确认 track 数。
+        double total_score{0.0};             ///< 累计匹配分。
       };
 
       const std::size_t state_count = std::size_t{1} << unique_detection_count;
@@ -752,6 +783,9 @@ class ImageTrackManager
     }
   }
 
+  /**
+   * @brief 查询某个 detection 对应的 track id。
+   */
   int FindDetectionTrackId(std::size_t armor_index) const
   {
     if (armor_index >= detection_track_ids_.size())
@@ -761,6 +795,9 @@ class ImageTrackManager
     return detection_track_ids_[armor_index];
   }
 
+  /**
+   * @brief 查询某个 detection 对应的 track 是否已确认。
+   */
   bool IsDetectionTrackConfirmed(std::size_t armor_index) const
   {
     if (armor_index >= detection_track_confirmed_.size())
@@ -770,18 +807,27 @@ class ImageTrackManager
     return detection_track_confirmed_[armor_index] != 0;
   }
 
+  /**
+   * @brief 访问当前所有 track 槽位。
+   */
   const std::array<ImageTrack, kMaxTracks>& Tracks() const
   {
     return tracks_;
   }
 
  private:
+  /**
+   * @brief 计算装甲检测四点轮廓面积。
+   */
   static double ArmorArea(const ArmorDetectorResult& armor)
   {
     return std::abs(
         cv::contourArea(std::vector<cv::Point2f>(armor.points.begin(), armor.points.end())));
   }
 
+  /**
+   * @brief 计算两个图像时间戳的正向秒差。
+   */
   static double TimestampDeltaSeconds(uint64_t newer, uint64_t older)
   {
     if (newer > older)
@@ -791,6 +837,9 @@ class ImageTrackManager
     return 0.0;
   }
 
+  /**
+   * @brief 判断 track 标签与新 detection 标签是否兼容。
+   */
   static bool CompatibleLabel(const ImageTrack& track, const ArmorDetectorResult& armor)
   {
     if (track.type != ArmorType::INVALID && armor.type != ArmorType::INVALID &&
@@ -811,9 +860,9 @@ class ImageTrackManager
     return true;
   }
 
-  std::array<ImageTrack, kMaxTracks> tracks_{};
-  std::vector<int> detection_track_ids_{};
-  std::vector<uint8_t> detection_track_confirmed_{};
-  uint16_t next_track_id_ = 0;
+  std::array<ImageTrack, kMaxTracks> tracks_{};          ///< 固定容量 track 槽位。
+  std::vector<int> detection_track_ids_{};               ///< 当前帧 detection -> track id。
+  std::vector<uint8_t> detection_track_confirmed_{};     ///< 当前帧 detection -> confirmed。
+  uint16_t next_track_id_ = 0;                           ///< 下一个分配的 track id。
 };
 }  // namespace armor_tracker
