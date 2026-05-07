@@ -59,6 +59,11 @@ constructor_args:
       preview_scale: 0.5
       preview_wait_key_ms: 1
       queue_capacity: 1
+      output_mode: "window"
+      web_bind_address: "0.0.0.0"
+      web_port: 8080
+      web_stream_name: "armor_tracker"
+      max_fps: 30.0
   sync: '@camera_frame_sync'
 template_args:
   - Info:

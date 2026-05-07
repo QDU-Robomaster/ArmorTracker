@@ -32,9 +32,11 @@ tracker 日志会输出 `double` 观测量和 `uint64_t` 图像时间戳。BSP �
 ## 实时预览
 
 tracker 可选组合 `VisionPreview`，配置入口是 `cfg.preview`。预览只在
-`preview.enabled: true` 时启动 OpenCV 窗口；它不订阅 topic、不录像、不写调试文件。
-主链路在发布 `tracker/target` 和 `tracker/ekf_points` 后提交当前图像与输出快照，
-窗口线程负责绘制 detector 四边形、EKF 中心和四个装甲点。
+`preview.enabled: true` 时启动；它不订阅 topic、不录像、不写调试文件。
+`output_mode: window` 使用 OpenCV 窗口，`output_mode: web` / `raw` / `bmp`
+使用未压缩 BMP 网页推流。主链路在发布 `tracker/target` 和
+`tracker/ekf_points` 后提交当前图像与输出快照，预览线程负责绘制 detector
+四边形、EKF 中心和四个装甲点。`max_fps` 在深拷贝前限频，预览不会反压跟踪主链路。
 
 ## 验证备注
 
