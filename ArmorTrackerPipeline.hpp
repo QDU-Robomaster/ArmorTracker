@@ -709,6 +709,7 @@ void ArmorTracker<CameraInfoV>::ArmorsCallback(
   target_msg.image_timestamp_us = image_timestamp_us;
   target_msg.id = ArmorNumber::INVALID;
   target_msg.velocity_confidence = 0.0;
+  const LibXR::MicrosecondTimestamp publish_timestamp(image_timestamp_us);
 
   auto time = LibXR::Timebase::GetMicroseconds();
   // 同步图像时间戳是 tracker 的运动模型基准；只有没有有效传感器时间时才退回进程时间。
@@ -765,7 +766,7 @@ void ArmorTracker<CameraInfoV>::ArmorsCallback(
     info_msg.position.y() = ekf_.measurement(1);
     info_msg.position.z() = ekf_.measurement(2);
     info_msg.yaw = ekf_.measurement(3);
-    io_.info_topic.Publish(info_msg);
+    io_.info_topic.Publish(info_msg, publish_timestamp);
 
     if (rt_.state == State::DETECTING)
     {
@@ -1051,10 +1052,10 @@ void ArmorTracker<CameraInfoV>::ArmorsCallback(
   time_.last_image_timestamp_us = image_timestamp_us;
 
   candidate_debug_msg_.image_timestamp_us = image_timestamp_us;
-  io_.candidate_debug_topic.Publish(candidate_debug_msg_);
+  io_.candidate_debug_topic.Publish(candidate_debug_msg_, publish_timestamp);
   // ekf_points 是运行期数据合约，供预览、录像和 truth 对齐工具消费。
-  io_.ekf_points_topic.Publish(ekf_msg_);
-  io_.target_topic.Publish(target_msg);
+  io_.ekf_points_topic.Publish(ekf_msg_, publish_timestamp);
+  io_.target_topic.Publish(target_msg, publish_timestamp);
   SubmitPreview(*source_frame.image_frame, detector_preview_armors, target_msg,
                 ekf_msg_, candidate_debug_msg_);
 }
