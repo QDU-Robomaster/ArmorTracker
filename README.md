@@ -36,7 +36,8 @@ tracker 可选组合 `VisionPreview`，配置入口是 `cfg.preview`。预览只
 `output_mode: window` 使用 OpenCV 窗口，`output_mode: web` / `raw` / `bmp`
 使用未压缩 BMP 网页推流。主链路在发布 `tracker/target` 和
 `tracker/ekf_points` 后提交当前图像与输出快照，预览线程负责绘制 detector
-四边形、EKF 中心和四个装甲点。`max_fps` 在深拷贝前限频，预览不会反压跟踪主链路。
+四边形、tracker 整车中心、所有 tracker 装甲板框、各装甲板中心，以及相邻装甲板中心连线。
+`max_fps` 在深拷贝前限频，预览不会反压跟踪主链路。
 
 ## 验证备注
 

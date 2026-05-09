@@ -1131,11 +1131,83 @@ void ArmorTracker<CameraInfoV>::SubmitPreview(
     return;
   }
 
+  struct PreviewArmorOverlay
+  {
+    bool valid = false;
+    std::array<LibXR::Position<double>, 4> corners_cam{};
+  };
+
+  std::array<PreviewArmorOverlay, 4> tracker_overlay{};
+  const int tracker_overlay_count =
+      target_msg.tracking
+          ? std::max(0, std::min(4, static_cast<int>(ekf_msg.count)))
+          : 0;
+  if (tracker_overlay_count > 0 && io_.current_camera_pose_valid)
+  {
+    const double half_width_m =
+        ((rt_.tracked_armor.type == ArmorType::LARGE) ? 225.0 : 135.0) *
+        0.5 / 1000.0;
+    constexpr double half_height_m = 56.0 * 0.5 / 1000.0;
+    const auto r_wc = io_.current_camera_pose.rotation.ToRotationMatrix();
+    const Eigen::Matrix3d r_cw = r_wc.transpose();
+    const double angle_step = 2.0 * M_PI / static_cast<double>(tracker_overlay_count);
+
+    const auto to_eigen =
+        [](const LibXR::Position<double>& point) -> Eigen::Vector3d
+    {
+      return {point.x(), point.y(), point.z()};
+    };
+    const auto to_position =
+        [](const Eigen::Vector3d& point) -> LibXR::Position<double>
+    {
+      return {point.x(), point.y(), point.z()};
+    };
+
+    for (int i = 0; i < tracker_overlay_count; ++i)
+    {
+      if (!ekf_msg.valid[i + 1])
+      {
+        continue;
+      }
+      const double yaw = target_msg.yaw + angle_step * static_cast<double>(i);
+      const Eigen::Vector3d width_world(-std::sin(yaw), std::cos(yaw), 0.0);
+      const Eigen::Vector3d height_world(0.0, 0.0, 1.0);
+      Eigen::Vector3d width_cam = r_cw * width_world;
+      Eigen::Vector3d height_cam = r_cw * height_world;
+      if (!width_cam.allFinite() || !height_cam.allFinite() ||
+          width_cam.norm() < 1e-9 || height_cam.norm() < 1e-9)
+      {
+        continue;
+      }
+      width_cam.normalize();
+      height_cam.normalize();
+
+      const Eigen::Vector3d center_cam = to_eigen(ekf_msg.armors_cam[i]);
+      if (!center_cam.allFinite())
+      {
+        continue;
+      }
+      tracker_overlay[i].corners_cam[0] =
+          to_position(center_cam - half_width_m * width_cam -
+                      half_height_m * height_cam);
+      tracker_overlay[i].corners_cam[1] =
+          to_position(center_cam + half_width_m * width_cam -
+                      half_height_m * height_cam);
+      tracker_overlay[i].corners_cam[2] =
+          to_position(center_cam + half_width_m * width_cam +
+                      half_height_m * height_cam);
+      tracker_overlay[i].corners_cam[3] =
+          to_position(center_cam - half_width_m * width_cam +
+                      half_height_m * height_cam);
+      tracker_overlay[i].valid = true;
+    }
+  }
+
   const auto camera_matrix = kCameraInfo.camera_matrix;
   preview_.Submit(
       bgr_image,
       [detector_armors, target_msg, ekf_msg, candidate_debug_msg,
-       camera_matrix](cv::Mat& canvas)
+       camera_matrix, tracker_overlay, tracker_overlay_count](cv::Mat& canvas)
       {
         for (const auto& armor : detector_armors)
         {
@@ -1169,27 +1241,79 @@ void ArmorTracker<CameraInfoV>::SubmitPreview(
           return true;
         };
 
+        std::array<cv::Point, 4> armor_center_uv{};
+        std::array<bool, 4> armor_center_valid{};
+        for (int i = 0; i < tracker_overlay_count; ++i)
+        {
+          armor_center_valid[i] =
+              ekf_msg.valid[i + 1] &&
+              project(ekf_msg.armors_cam[i], armor_center_uv[i]);
+        }
+
+        for (int i = 0; i < tracker_overlay_count; ++i)
+        {
+          if (!tracker_overlay[i].valid)
+          {
+            continue;
+          }
+          std::array<cv::Point, 4> corners_uv{};
+          bool corners_valid = true;
+          for (int corner_index = 0; corner_index < 4; ++corner_index)
+          {
+            corners_valid =
+                corners_valid &&
+                project(tracker_overlay[i].corners_cam[corner_index],
+                        corners_uv[corner_index]);
+          }
+          if (!corners_valid)
+          {
+            continue;
+          }
+          for (int corner_index = 0; corner_index < 4; ++corner_index)
+          {
+            cv::line(canvas, corners_uv[corner_index],
+                     corners_uv[(corner_index + 1) % 4],
+                     cv::Scalar(255, 160, 40), 2, cv::LINE_AA);
+          }
+        }
+
+        if (tracker_overlay_count > 1)
+        {
+          for (int i = 0; i < tracker_overlay_count; ++i)
+          {
+            const int next = (i + 1) % tracker_overlay_count;
+            if (armor_center_valid[i] && armor_center_valid[next])
+            {
+              cv::line(canvas, armor_center_uv[i], armor_center_uv[next],
+                       cv::Scalar(40, 255, 180), 2, cv::LINE_AA);
+            }
+          }
+        }
+
+        for (int i = 0; i < tracker_overlay_count; ++i)
+        {
+          if (!armor_center_valid[i])
+          {
+            continue;
+          }
+          cv::circle(canvas, armor_center_uv[i], 5, cv::Scalar(255, 120, 40), -1,
+                     cv::LINE_AA);
+          cv::putText(canvas, "E" + std::to_string(i),
+                      armor_center_uv[i] + cv::Point(6, 16),
+                      cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(255, 120, 40),
+                      2, cv::LINE_AA);
+        }
+
         cv::Point center_uv;
         if (ekf_msg.valid[0] && project(ekf_msg.center_cam, center_uv))
         {
+          cv::circle(canvas, center_uv, 5, cv::Scalar(40, 255, 40), -1,
+                     cv::LINE_AA);
           cv::drawMarker(canvas, center_uv, cv::Scalar(40, 255, 40),
                          cv::MARKER_CROSS, 18, 2, cv::LINE_AA);
           cv::putText(canvas, "TC", center_uv + cv::Point(8, -8),
                       cv::FONT_HERSHEY_SIMPLEX, 0.55, cv::Scalar(40, 255, 40),
                       2, cv::LINE_AA);
-        }
-
-        for (int i = 0; i < 4; ++i)
-        {
-          cv::Point armor_uv;
-          if (ekf_msg.valid[i + 1] && project(ekf_msg.armors_cam[i], armor_uv))
-          {
-            cv::circle(canvas, armor_uv, 5, cv::Scalar(255, 120, 40), -1,
-                       cv::LINE_AA);
-            cv::putText(canvas, "E" + std::to_string(i), armor_uv + cv::Point(6, 16),
-                        cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(255, 120, 40),
-                        2, cv::LINE_AA);
-          }
         }
 
         const auto id_index = static_cast<std::size_t>(target_msg.id);
