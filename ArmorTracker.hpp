@@ -64,6 +64,15 @@ constructor_args:
       web_port: 8080
       web_stream_name: "armor_tracker"
       max_fps: 30.0
+
+    xr:
+      enemy_color_id: -1
+      require_target_tag: false
+      target_tag_id: -1
+      min_detect_count: 2
+      max_temp_lost_count: 15
+      outpost_max_temp_lost_count: 75
+      frame_convention: 1
   sync: '@camera_frame_sync'
 template_args:
   - Info:
@@ -111,6 +120,7 @@ depends:
 #include "ArmorTrackerImageTracker.hpp"
 #include "ArmorTrackerObserver.hpp"
 #include "ArmorTrackerRuntimeConfig.hpp"
+#include "ArmorTrackerXrLocked.hpp"
 #include "ArmorTrackerTarget.hpp"
 #include "CameraFrameSync.hpp"
 #include "app_framework.hpp"
@@ -259,6 +269,16 @@ class ArmorTracker : public LibXR::Application
     } model;                                    ///< 整车模型策略配置。
 
     VisionPreview::RuntimeParam preview{};      ///< 可选实时预览配置。
+    struct XrRuntime
+    {
+      int enemy_color_id = -1;
+      bool require_target_tag = false;
+      int target_tag_id = -1;
+      int min_detect_count = 2;
+      int max_temp_lost_count = 15;
+      int outpost_max_temp_lost_count = 75;
+      int frame_convention = 1;
+    } xr;
   };
 
   /**
@@ -595,6 +615,8 @@ class ArmorTracker : public LibXR::Application
                      const EkfPointsMsg& ekf_msg,
                      const CandidateDebugMsg& candidate_debug_msg);
 
+  armor_tracker_xr::Config BuildXrTrackerConfig() const;
+
   /**
    * @brief 用单个装甲观测初始化整车模型 EKF 状态。
    */
@@ -920,6 +942,7 @@ class ArmorTracker : public LibXR::Application
   } io_; ///< IO 和坐标系运行态。
 
   Config cfg_; ///< 当前配置副本。
+  armor_tracker_xr::LockedTracker xr_tracker_{}; ///< 锁定 XR tracker 运行态。
   VisionPreview preview_{}; ///< 可选实时预览工具，不参与主链路同步。
 
   const char* name_ = "armor_tracker";      ///< RamFS 命令文件名。
@@ -1157,6 +1180,26 @@ bool ArmorTracker<CameraInfoV>::VehicleFixedPoseYawOptimizeEnabled() const
   return cfg_.model.enable_fixed_pose_yaw_opt;
 }
 
+template <CameraTypes::CameraInfo CameraInfoV>
+armor_tracker_xr::Config ArmorTracker<CameraInfoV>::BuildXrTrackerConfig() const
+{
+  armor_tracker_xr::Config config{};
+  config.enemy_color_id = cfg_.xr.enemy_color_id;
+  config.require_target_tag = cfg_.xr.require_target_tag;
+  config.target_tag_id = cfg_.xr.target_tag_id;
+  config.min_detect_count = cfg_.xr.min_detect_count;
+  config.max_temp_lost_count = cfg_.xr.max_temp_lost_count;
+  config.outpost_max_temp_lost_count = cfg_.xr.outpost_max_temp_lost_count;
+  config.frame_convention = cfg_.xr.frame_convention == 0 ? 0 : 1;
+  config.camera_matrix = {
+      kCameraInfo.camera_matrix[0], kCameraInfo.camera_matrix[1],
+      kCameraInfo.camera_matrix[2], kCameraInfo.camera_matrix[3],
+      kCameraInfo.camera_matrix[4], kCameraInfo.camera_matrix[5],
+      kCameraInfo.camera_matrix[6], kCameraInfo.camera_matrix[7],
+      kCameraInfo.camera_matrix[8]};
+  return config;
+}
+
 // 分离出的实现块：让主头文件只保留 tracker 主流程。
 #include "ArmorTrackerVehicleModel.hpp"
 #include "ArmorTrackerRuntimeAdapter.hpp"
@@ -1174,6 +1217,7 @@ ArmorTracker<CameraInfoV>::ArmorTracker(LibXR::HardwareContainer& hw,
       sync_(sync)
 {
   XR_LOG_INFO("Starting ArmorTracker!");
+  xr_tracker_.Configure(BuildXrTrackerConfig());
   preview_.Start(cfg_.preview);
 
   hw.template FindOrExit<LibXR::RamFS>({"ramfs"})->Add(cmd_file_);
@@ -1762,6 +1806,7 @@ void ArmorTracker<CameraInfoV>::SetConfig(const Config& cfg)
     rt_.tracking_thres = cfg.thresholds.tracking_thres;
   }
   cfg_ = cfg;
+  xr_tracker_.Configure(BuildXrTrackerConfig());
   preview_.Stop();
   preview_.Start(cfg_.preview);
 }

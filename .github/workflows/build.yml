@@ -100,7 +100,16 @@ jobs:
 
       - name: Sync dependency repos
         run: |
-          xrobot_init_mod
+          if ! xrobot_init_mod; then
+            echo "xrobot_init_mod reported a dependency map error; verifying required repos before continuing"
+            test -d Modules/BlinkLED
+            test -d Modules/CameraBase
+            test -d Modules/WebotsCamera
+            test -d Modules/CameraFrameSync
+            test -d Modules/CameraSync
+            test -d Modules/VisionPreview
+            test -d Modules/ArmorDetector
+          fi
 
       - name: Create test module config
         run: |
@@ -154,7 +163,6 @@ jobs:
                 cfg:
                   detect_color: 1
                   network:
-                    score_threshold: 0.1
                     min_confidence: 0.1
                     enable_quad_check: true
                     min_quad_area_px: 16.0

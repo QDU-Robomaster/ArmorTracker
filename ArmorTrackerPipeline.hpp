@@ -660,6 +660,150 @@ void ArmorTracker<CameraInfoV>::ArmorsCallback(
     return;
   }
 
+  {
+    const ArmorDetectorResults detector_preview_armors = *detections_ptr;
+    std::vector<armor_tracker_xr::InputArmor> xr_inputs;
+    xr_inputs.reserve(detector_preview_armors.size());
+    for (const auto& armor : detector_preview_armors)
+    {
+      armor_tracker_xr::InputArmor input{};
+      input.color_id = static_cast<int>(armor.color);
+      input.tag_id = static_cast<int>(armor.number);
+      input.armor_type = static_cast<int>(armor.type);
+      input.confidence = armor.confidence;
+      input.corners = armor.points;
+      input.center = armor.center;
+      input.center_norm = armor.center_norm;
+      xr_inputs.push_back(input);
+    }
+
+    Eigen::Quaterniond q_gimbal_to_world(
+        source_frame.imu->rotation_wxyz[0],
+        source_frame.imu->rotation_wxyz[1],
+        source_frame.imu->rotation_wxyz[2],
+        source_frame.imu->rotation_wxyz[3]);
+    if (!std::isfinite(q_gimbal_to_world.norm()) ||
+        q_gimbal_to_world.norm() < 1e-9)
+    {
+      q_gimbal_to_world = Eigen::Quaterniond::Identity();
+    }
+    q_gimbal_to_world.normalize();
+
+    const armor_tracker_xr::Output xr_output =
+        xr_tracker_.Step(image_timestamp_us, q_gimbal_to_world, xr_inputs);
+
+    TrackerInfo info_msg{};
+    ArmorTrackerTarget target_msg{};
+    CandidateDebugMsg candidate_debug{};
+    EkfPointsMsg ekf_msg{};
+    ekf_msg.image_timestamp_us = image_timestamp_us;
+    target_msg.image_timestamp_us = image_timestamp_us;
+    target_msg.id = ArmorNumber::INVALID;
+    target_msg.velocity_confidence = 0.0;
+    candidate_debug.image_timestamp_us = image_timestamp_us;
+    candidate_debug.detection_count = static_cast<uint8_t>(
+        std::min<std::size_t>(detector_preview_armors.size(),
+                              CandidateDebugMsg::kMaxDetections));
+    candidate_debug.detection_track_ids.fill(static_cast<int16_t>(-1));
+    candidate_debug.detection_track_confirmed.fill(static_cast<uint8_t>(0));
+    candidate_debug.tracked_armors_num =
+        static_cast<uint8_t>(std::max(0, xr_output.armors_num));
+    candidate_debug.accepted_mode =
+        xr_output.state == "tracking" ? 2
+        : xr_output.state == "detecting" ? 1
+        : xr_output.state == "temp_lost" ? 3
+                                        : 0;
+
+    if (xr_output.has_target)
+    {
+      target_msg.tracking = true;
+      target_msg.id = static_cast<ArmorNumber>(std::clamp(
+          xr_output.selected_tag_id, 0, static_cast<int>(ArmorNumber::NEGATIVE)));
+      target_msg.armors_num = xr_output.armors_num;
+      target_msg.position = xr_output.center;
+      target_msg.velocity = xr_output.velocity;
+      target_msg.yaw = xr_output.yaw;
+      target_msg.v_yaw = xr_output.vyaw;
+      target_msg.radius_1 = xr_output.radius_even;
+      target_msg.radius_2 = xr_output.radius_odd;
+      target_msg.dz = xr_output.dz;
+      target_msg.tracked_face_index = xr_output.selected_face;
+      target_msg.face_switch_observed = xr_output.jumped;
+      target_msg.measured_face_valid = xr_output.selected_face >= 0;
+      target_msg.use_measured_face_anchor = true;
+      target_msg.measured_face_index = xr_output.selected_face;
+      target_msg.measured_face_position = xr_output.armor;
+      target_msg.measured_face_yaw = xr_output.armor_yaw;
+      target_msg.velocity_confidence =
+          xr_output.state == "tracking" ? 1.0 : 0.25;
+
+      info_msg.position.x() = xr_output.armor.x();
+      info_msg.position.y() = xr_output.armor.y();
+      info_msg.position.z() = xr_output.armor.z();
+      info_msg.yaw = xr_output.armor_yaw;
+
+      ekf_msg.count =
+          static_cast<uint8_t>(std::clamp(xr_output.armors_num, 0, 4));
+      ekf_msg.center_cam = LibXR::Position<double>(
+          xr_output.center.x(), xr_output.center.y(), xr_output.center.z());
+      ekf_msg.valid[0] = xr_output.center.z() > 1e-6;
+      for (int face = 0; face < 4; ++face)
+      {
+        if (face < static_cast<int>(xr_output.faces.size()))
+        {
+          Eigen::Vector3d face_camera;
+          if (cfg_.xr.frame_convention == 0)
+          {
+            face_camera =
+                xr_output.faces[static_cast<std::size_t>(face)].head<3>();
+          }
+          else
+          {
+            face_camera = armor_tracker_xr::XrWorldToCamera(
+                xr_output.faces[static_cast<std::size_t>(face)].head<3>());
+          }
+          ekf_msg.armors_cam[face] = LibXR::Position<double>(
+              face_camera.x(), face_camera.y(), face_camera.z());
+          ekf_msg.valid[face + 1] = face_camera.z() > 1e-6;
+        }
+        else
+        {
+          ekf_msg.armors_cam[face] = ekf_msg.center_cam;
+          ekf_msg.valid[face + 1] = false;
+        }
+      }
+      candidate_debug.matched = 1;
+      candidate_debug.selected_index = 0;
+      candidate_debug.ekf_update_valid = 1;
+      candidate_debug.ekf_update_face =
+          static_cast<int8_t>(xr_output.selected_face);
+      candidate_debug.ekf_range_m =
+          static_cast<float>(xr_output.armor.norm());
+    }
+    else
+    {
+      target_msg.tracking = false;
+      ekf_msg.count = 0;
+      for (bool& valid : ekf_msg.valid)
+      {
+        valid = false;
+      }
+    }
+
+    const LibXR::MicrosecondTimestamp publish_timestamp(image_timestamp_us);
+    io_.info_topic.Publish(info_msg, publish_timestamp);
+    candidate_debug_msg_ = candidate_debug;
+    ekf_msg_ = ekf_msg;
+    io_.candidate_debug_topic.Publish(candidate_debug_msg_, publish_timestamp);
+    io_.ekf_points_topic.Publish(ekf_msg_, publish_timestamp);
+    io_.target_topic.Publish(target_msg, publish_timestamp);
+    SubmitPreview(*source_frame.image_frame, detector_preview_armors, target_msg,
+                  ekf_msg_, candidate_debug_msg_);
+    time_.last_image_timestamp_us = image_timestamp_us;
+    time_.last_time = LibXR::Timebase::GetMicroseconds();
+    return;
+  }
+
   const ArmorDetectorResults detector_preview_armors = *detections_ptr;
   ArmorDetectorResults armors_msg = detector_preview_armors;
   armors_msg.erase(
