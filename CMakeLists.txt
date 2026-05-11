@@ -1,11 +1,4 @@
-# ArmorTracker 运行时模块
 target_include_directories(xr PUBLIC ${CMAKE_CURRENT_LIST_DIR})
-
-set(MODULE_ARMORTRACKER_SRC
-  "${CMAKE_CURRENT_LIST_DIR}/extended_kalman_filter.cpp"
-)
-
-target_sources(xr PRIVATE ${MODULE_ARMORTRACKER_SRC})
 
 get_filename_component(_MODULE_DIRNAME ${CMAKE_CURRENT_LIST_DIR} NAME)
 set(_DEPS_TARGET "${_MODULE_DIRNAME}_deps")
