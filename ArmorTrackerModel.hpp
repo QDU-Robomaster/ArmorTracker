@@ -11,7 +11,9 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <list>
+#include <numeric>
 #include <string>
 #include <utility>
 #include <vector>
@@ -50,6 +52,45 @@ enum ArmorName
   BASE,
   NOT_ARMOR
 };
+
+/**
+ * @brief Number of persistent vehicle tracks, excluding invalid armor labels.
+ */
+inline constexpr std::size_t kTrackSlotCount =
+    static_cast<std::size_t>(ArmorName::NOT_ARMOR);
+
+/**
+ * @brief Convert a detector number enum value to the internal armor name.
+ */
+inline ArmorName ArmorNameFromDetectorNumber(int number)
+{
+  if (number >= 0 && number <= 4)
+  {
+    return static_cast<ArmorName>(number);
+  }
+  if (number == 5)
+  {
+    return ArmorName::OUTPOST;
+  }
+  if (number == 6)
+  {
+    return ArmorName::SENTRY;
+  }
+  if (number == 7)
+  {
+    return ArmorName::BASE;
+  }
+  return ArmorName::NOT_ARMOR;
+}
+
+/**
+ * @brief Return the persistent track slot index for an armor name.
+ */
+inline int TrackSlotIndex(ArmorName name)
+{
+  const auto index = static_cast<int>(name);
+  return index >= 0 && index < static_cast<int>(kTrackSlotCount) ? index : -1;
+}
 
 /**
  * @brief Target selection priority for a detected armor.
@@ -697,15 +738,17 @@ class Tracker
    */
   Tracker(const Config& config, Solver& solver)
       : solver_(solver),
+        require_target_tag_(config.require_target_tag),
+        target_name_(ArmorNameFromDetectorNumber(config.target_tag_id)),
         min_detect_count_(config.min_detect_count),
-        max_temp_lost_count_(config.max_temp_lost_count),
-        detect_count_(0),
-        temp_lost_count_(0),
         outpost_max_temp_lost_count_(config.outpost_max_temp_lost_count),
         normal_temp_lost_count_(config.max_temp_lost_count),
-        state_("lost"),
-        last_timestamp_(std::chrono::steady_clock::now())
+        state_("lost")
   {
+    for (std::size_t i = 0; i < tracks_.size(); ++i)
+    {
+      tracks_[i].name = static_cast<ArmorName>(i);
+    }
   }
 
   /**
@@ -719,13 +762,6 @@ class Tracker
   std::list<Target> Track(std::list<Armor>& armors,
                           std::chrono::steady_clock::time_point t)
   {
-    auto dt = DeltaTime(t, last_timestamp_);
-    last_timestamp_ = t;
-    if (state_ != "lost" && dt > 0.1)
-    {
-      state_ = "lost";
-    }
-
     armors.sort(
         [](const Armor& a, const Armor& b)
         {
@@ -738,122 +774,316 @@ class Tracker
       return a.priority < b.priority;
     });
 
-    bool found;
-    if (state_ == "lost")
+    std::array<std::list<Armor>, kTrackSlotCount> armors_by_name;
+    for (const auto& armor : armors)
     {
-      found = SetTarget(armors, t);
-    }
-    else
-    {
-      found = UpdateTarget(armors, t);
+      const int index = TrackSlotIndex(armor.name);
+      if (index >= 0)
+      {
+        armors_by_name[static_cast<std::size_t>(index)].push_back(armor);
+      }
     }
 
-    StateMachine(found);
-    if (state_ != "lost" && target_.Diverged())
+    for (std::size_t i = 0; i < tracks_.size(); ++i)
+    {
+      UpdateSlot(tracks_[i], armors_by_name[i], t);
+    }
+
+    const int selected = SelectTrack();
+    if (selected < 0)
     {
       state_ = "lost";
+      selected_index_ = -1;
       return {};
     }
-    if (std::accumulate(target_.Ekf().recent_nis_failures.begin(),
-                        target_.Ekf().recent_nis_failures.end(), 0) >=
-        0.4 * target_.Ekf().window_size)
-    {
-      state_ = "lost";
-      return {};
-    }
-    if (state_ == "lost")
-    {
-      return {};
-    }
-    return {target_};
+
+    selected_index_ = selected;
+    const auto& slot = tracks_[static_cast<std::size_t>(selected_index_)];
+    state_ = slot.state;
+    return {slot.target};
   }
 
  private:
+  /**
+   * @brief Persistent state and selection metrics for one vehicle number.
+   */
+  struct TrackSlot
+  {
+    ArmorName name{ArmorName::NOT_ARMOR};
+    std::string state{"lost"};
+    Target target{};
+    bool initialized{false};
+    int detect_count{0};
+    int temp_lost_count{0};
+    int max_temp_lost_count{0};
+    double score{-std::numeric_limits<double>::infinity()};
+    double observed_count_lpf{0.0};
+    double hittable_area{0.0};
+    double gimbal_angle_error{1.0};
+    bool has_timestamp{false};
+    std::chrono::steady_clock::time_point last_timestamp{};
+  };
+
   Solver& solver_;
+  bool require_target_tag_;
+  ArmorName target_name_;
   int min_detect_count_;
-  int max_temp_lost_count_;
-  int detect_count_;
-  int temp_lost_count_;
   int outpost_max_temp_lost_count_;
   int normal_temp_lost_count_;
   std::string state_;
-  Target target_;
-  std::chrono::steady_clock::time_point last_timestamp_;
+  std::array<TrackSlot, kTrackSlotCount> tracks_{};
+  int selected_index_ = -1;
+
+  /**
+   * @brief Clamp a scalar into [0, 1].
+   */
+  static double Clamp01(double value)
+  {
+    return std::clamp(value, 0.0, 1.0);
+  }
+
+  /**
+   * @brief Return whether a slot can be selected for the public target output.
+   */
+  static bool Selectable(const TrackSlot& slot)
+  {
+    return slot.initialized && slot.state != "lost" &&
+           std::isfinite(slot.score);
+  }
+
+  /**
+   * @brief Update current-frame observation metrics for target selection.
+   */
+  static void UpdateObservationMetrics(TrackSlot& slot,
+                                       const std::list<Armor>& armors)
+  {
+    slot.observed_count_lpf =
+        0.8 * slot.observed_count_lpf +
+        0.2 * static_cast<double>(armors.size());
+    slot.hittable_area = 0.0;
+    auto min_angle_error = std::numeric_limits<double>::infinity();
+    for (const auto& armor : armors)
+    {
+      if (armor.points.size() == 4)
+      {
+        slot.hittable_area += std::abs(cv::contourArea(armor.points));
+      }
+      const auto dx = static_cast<double>(armor.center_norm.x) - 0.5;
+      const auto dy = static_cast<double>(armor.center_norm.y) - 0.5;
+      min_angle_error = std::min(min_angle_error, std::hypot(dx, dy));
+    }
+    if (std::isfinite(min_angle_error))
+    {
+      slot.gimbal_angle_error = min_angle_error;
+    }
+  }
+
+  /**
+   * @brief Return whether the slot's EKF has failed recent innovation gates.
+   */
+  static bool RecentNisFailed(const TrackSlot& slot)
+  {
+    const auto& ekf = slot.target.Ekf();
+    return std::accumulate(ekf.recent_nis_failures.begin(),
+                           ekf.recent_nis_failures.end(), 0) >=
+           0.4 * static_cast<double>(ekf.window_size);
+  }
+
+  /**
+   * @brief Update one vehicle-number slot for the current frame.
+   */
+  void UpdateSlot(TrackSlot& slot, std::list<Armor>& armors,
+                  std::chrono::steady_clock::time_point t)
+  {
+    UpdateObservationMetrics(slot, armors);
+
+    if (slot.has_timestamp)
+    {
+      const auto dt = DeltaTime(t, slot.last_timestamp);
+      if (slot.state != "lost" && dt > 0.1)
+      {
+        slot.state = "lost";
+      }
+    }
+    slot.last_timestamp = t;
+    slot.has_timestamp = true;
+
+    bool found = false;
+    if (!slot.initialized || slot.state == "lost")
+    {
+      found = SetTarget(slot, armors, t);
+    }
+    else
+    {
+      found = UpdateTarget(slot, armors, t);
+    }
+
+    StateMachine(slot, found);
+    if (slot.initialized && slot.state != "lost" && slot.target.Diverged())
+    {
+      slot.state = "lost";
+    }
+    if (slot.initialized && slot.state != "lost" && RecentNisFailed(slot))
+    {
+      slot.state = "lost";
+    }
+    slot.score = ScoreSlot(slot);
+  }
+
+  /**
+   * @brief Calculate the current target-selection score for one slot.
+   */
+  static double ScoreSlot(const TrackSlot& slot)
+  {
+    if (!slot.initialized || slot.state == "lost")
+    {
+      return -std::numeric_limits<double>::infinity();
+    }
+
+    const Eigen::VectorXd x = slot.target.EkfX();
+    const double distance = std::sqrt(x[0] * x[0] + x[2] * x[2] + x[4] * x[4]);
+    const double distance_score = Clamp01((8.0 - distance) / 7.5);
+    const double area_score = Clamp01(slot.hittable_area / 6000.0);
+    const double count_score = Clamp01(slot.observed_count_lpf / 4.0);
+    const double spin_score = Clamp01(1.0 - std::abs(x[7]) / 8.0);
+    const double angle_score = Clamp01(1.0 - slot.gimbal_angle_error / 0.5);
+
+    double state_scale = 1.0;
+    if (slot.state == "detecting")
+    {
+      state_scale = 0.55;
+    }
+    else if (slot.state == "temp_lost")
+    {
+      state_scale = 0.35;
+    }
+
+    return state_scale * (2.0 * count_score + 1.2 * distance_score +
+                          1.5 * area_score + spin_score + angle_score);
+  }
+
+  /**
+   * @brief Select the output target with a small hysteresis margin.
+   */
+  int SelectTrack() const
+  {
+    if (require_target_tag_)
+    {
+      const int required_index = TrackSlotIndex(target_name_);
+      if (required_index >= 0 &&
+          Selectable(tracks_[static_cast<std::size_t>(required_index)]))
+      {
+        return required_index;
+      }
+      return -1;
+    }
+
+    int best_index = -1;
+    double best_score = -std::numeric_limits<double>::infinity();
+    for (std::size_t i = 0; i < tracks_.size(); ++i)
+    {
+      if (!Selectable(tracks_[i]) || tracks_[i].score <= best_score)
+      {
+        continue;
+      }
+      best_score = tracks_[i].score;
+      best_index = static_cast<int>(i);
+    }
+    if (best_index < 0)
+    {
+      return -1;
+    }
+
+    if (selected_index_ >= 0 &&
+        selected_index_ < static_cast<int>(tracks_.size()) &&
+        Selectable(tracks_[static_cast<std::size_t>(selected_index_)]))
+    {
+      constexpr double kSwitchMargin = 0.25;
+      const auto& selected = tracks_[static_cast<std::size_t>(selected_index_)];
+      if (best_index != selected_index_ &&
+          tracks_[static_cast<std::size_t>(best_index)].score <=
+              selected.score + kSwitchMargin)
+      {
+        return selected_index_;
+      }
+    }
+    return best_index;
+  }
 
   /**
    * @brief Advance the lost/detecting/tracking/temp-lost state machine.
    */
-  void StateMachine(bool found)
+  void StateMachine(TrackSlot& slot, bool found)
   {
-    if (state_ == "lost")
+    if (slot.state == "lost")
     {
       if (!found)
       {
         return;
       }
-      state_ = "detecting";
-      detect_count_ = 1;
+      slot.state = "detecting";
+      slot.detect_count = 1;
     }
-    else if (state_ == "detecting")
+    else if (slot.state == "detecting")
     {
       if (found)
       {
-        ++detect_count_;
-        if (detect_count_ >= min_detect_count_)
+        ++slot.detect_count;
+        if (slot.detect_count >= min_detect_count_)
         {
-          state_ = "tracking";
+          slot.state = "tracking";
         }
       }
       else
       {
-        detect_count_ = 0;
-        state_ = "lost";
+        slot.detect_count = 0;
+        slot.state = "lost";
       }
     }
-    else if (state_ == "tracking")
+    else if (slot.state == "tracking")
     {
       if (found)
       {
         return;
       }
-      temp_lost_count_ = 1;
-      state_ = "temp_lost";
+      slot.temp_lost_count = 1;
+      slot.state = "temp_lost";
     }
-    else if (state_ == "switching")
+    else if (slot.state == "switching")
     {
       if (found)
       {
-        state_ = "detecting";
+        slot.state = "detecting";
       }
       else
       {
-        ++temp_lost_count_;
-        if (temp_lost_count_ > 200)
+        ++slot.temp_lost_count;
+        if (slot.temp_lost_count > 200)
         {
-          state_ = "lost";
+          slot.state = "lost";
         }
       }
     }
-    else if (state_ == "temp_lost")
+    else if (slot.state == "temp_lost")
     {
       if (found)
       {
-        state_ = "tracking";
+        slot.state = "tracking";
       }
       else
       {
-        ++temp_lost_count_;
-        if (target_.name == ArmorName::OUTPOST)
+        ++slot.temp_lost_count;
+        if (slot.target.name == ArmorName::OUTPOST)
         {
-          max_temp_lost_count_ = outpost_max_temp_lost_count_;
+          slot.max_temp_lost_count = outpost_max_temp_lost_count_;
         }
         else
         {
-          max_temp_lost_count_ = normal_temp_lost_count_;
+          slot.max_temp_lost_count = normal_temp_lost_count_;
         }
-        if (temp_lost_count_ > max_temp_lost_count_)
+        if (slot.temp_lost_count > slot.max_temp_lost_count)
         {
-          state_ = "lost";
+          slot.state = "lost";
         }
       }
     }
@@ -862,7 +1092,7 @@ class Tracker
   /**
    * @brief Initialize target state from the best sorted armor candidate.
    */
-  bool SetTarget(std::list<Armor>& armors,
+  bool SetTarget(TrackSlot& slot, std::list<Armor>& armors,
                  std::chrono::steady_clock::time_point t)
   {
     if (armors.empty())
@@ -881,37 +1111,41 @@ class Tracker
     if (is_balance)
     {
       P0_dig << 1, 64, 1, 64, 1, 64, 0.4, 100, 1, 1, 1;
-      target_ = Target(armor, t, 0.2, 2, P0_dig);
+      slot.target = Target(armor, t, 0.2, 2, P0_dig);
     }
     else if (armor.name == ArmorName::OUTPOST)
     {
       P0_dig << 1, 64, 1, 64, 1, 81, 0.4, 100, 1e-4, 0, 0;
-      target_ = Target(armor, t, 0.2765, 3, P0_dig);
+      slot.target = Target(armor, t, 0.2765, 3, P0_dig);
     }
     else if (armor.name == ArmorName::BASE)
     {
       P0_dig << 1, 64, 1, 64, 1, 64, 0.4, 100, 1e-4, 0, 0;
-      target_ = Target(armor, t, 0.3205, 3, P0_dig);
+      slot.target = Target(armor, t, 0.3205, 3, P0_dig);
     }
     else
     {
       P0_dig << 1, 64, 1, 64, 1, 64, 0.4, 100, 1, 1, 1;
-      target_ = Target(armor, t, 0.2, 4, P0_dig);
+      slot.target = Target(armor, t, 0.2, 4, P0_dig);
     }
+    slot.initialized = true;
+    slot.max_temp_lost_count =
+        armor.name == ArmorName::OUTPOST ? outpost_max_temp_lost_count_
+                                         : normal_temp_lost_count_;
     return true;
   }
 
   /**
    * @brief Predict and update the current target from matching armors.
    */
-  bool UpdateTarget(std::list<Armor>& armors,
+  bool UpdateTarget(TrackSlot& slot, std::list<Armor>& armors,
                     std::chrono::steady_clock::time_point t)
   {
-    target_.Predict(t);
+    slot.target.Predict(t);
     int found_count = 0;
     for (const auto& armor : armors)
     {
-      if (armor.name != target_.name || armor.type != target_.armor_type)
+      if (armor.name != slot.target.name || armor.type != slot.target.armor_type)
       {
         continue;
       }
@@ -924,12 +1158,12 @@ class Tracker
 
     for (auto& armor : armors)
     {
-      if (armor.name != target_.name || armor.type != target_.armor_type)
+      if (armor.name != slot.target.name || armor.type != slot.target.armor_type)
       {
         continue;
       }
       solver_.Solve(armor);
-      target_.Update(armor);
+      slot.target.Update(armor);
     }
     return true;
   }
