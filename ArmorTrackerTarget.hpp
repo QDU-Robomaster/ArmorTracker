@@ -18,7 +18,7 @@
  * @brief tracker/target topic 的目标状态载荷。
  *
  * 该结构表达当前跟踪到的机器人中心、速度、yaw、半径、高低差以及当前观测面。
- * 坐标均位于 tracker 世界系；字段保持平凡聚合，方便 SharedTopic / recorder
+ * 坐标位于 tracker 配置的输出帧；字段保持平凡聚合，方便 SharedTopic / recorder
  * 直接按结构体尺寸注册和传输。
  */
 struct ArmorTrackerTarget
