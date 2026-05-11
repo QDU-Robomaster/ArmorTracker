@@ -35,8 +35,16 @@
 它绘制 detector 原始四边形、tracker 整车中心、四个装甲面中心、相邻装甲面连线，以及带固定
 pitch 的装甲板物理框。detector preview 不在这里处理。
 
+## Target Selection
+
+tracker 内部按装甲板编号维护多套车辆 EKF 状态，同一 slot 丢失后不会清空 EKF。
+同一帧里出现多个编号时，各编号状态独立更新；
+`tracker/target` 仍只发布一个当前选择目标。当前选择分数使用装甲板观测数量的低通值、距离、
+可打击面积、自旋速度和目标相对当前云台视轴的角度差，并用滞回 margin 避免输出目标抖动。
+
 ## 验证
 
-行为一致性使用 `tools/tracker_replay/armor_tracker_replay.cpp` 对固定数据集重放，并和锁定参考
-TSV 做逐字段比较。BSP 验证需要生成当前 `cfg.tracker` / `cfg.overlay` 结构对应的
-`User/xrobot_main.hpp` 后再构建 Linux 和 Webots 目标。
+单车过滤回归使用 `tools/tracker_replay/armor_tracker_replay.cpp` 对固定数据集重放；多车目标选择
+需要使用不按编号过滤的 replay，确认同帧多编号输入会独立更新各 slot 并只输出当前选中的目标。
+BSP 验证需要生成当前 `cfg.tracker` / `cfg.overlay` 结构对应的 `User/xrobot_main.hpp` 后再构建
+Linux 和 Webots 目标。

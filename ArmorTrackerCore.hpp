@@ -203,10 +203,6 @@ class TrackerCore
       {
         continue;
       }
-      if (config_.require_target_tag && input.tag_id != config_.target_tag_id)
-      {
-        continue;
-      }
       armors.push_back(MakeTrackedArmor(input));
     }
 
