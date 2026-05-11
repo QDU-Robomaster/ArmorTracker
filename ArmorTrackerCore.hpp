@@ -38,6 +38,28 @@ struct InputArmor
 };
 
 /**
+ * @brief One active tracked vehicle slot prepared for preview/debug drawing.
+ */
+struct TrackOutput
+{
+  std::string state{"lost"};
+  bool selected = false;
+  int tag_id = -1;
+  int armor_type = 0;
+  int armors_num = 0;
+  int selected_face = -1;
+  double score = 0.0;
+  Eigen::Vector3d center = Eigen::Vector3d::Zero();
+  Eigen::Vector3d velocity = Eigen::Vector3d::Zero();
+  double yaw = 0.0;
+  double vyaw = 0.0;
+  double radius_even = 0.0;
+  double radius_odd = 0.0;
+  double dz = 0.0;
+  std::vector<Eigen::Vector4d> faces;
+};
+
+/**
  * @brief Tracker result in the configured output frame.
  */
 struct Output
@@ -59,6 +81,7 @@ struct Output
   Eigen::Vector3d armor = Eigen::Vector3d::Zero();
   double armor_yaw = 0.0;
   std::vector<Eigen::Vector4d> faces;
+  std::vector<TrackOutput> tracks;
 };
 
 /**
@@ -203,10 +226,6 @@ class TrackerCore
       {
         continue;
       }
-      if (config_.require_target_tag && input.tag_id != config_.target_tag_id)
-      {
-        continue;
-      }
       armors.push_back(MakeTrackedArmor(input));
     }
 
@@ -226,6 +245,10 @@ class TrackerCore
     Output out;
     out.state = tracker_->State();
     out.selected_tag_id = config_.target_tag_id;
+    for (const auto& snapshot : tracker_->Snapshots())
+    {
+      out.tracks.push_back(MakeTrackOutput(snapshot));
+    }
     if (targets.empty())
     {
       return out;
@@ -281,6 +304,43 @@ class TrackerCore
   bool has_time_base_ = false;
   uint64_t base_timestamp_us_ = 0;
   std::chrono::steady_clock::time_point base_tp_{};
+
+  /**
+   * @brief Convert an internal target snapshot to public output-frame fields.
+   */
+  TrackOutput MakeTrackOutput(const Tracker::TrackSnapshot& snapshot) const
+  {
+    const Target& target = snapshot.target;
+    TrackOutput out;
+    out.state = snapshot.state;
+    out.selected = snapshot.selected;
+    out.score = snapshot.score;
+    out.tag_id = ModelNameToDetectorNumber(target.name);
+    out.armor_type = target.armor_type == ArmorType::BIG ? 1 : 0;
+    out.selected_face = target.last_id;
+    const Eigen::VectorXd x = target.EkfX();
+    out.radius_even = x[8];
+    out.radius_odd = x[8] + x[9];
+    out.faces = target.ArmorXyzaList();
+    out.armors_num = static_cast<int>(out.faces.size());
+    if (config_.output_frame == 0)
+    {
+      out.center = {x[0], x[2], x[4]};
+      out.velocity = {x[1], x[3], x[5]};
+      out.yaw = LimitRad(x[6]);
+      out.vyaw = x[7];
+      out.dz = x[10];
+    }
+    else
+    {
+      out.center = WorldToCameraFrame({x[0], x[2], x[4]});
+      out.velocity = WorldToCameraFrame({x[1], x[3], x[5]});
+      out.yaw = LimitRad(x[6] - kPi * 0.5);
+      out.vyaw = x[7];
+      out.dz = -x[10];
+    }
+    return out;
+  }
 
   /**
    * @brief Validate detector fields before constructing an internal armor.

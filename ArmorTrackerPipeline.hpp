@@ -8,7 +8,9 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdio>
 #include <string>
+#include <vector>
 
 #include <opencv2/imgproc.hpp>
 
@@ -361,15 +363,16 @@ void ArmorTracker<CameraInfoV>::ArmorsCallback(
   candidate_debug_topic_.Publish(candidate_debug_msg_, publish_timestamp);
   ekf_points_topic_.Publish(ekf_msg_, publish_timestamp);
   target_topic_.Publish(target_msg, publish_timestamp);
-  SubmitPreview(*source_frame.image_frame, detector_armors, target_msg, ekf_msg_,
-                candidate_debug_msg_, output.selected_armor_type);
+  SubmitPreview(*source_frame.image_frame, detector_armors, target_msg,
+                candidate_debug_msg_, output);
 }
 
 template <CameraTypes::CameraInfo CameraInfoV>
 void ArmorTracker<CameraInfoV>::SubmitPreview(
     const ImageFrame& image_frame, const ArmorDetectorResults& detector_armors,
-    const ArmorTrackerTarget& target_msg, const EkfPointsMsg& ekf_msg,
-    const CandidateDebugMsg& candidate_debug_msg, int selected_armor_type)
+    const ArmorTrackerTarget& target_msg,
+    const CandidateDebugMsg& candidate_debug_msg,
+    const armor_tracker_detail::Output& output)
 {
   if (!preview_.Running())
   {
@@ -431,18 +434,50 @@ void ArmorTracker<CameraInfoV>::SubmitPreview(
   struct ArmorOverlay
   {
     bool valid = false;
+    LibXR::Position<double> center_cam{};
     std::array<LibXR::Position<double>, 4> corners_cam{};
   };
 
-  std::array<ArmorOverlay, 4> tracker_overlay{};
-  const int tracker_overlay_count =
-      target_msg.tracking
-          ? std::max(0, std::min(4, static_cast<int>(ekf_msg.count)))
-          : 0;
-  if (tracker_overlay_count > 0)
+  struct TrackOverlay
   {
+    int tag_id = -1;
+    std::string state{"lost"};
+    bool selected = false;
+    double score = 0.0;
+    bool center_valid = false;
+    LibXR::Position<double> center_cam{};
+    int face_count = 0;
+    std::array<ArmorOverlay, 4> faces{};
+  };
+
+  const auto to_position = [](const Eigen::Vector3d& point)
+  {
+    return LibXR::Position<double>(point.x(), point.y(), point.z());
+  };
+  const auto face_to_camera = [this](const Eigen::Vector4d& face)
+  {
+    const Eigen::Vector3d xyz = face.head<3>();
+    return cfg_.tracker.output_frame == 0
+               ? xyz
+               : armor_tracker_detail::WorldToCameraFrame(xyz);
+  };
+
+  std::vector<TrackOverlay> track_overlays;
+  track_overlays.reserve(output.tracks.size());
+  for (const auto& track : output.tracks)
+  {
+    TrackOverlay overlay;
+    overlay.tag_id = track.tag_id;
+    overlay.state = track.state;
+    overlay.selected = track.selected;
+    overlay.score = track.score;
+    overlay.center_valid = track.center.allFinite();
+    overlay.center_cam = to_position(track.center);
+    overlay.face_count = std::min(
+        4, std::min(track.armors_num, static_cast<int>(track.faces.size())));
+
     const double half_width_m =
-        (selected_armor_type == static_cast<int>(ArmorType::LARGE)
+        (track.armor_type == static_cast<int>(ArmorType::LARGE)
              ? cfg_.overlay.big_armor_width_m
              : cfg_.overlay.small_armor_width_m) *
         0.5;
@@ -450,26 +485,15 @@ void ArmorTracker<CameraInfoV>::SubmitPreview(
     const double pitch =
         cfg_.overlay.armor_pitch_deg * armor_tracker_detail::kPi / 180.0;
     const double pitch_sign =
-        target_msg.id == ArmorNumber::OUTPOST ? -1.0 : 1.0;
-    const double angle_step =
-        2.0 * armor_tracker_detail::kPi / static_cast<double>(tracker_overlay_count);
+        track.tag_id == static_cast<int>(ArmorNumber::OUTPOST) ? -1.0 : 1.0;
+    const double angle_step = overlay.face_count > 0
+                                  ? 2.0 * armor_tracker_detail::kPi /
+                                        static_cast<double>(overlay.face_count)
+                                  : 0.0;
 
-    const auto to_eigen = [](const LibXR::Position<double>& point)
+    for (int i = 0; i < overlay.face_count; ++i)
     {
-      return Eigen::Vector3d(point.x(), point.y(), point.z());
-    };
-    const auto to_position = [](const Eigen::Vector3d& point)
-    {
-      return LibXR::Position<double>(point.x(), point.y(), point.z());
-    };
-
-    for (int i = 0; i < tracker_overlay_count; ++i)
-    {
-      if (!ekf_msg.valid[i + 1])
-      {
-        continue;
-      }
-      const double yaw = target_msg.yaw + angle_step * static_cast<double>(i);
+      const double yaw = track.yaw + angle_step * static_cast<double>(i);
       Eigen::Vector3d width_cam(std::sin(yaw), 0.0, -std::cos(yaw));
       Eigen::Vector3d normal_cam(-std::cos(yaw), 0.0, -std::sin(yaw));
       Eigen::Vector3d vertical_cam(0.0, -1.0, 0.0);
@@ -484,32 +508,42 @@ void ArmorTracker<CameraInfoV>::SubmitPreview(
       width_cam.normalize();
       height_cam.normalize();
 
-      const Eigen::Vector3d center_cam = to_eigen(ekf_msg.armors_cam[i]);
+      const Eigen::Vector3d center_cam =
+          i < static_cast<int>(track.faces.size())
+              ? face_to_camera(track.faces[static_cast<std::size_t>(i)])
+              : Eigen::Vector3d::Zero();
       if (!center_cam.allFinite())
       {
         continue;
       }
-      tracker_overlay[i].corners_cam[0] =
+      overlay.faces[static_cast<std::size_t>(i)].center_cam =
+          to_position(center_cam);
+      overlay.faces[static_cast<std::size_t>(i)].corners_cam[0] =
           to_position(center_cam - half_width_m * width_cam -
                       half_height_m * height_cam);
-      tracker_overlay[i].corners_cam[1] =
+      overlay.faces[static_cast<std::size_t>(i)].corners_cam[1] =
           to_position(center_cam + half_width_m * width_cam -
                       half_height_m * height_cam);
-      tracker_overlay[i].corners_cam[2] =
+      overlay.faces[static_cast<std::size_t>(i)].corners_cam[2] =
           to_position(center_cam + half_width_m * width_cam +
                       half_height_m * height_cam);
-      tracker_overlay[i].corners_cam[3] =
+      overlay.faces[static_cast<std::size_t>(i)].corners_cam[3] =
           to_position(center_cam - half_width_m * width_cam +
                       half_height_m * height_cam);
-      tracker_overlay[i].valid = true;
+      overlay.faces[static_cast<std::size_t>(i)].valid = true;
+    }
+
+    if (overlay.center_valid || overlay.face_count > 0)
+    {
+      track_overlays.push_back(overlay);
     }
   }
 
   const auto camera_matrix = kCameraInfo.camera_matrix;
   preview_.Submit(
       bgr_image,
-      [detector_armors, target_msg, ekf_msg, candidate_debug_msg, camera_matrix,
-       tracker_overlay, tracker_overlay_count](cv::Mat& canvas)
+      [detector_armors, target_msg, candidate_debug_msg, camera_matrix,
+       track_overlays](cv::Mat& canvas)
       {
         for (const auto& armor : detector_armors)
         {
@@ -544,79 +578,102 @@ void ArmorTracker<CameraInfoV>::SubmitPreview(
           return true;
         };
 
-        std::array<cv::Point, 4> armor_center_uv{};
-        std::array<bool, 4> armor_center_valid{};
-        for (int i = 0; i < tracker_overlay_count; ++i)
+        for (const auto& track : track_overlays)
         {
-          armor_center_valid[i] =
-              ekf_msg.valid[i + 1] &&
-              project(ekf_msg.armors_cam[i], armor_center_uv[i]);
-        }
+          const cv::Scalar face_color =
+              track.selected ? cv::Scalar(255, 160, 40)
+                             : cv::Scalar(210, 210, 120);
+          const cv::Scalar body_color =
+              track.selected ? cv::Scalar(40, 255, 40)
+                             : cv::Scalar(80, 220, 255);
+          const int line_thickness = track.selected ? 2 : 1;
 
-        for (int i = 0; i < tracker_overlay_count; ++i)
-        {
-          if (!tracker_overlay[i].valid)
+          std::array<cv::Point, 4> armor_center_uv{};
+          std::array<bool, 4> armor_center_valid{};
+          for (int i = 0; i < track.face_count; ++i)
           {
-            continue;
+            armor_center_valid[static_cast<std::size_t>(i)] =
+                track.faces[static_cast<std::size_t>(i)].valid &&
+                project(track.faces[static_cast<std::size_t>(i)].center_cam,
+                        armor_center_uv[static_cast<std::size_t>(i)]);
           }
-          std::array<cv::Point, 4> corners_uv{};
-          bool corners_valid = true;
-          for (int corner_index = 0; corner_index < 4; ++corner_index)
-          {
-            corners_valid =
-                corners_valid &&
-                project(tracker_overlay[i].corners_cam[corner_index],
-                        corners_uv[corner_index]);
-          }
-          if (!corners_valid)
-          {
-            continue;
-          }
-          for (int corner_index = 0; corner_index < 4; ++corner_index)
-          {
-            cv::line(canvas, corners_uv[corner_index],
-                     corners_uv[(corner_index + 1) % 4],
-                     cv::Scalar(255, 160, 40), 2, cv::LINE_AA);
-          }
-        }
 
-        if (tracker_overlay_count > 1)
-        {
-          for (int i = 0; i < tracker_overlay_count; ++i)
+          for (int i = 0; i < track.face_count; ++i)
           {
-            const int next = (i + 1) % tracker_overlay_count;
-            if (armor_center_valid[i] && armor_center_valid[next])
+            const auto& face = track.faces[static_cast<std::size_t>(i)];
+            if (!face.valid)
             {
-              cv::line(canvas, armor_center_uv[i], armor_center_uv[next],
-                       cv::Scalar(40, 255, 180), 2, cv::LINE_AA);
+              continue;
+            }
+            std::array<cv::Point, 4> corners_uv{};
+            bool corners_valid = true;
+            for (int corner_index = 0; corner_index < 4; ++corner_index)
+            {
+              corners_valid =
+                  corners_valid &&
+                  project(face.corners_cam[static_cast<std::size_t>(corner_index)],
+                          corners_uv[static_cast<std::size_t>(corner_index)]);
+            }
+            if (!corners_valid)
+            {
+              continue;
+            }
+            for (int corner_index = 0; corner_index < 4; ++corner_index)
+            {
+              cv::line(canvas, corners_uv[static_cast<std::size_t>(corner_index)],
+                       corners_uv[static_cast<std::size_t>((corner_index + 1) % 4)],
+                       face_color, line_thickness, cv::LINE_AA);
             }
           }
-        }
 
-        for (int i = 0; i < tracker_overlay_count; ++i)
-        {
-          if (!armor_center_valid[i])
+          if (track.face_count > 1)
           {
-            continue;
+            for (int i = 0; i < track.face_count; ++i)
+            {
+              const int next = (i + 1) % track.face_count;
+              if (armor_center_valid[static_cast<std::size_t>(i)] &&
+                  armor_center_valid[static_cast<std::size_t>(next)])
+              {
+                cv::line(canvas,
+                         armor_center_uv[static_cast<std::size_t>(i)],
+                         armor_center_uv[static_cast<std::size_t>(next)],
+                         body_color, line_thickness, cv::LINE_AA);
+              }
+            }
           }
-          cv::circle(canvas, armor_center_uv[i], 5, cv::Scalar(255, 120, 40),
-                     -1, cv::LINE_AA);
-          cv::putText(canvas, "E" + std::to_string(i),
-                      armor_center_uv[i] + cv::Point(6, 16),
-                      cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(255, 120, 40),
-                      2, cv::LINE_AA);
-        }
 
-        cv::Point center_uv;
-        if (ekf_msg.valid[0] && project(ekf_msg.center_cam, center_uv))
-        {
-          cv::circle(canvas, center_uv, 5, cv::Scalar(40, 255, 40), -1,
-                     cv::LINE_AA);
-          cv::drawMarker(canvas, center_uv, cv::Scalar(40, 255, 40),
-                         cv::MARKER_CROSS, 18, 2, cv::LINE_AA);
-          cv::putText(canvas, "TC", center_uv + cv::Point(8, -8),
-                      cv::FONT_HERSHEY_SIMPLEX, 0.55, cv::Scalar(40, 255, 40),
-                      2, cv::LINE_AA);
+          for (int i = 0; i < track.face_count; ++i)
+          {
+            if (!armor_center_valid[static_cast<std::size_t>(i)])
+            {
+              continue;
+            }
+            cv::circle(canvas, armor_center_uv[static_cast<std::size_t>(i)], 4,
+                       face_color, -1, cv::LINE_AA);
+            cv::putText(canvas, "E" + std::to_string(i),
+                        armor_center_uv[static_cast<std::size_t>(i)] +
+                            cv::Point(6, 14),
+                        cv::FONT_HERSHEY_SIMPLEX, 0.42, face_color, 1,
+                        cv::LINE_AA);
+          }
+
+          cv::Point center_uv;
+          if (track.center_valid && project(track.center_cam, center_uv))
+          {
+            cv::circle(canvas, center_uv, track.selected ? 6 : 5, body_color, -1,
+                       cv::LINE_AA);
+            cv::drawMarker(canvas, center_uv, body_color, cv::MARKER_CROSS,
+                           track.selected ? 20 : 16, line_thickness,
+                           cv::LINE_AA);
+            char label[64];
+            std::snprintf(label, sizeof(label), "%s%d %.2f",
+                          track.selected ? "*" : "", track.tag_id, track.score);
+            const cv::Point label_pos = center_uv + cv::Point(8, -8);
+            cv::putText(canvas, label, label_pos, cv::FONT_HERSHEY_SIMPLEX,
+                        0.52, cv::Scalar(0, 0, 0), 3, cv::LINE_AA);
+            cv::putText(canvas, label, label_pos, cv::FONT_HERSHEY_SIMPLEX,
+                        0.52, body_color, 1, cv::LINE_AA);
+          }
         }
 
         const auto id_index = static_cast<std::size_t>(target_msg.id);
@@ -628,7 +685,8 @@ void ArmorTracker<CameraInfoV>::SubmitPreview(
             std::string("tracker ") +
             (target_msg.tracking ? "TRACK" : "NO_TARGET") + " id=" + id_name +
             " face=" + std::to_string(target_msg.tracked_face_index) +
-            " det=" + std::to_string(detector_armors.size());
+            " det=" + std::to_string(detector_armors.size()) +
+            " tracks=" + std::to_string(track_overlays.size());
         cv::putText(canvas, header, cv::Point(12, 28),
                     cv::FONT_HERSHEY_SIMPLEX, 0.75, cv::Scalar(40, 240, 40),
                     2, cv::LINE_AA);

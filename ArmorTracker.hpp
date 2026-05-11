@@ -338,9 +338,8 @@ class ArmorTracker : public LibXR::Application
   void SubmitPreview(const ImageFrame& image_frame,
                      const ArmorDetectorResults& detector_armors,
                      const ArmorTrackerTarget& target_msg,
-                     const EkfPointsMsg& ekf_msg,
                      const CandidateDebugMsg& candidate_debug_msg,
-                     int selected_armor_type);
+                     const armor_tracker_detail::Output& output);
 
   Config cfg_;
   armor_tracker_detail::TrackerCore tracker_{};
