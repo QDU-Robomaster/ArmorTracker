@@ -22,7 +22,7 @@
 
 运行配置只保留当前链路实际使用的三组字段：
 
-- `cfg.tracker`：颜色/目标过滤、进入跟踪与丢失阈值、输出坐标帧。
+- `cfg.tracker`：目标过滤、进入跟踪与丢失阈值、输出坐标帧。
 - `cfg.overlay`：内置 preview 的装甲板物理尺寸和固定安装 pitch。
 - `cfg.preview`：`VisionPreview::RuntimeParam`，控制本模块自带预览线程。
 

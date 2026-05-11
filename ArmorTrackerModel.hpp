@@ -27,16 +27,6 @@
 namespace armor_tracker_detail
 {
 /**
- * @brief Internal armor color labels used by target selection.
- */
-enum Color
-{
-  RED,
-  BLUE,
-  EXTINGUISH
-};
-
-/**
  * @brief Internal armor size labels used by PnP geometry.
  */
 enum ArmorType
@@ -78,7 +68,6 @@ enum ArmorPriority
  */
 struct Armor
 {
-  Color color{};
   cv::Point2f center{};
   cv::Point2f center_norm{};
   std::vector<cv::Point2f> points{};
@@ -104,7 +93,7 @@ struct Armor
   /**
    * @brief Build an armor observation from detector geometry.
    */
-  Armor(int color_id, int num_id, float confidence_in, const cv::Rect& box_in,
+  Armor(int num_id, float confidence_in, const cv::Rect& box_in,
         std::vector<cv::Point2f> armor_keypoints)
       : points(std::move(armor_keypoints)),
         box(box_in),
@@ -129,8 +118,6 @@ struct Armor
         roll - kPi / 2.0);
     rectangular_error = std::max(left_rectangular_error, right_rectangular_error);
     ratio = max_length / max_width;
-    color = color_id == 0 ? Color::BLUE
-                          : color_id == 1 ? Color::RED : Color::EXTINGUISH;
     name = num_id == 0 ? ArmorName::SENTRY
                        : num_id > 5 ? ArmorName(num_id) : ArmorName(num_id - 1);
     type = num_id == 1 ? ArmorType::BIG : ArmorType::SMALL;
@@ -167,7 +154,6 @@ inline ArmorPriority PriorityFromName(ArmorName name)
  */
 struct Config
 {
-  int enemy_color_id = -1;
   bool require_target_tag = false;
   int target_tag_id = -1;
   int min_detect_count = 2;
@@ -711,7 +697,6 @@ class Tracker
    */
   Tracker(const Config& config, Solver& solver)
       : solver_(solver),
-        enemy_color_(config.enemy_color_id == 1 ? Color::RED : Color::BLUE),
         min_detect_count_(config.min_detect_count),
         max_temp_lost_count_(config.max_temp_lost_count),
         detect_count_(0),
@@ -732,20 +717,13 @@ class Tracker
    * @brief Run one tracking step over candidate armors.
    */
   std::list<Target> Track(std::list<Armor>& armors,
-                          std::chrono::steady_clock::time_point t,
-                          bool use_enemy_color = true)
+                          std::chrono::steady_clock::time_point t)
   {
     auto dt = DeltaTime(t, last_timestamp_);
     last_timestamp_ = t;
     if (state_ != "lost" && dt > 0.1)
     {
       state_ = "lost";
-    }
-
-    if (use_enemy_color)
-    {
-      armors.remove_if(
-          [&](const Armor& armor) { return armor.color != enemy_color_; });
     }
 
     armors.sort(
@@ -792,7 +770,6 @@ class Tracker
 
  private:
   Solver& solver_;
-  Color enemy_color_;
   int min_detect_count_;
   int max_temp_lost_count_;
   int detect_count_;

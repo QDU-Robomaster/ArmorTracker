@@ -16,7 +16,6 @@ template <CameraTypes::CameraInfo CameraInfoV>
 armor_tracker_detail::Config ArmorTracker<CameraInfoV>::BuildTrackerConfig() const
 {
   armor_tracker_detail::Config config{};
-  config.enemy_color_id = cfg_.tracker.enemy_color_id;
   config.require_target_tag = cfg_.tracker.require_target_tag;
   config.target_tag_id = cfg_.tracker.target_tag_id;
   config.min_detect_count = cfg_.tracker.min_detect_count;
@@ -103,7 +102,6 @@ int ArmorTracker<CameraInfoV>::CommandFun(ArmorTracker<CameraInfoV>* self,
     TRACKER_STDIO_PRINT("ArmorTracker\n\n");
     TRACKER_STDIO_PRINT("Usage\r\n");
     TRACKER_STDIO_PRINT("  show\r\n");
-    TRACKER_STDIO_PRINT("  enemy_color_id <value>\r\n");
     TRACKER_STDIO_PRINT("  target_tag_id <value>\r\n");
     TRACKER_STDIO_PRINT("  require_target_tag <0|1>\r\n");
     return 0;
@@ -114,8 +112,6 @@ int ArmorTracker<CameraInfoV>::CommandFun(ArmorTracker<CameraInfoV>* self,
     TRACKER_STDIO_PRINT("name: ArmorTracker\r\n");
     TRACKER_STDIO_PRINT("cfg:\r\n");
     TRACKER_STDIO_PRINT("  tracker:\r\n");
-    TRACKER_STDIO_PRINTF("    enemy_color_id: %d\r\n",
-                         self->cfg_.tracker.enemy_color_id);
     TRACKER_STDIO_PRINTF("    require_target_tag: %d\r\n",
                          self->cfg_.tracker.require_target_tag ? 1 : 0);
     TRACKER_STDIO_PRINTF("    target_tag_id: %d\r\n",
@@ -137,11 +133,7 @@ int ArmorTracker<CameraInfoV>::CommandFun(ArmorTracker<CameraInfoV>* self,
   if (argc == 3)
   {
     const std::string cmd = argv[1];
-    if (cmd == "enemy_color_id")
-    {
-      self->cfg_.tracker.enemy_color_id = std::stoi(argv[2]);
-    }
-    else if (cmd == "target_tag_id")
+    if (cmd == "target_tag_id")
     {
       self->cfg_.tracker.target_tag_id = std::stoi(argv[2]);
     }
@@ -227,7 +219,6 @@ void ArmorTracker<CameraInfoV>::ArmorsCallback(
   for (const auto& armor : detector_armors)
   {
     armor_tracker_detail::InputArmor input{};
-    input.color_id = static_cast<int>(armor.color);
     input.tag_id = static_cast<int>(armor.number);
     input.armor_type = static_cast<int>(armor.type);
     input.confidence = armor.confidence;

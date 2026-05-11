@@ -29,7 +29,6 @@ namespace armor_tracker_detail
  */
 struct InputArmor
 {
-  int color_id = -1;
   int tag_id = -1;
   int armor_type = 0;
   double confidence = 0.0;
@@ -46,7 +45,6 @@ struct Output
   std::string state{"lost"};
   bool has_target = false;
   int selected_tag_id = -1;
-  int selected_color_id = -1;
   int selected_armor_type = 0;
   int armors_num = 0;
   int selected_face = -1;
@@ -140,7 +138,7 @@ inline Armor MakeTrackedArmor(const InputArmor& input)
     points.push_back(point);
   }
   const cv::Rect box = cv::boundingRect(points);
-  Armor armor(input.color_id, DetectorNumberToModelNameId(input.tag_id),
+  Armor armor(DetectorNumberToModelNameId(input.tag_id),
               static_cast<float>(input.confidence), box, points);
   armor.type = DetectorTypeIsLarge(input) ? ArmorType::BIG : ArmorType::SMALL;
   armor.priority = PriorityFromName(armor.name);
@@ -205,10 +203,6 @@ class TrackerCore
       {
         continue;
       }
-      if (config_.enemy_color_id >= 0 && input.color_id != config_.enemy_color_id)
-      {
-        continue;
-      }
       if (config_.require_target_tag && input.tag_id != config_.target_tag_id)
       {
         continue;
@@ -227,12 +221,10 @@ class TrackerCore
     const auto tp = base_tp_ + std::chrono::duration_cast<
                                    std::chrono::steady_clock::duration>(
                                    std::chrono::microseconds(delta_us));
-    const bool use_enemy_color = config_.enemy_color_id >= 0;
-    const auto targets = tracker_->Track(armors, tp, use_enemy_color);
+    const auto targets = tracker_->Track(armors, tp);
 
     Output out;
     out.state = tracker_->State();
-    out.selected_color_id = config_.enemy_color_id;
     out.selected_tag_id = config_.target_tag_id;
     if (targets.empty())
     {

@@ -342,7 +342,6 @@ bool valid_detector_row(const Row& row, int color, int number)
 armor_tracker_detail::InputArmor make_input(const Row& row)
 {
   armor_tracker_detail::InputArmor input;
-  input.color_id = as_int(row, "color", -1);
   input.tag_id = as_int(row, "number", -1);
   input.armor_type = as_int(row, "type", 0);
   input.confidence = as_double(row, "confidence", 0.0);
@@ -378,7 +377,6 @@ int main(int argc, char** argv)
   for (const CaseSpec& spec : read_cases(cases_path))
   {
     armor_tracker_detail::Config config;
-    config.enemy_color_id = spec.color;
     config.require_target_tag = true;
     config.target_tag_id = spec.number;
     config.min_detect_count = 2;

@@ -11,7 +11,6 @@ module_description: Armor tracker
 constructor_args:
   cfg:
     tracker:
-      enemy_color_id: -1
       require_target_tag: false
       target_tag_id: -1
       min_detect_count: 2
@@ -133,7 +132,6 @@ class ArmorTracker : public LibXR::Application
      */
     struct TrackerParams
     {
-      int enemy_color_id = -1;
       bool require_target_tag = false;
       int target_tag_id = -1;
       int min_detect_count = 2;
