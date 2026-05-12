@@ -309,6 +309,25 @@ class TrackerCore
     return out;
   }
 
+  /**
+   * @brief Reproject one modeled armor face using the current solver pose.
+   *
+   * The solver pose is updated by Step() before preview submission, so this
+   * keeps preview projection on the same geometry path as tracker yaw fitting.
+   */
+  std::vector<cv::Point2f> ReprojectArmorFace(
+      const Eigen::Vector3d& center_world, double yaw_world, int armor_type,
+      int tag_id) const
+  {
+    if (!solver_)
+    {
+      return {};
+    }
+    const ArmorType type = armor_type == 1 ? ArmorType::BIG : ArmorType::SMALL;
+    return solver_->ReprojectArmor(center_world, yaw_world, type,
+                                   ArmorNameFromDetectorNumber(tag_id));
+  }
+
  private:
   Config config_{};
   std::unique_ptr<Solver> solver_{};
