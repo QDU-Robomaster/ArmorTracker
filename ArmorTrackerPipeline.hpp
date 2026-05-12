@@ -249,7 +249,6 @@ void ArmorTracker<CameraInfoV>::ArmorsCallback(
   ekf_msg.image_timestamp_us = image_timestamp_us;
   target_msg.image_timestamp_us = image_timestamp_us;
   target_msg.id = ArmorNumber::INVALID;
-  target_msg.velocity_confidence = 0.0;
   candidate_debug.image_timestamp_us = image_timestamp_us;
   candidate_debug.detection_count = static_cast<uint8_t>(
       std::min<std::size_t>(detector_armors.size(),
@@ -296,27 +295,10 @@ void ArmorTracker<CameraInfoV>::ArmorsCallback(
     target_msg.dz = output.dz;
     target_msg.tracked_face_index = output.selected_face;
     target_msg.face_switch_observed = output.jumped;
-    target_msg.measured_face_valid = output.measured_face_valid;
-    target_msg.use_measured_face_anchor = output.measured_face_valid;
-    target_msg.measured_face_index = output.measured_face_valid
-                                         ? output.measured_face_index
-                                         : -1;
-    target_msg.measured_face_position = output.measured_face_valid
-                                            ? output.measured_face_position
-                                            : Eigen::Vector3d::Zero();
-    target_msg.measured_face_yaw =
-        output.measured_face_valid ? output.measured_face_yaw : 0.0;
-    target_msg.velocity_variance = output.velocity_variance;
-    target_msg.velocity_confidence = output.velocity_confidence;
-
-    const Eigen::Vector3d info_position = output.measured_face_valid
-                                              ? output.measured_face_position
-                                              : output.armor;
-    info_msg.position.x() = info_position.x();
-    info_msg.position.y() = info_position.y();
-    info_msg.position.z() = info_position.z();
-    info_msg.yaw = output.measured_face_valid ? output.measured_face_yaw
-                                              : output.armor_yaw;
+    info_msg.position.x() = output.armor.x();
+    info_msg.position.y() = output.armor.y();
+    info_msg.position.z() = output.armor.z();
+    info_msg.yaw = output.armor_yaw;
 
     ekf_msg.count = static_cast<uint8_t>(std::clamp(output.armors_num, 0, 4));
     ekf_msg.center_cam =
@@ -348,15 +330,6 @@ void ArmorTracker<CameraInfoV>::ArmorsCallback(
         ekf_msg.valid[face + 1] = false;
       }
     }
-
-    candidate_debug.matched = output.measured_face_valid ? 1 : 0;
-    candidate_debug.selected_index = 255;
-    candidate_debug.ekf_update_valid = output.measured_face_valid ? 1 : 0;
-    candidate_debug.ekf_update_mode = output.measured_face_valid ? 1 : 0;
-    candidate_debug.ekf_update_face = static_cast<int8_t>(
-        output.measured_face_valid ? output.measured_face_index : -1);
-    candidate_debug.ekf_range_m = static_cast<float>(
-        output.measured_face_valid ? output.measured_face_position.norm() : 0.0);
   }
   else
   {

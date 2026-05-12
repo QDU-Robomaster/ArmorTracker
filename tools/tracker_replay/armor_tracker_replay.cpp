@@ -371,11 +371,8 @@ int main(int argc, char** argv)
   std::ofstream out(out_path);
   out << std::setprecision(17);
   out << "dataset\timage_timestamp_us\tsource\tcenter_x\tcenter_y\tcenter_z\t"
-         "vel_x\tvel_y\tvel_z\tvelocity_confidence\tvelocity_var_x\t"
-         "velocity_var_y\tvelocity_var_z\tyaw\tv_yaw\tarmor_x\tarmor_y\t"
-         "armor_z\tarmor_yaw\tselected_face\tjumped\tmeasured_face_valid\t"
-         "measured_face_index\tmeasured_face_x\tmeasured_face_y\t"
-         "measured_face_z\tmeasured_face_yaw\tradius_even\tradius_odd\tdz\n";
+         "vel_x\tvel_y\tvel_z\tyaw\tv_yaw\tarmor_x\tarmor_y\tarmor_z\t"
+         "armor_yaw\tselected_face\tjumped\tradius_even\tradius_odd\tdz\n";
 
   for (const CaseSpec& spec : read_cases(cases_path))
   {
@@ -418,21 +415,11 @@ int main(int argc, char** argv)
           << output.state << '\t' << output.center.x() << '\t'
           << output.center.y() << '\t' << output.center.z() << '\t'
           << output.velocity.x() << '\t' << output.velocity.y() << '\t'
-          << output.velocity.z() << '\t' << output.velocity_confidence << '\t'
-          << output.velocity_variance.x() << '\t'
-          << output.velocity_variance.y() << '\t'
-          << output.velocity_variance.z() << '\t'
-          << output.yaw << '\t' << output.vyaw << '\t' << output.armor.x()
-          << '\t'
+          << output.velocity.z() << '\t' << output.yaw << '\t'
+          << output.vyaw << '\t' << output.armor.x() << '\t'
           << output.armor.y() << '\t' << output.armor.z() << '\t'
           << output.armor_yaw << '\t' << output.selected_face << '\t'
-          << (output.jumped ? 1 : 0) << '\t'
-          << (output.measured_face_valid ? 1 : 0) << '\t'
-          << output.measured_face_index << '\t'
-          << output.measured_face_position.x() << '\t'
-          << output.measured_face_position.y() << '\t'
-          << output.measured_face_position.z() << '\t'
-          << output.measured_face_yaw << '\t' << output.radius_even << '\t'
+          << (output.jumped ? 1 : 0) << '\t' << output.radius_even << '\t'
           << output.radius_odd << '\t' << output.dz << '\n';
     }
   }

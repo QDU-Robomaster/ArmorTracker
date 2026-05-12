@@ -458,7 +458,6 @@ class Target
       return c;
     };
     ekf_ = ExtendedKalmanFilter(x0, P0, x_add);
-    StoreMeasurement(armor, 0);
   }
 
   /**
@@ -589,21 +588,6 @@ class Target
   const ExtendedKalmanFilter& Ekf() const { return ekf_; }
 
   /**
-   * @brief Return whether the target has a stored face measurement.
-   */
-  bool HasMeasurement() const { return measurement_valid_; }
-
-  /**
-   * @brief Return the local face index of the latest stored measurement.
-   */
-  int MeasurementFaceIndex() const { return measurement_face_index_; }
-
-  /**
-   * @brief Return the latest measured face position and yaw in world frame.
-   */
-  Eigen::Vector4d MeasurementXyza() const { return measurement_xyza_; }
-
-  /**
    * @brief Return the modeled armor face centers and yaws in world frame.
    */
   std::vector<Eigen::Vector4d> ArmorXyzaList() const
@@ -649,30 +633,14 @@ class Target
   int armor_num_ = 4;
   int update_count_ = 0;
   bool is_converged_ = false;
-  bool measurement_valid_ = false;
-  int measurement_face_index_ = -1;
-  Eigen::Vector4d measurement_xyza_ = Eigen::Vector4d::Zero();
   ExtendedKalmanFilter ekf_;
   std::chrono::steady_clock::time_point t_{};
-
-  /**
-   * @brief Store the latest raw face measurement for downstream anchoring.
-   */
-  void StoreMeasurement(const Armor& armor, int id)
-  {
-    measurement_valid_ = true;
-    measurement_face_index_ = id;
-    measurement_xyza_ << armor.xyz_in_world.x(), armor.xyz_in_world.y(),
-        armor.xyz_in_world.z(), armor.ypr_in_world[0];
-  }
 
   /**
    * @brief Update EKF with yaw, pitch, distance, and armor yaw measurement.
    */
   void UpdateYpda(const Armor& armor, int id)
   {
-    StoreMeasurement(armor, id);
-
     Eigen::MatrixXd H = HJacobian(ekf_.x, id);
     auto center_yaw = std::atan2(armor.xyz_in_world[1], armor.xyz_in_world[0]);
     auto delta_angle = LimitRad(armor.ypr_in_world[0] - center_yaw);
@@ -795,7 +763,6 @@ class Tracker
   {
     std::string state{"lost"};
     bool selected{false};
-    bool measurement_valid_current_frame{false};
     double score{-std::numeric_limits<double>::infinity()};
     Target target{};
   };
@@ -815,7 +782,6 @@ class Tracker
       }
       snapshots.push_back({tracks_[i].state,
                            static_cast<int>(i) == selected_index_,
-                           tracks_[i].measurement_valid_current_frame,
                            tracks_[i].score, tracks_[i].target});
     }
     return snapshots;
@@ -885,7 +851,6 @@ class Tracker
     double observed_count_lpf{0.0};
     double hittable_area{0.0};
     double gimbal_angle_error{1.0};
-    bool measurement_valid_current_frame{false};
     bool has_timestamp{false};
     std::chrono::steady_clock::time_point last_timestamp{};
   };
@@ -961,7 +926,6 @@ class Tracker
   void UpdateSlot(TrackSlot& slot, std::list<Armor>& armors,
                   std::chrono::steady_clock::time_point t)
   {
-    slot.measurement_valid_current_frame = false;
     UpdateObservationMetrics(slot, armors);
 
     if (slot.has_timestamp)
@@ -998,9 +962,6 @@ class Tracker
     {
       slot.state = "lost";
     }
-    slot.measurement_valid_current_frame =
-        found && slot.initialized && slot.state != "lost" &&
-        slot.target.HasMeasurement();
     slot.score = ScoreSlot(slot);
   }
 
