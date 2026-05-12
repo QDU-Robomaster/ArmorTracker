@@ -921,6 +921,32 @@ class Tracker
   }
 
   /**
+   * @brief Return whether the retained EKF state is no longer usable.
+   */
+  static bool TargetHealthFailed(const TrackSlot& slot)
+  {
+    return slot.initialized &&
+           (slot.target.Diverged() || RecentNisFailed(slot));
+  }
+
+  /**
+   * @brief Clear the retained target state after an EKF health failure.
+   *
+   * The slot identity, timestamp, and current-frame observation metrics are
+   * preserved; only the target/EKF and state-machine counters are discarded.
+   */
+  static void ResetTargetSlot(TrackSlot& slot)
+  {
+    slot.target = Target{};
+    slot.initialized = false;
+    slot.state = "lost";
+    slot.detect_count = 0;
+    slot.temp_lost_count = 0;
+    slot.max_temp_lost_count = 0;
+    slot.score = -std::numeric_limits<double>::infinity();
+  }
+
+  /**
    * @brief Update one vehicle-number slot for the current frame.
    */
   void UpdateSlot(TrackSlot& slot, std::list<Armor>& armors,
@@ -939,6 +965,11 @@ class Tracker
     slot.last_timestamp = t;
     slot.has_timestamp = true;
 
+    if (TargetHealthFailed(slot))
+    {
+      ResetTargetSlot(slot);
+    }
+
     bool found = false;
     if (!slot.initialized)
     {
@@ -953,14 +984,15 @@ class Tracker
       found = UpdateTarget(slot, armors, t);
     }
 
-    StateMachine(slot, found);
-    if (slot.initialized && slot.state != "lost" && slot.target.Diverged())
+    if (TargetHealthFailed(slot))
     {
-      slot.state = "lost";
+      ResetTargetSlot(slot);
+      found = SetTarget(slot, armors, t);
     }
-    if (slot.initialized && slot.state != "lost" && RecentNisFailed(slot))
+    StateMachine(slot, found);
+    if (slot.state != "lost" && TargetHealthFailed(slot))
     {
-      slot.state = "lost";
+      ResetTargetSlot(slot);
     }
     slot.score = ScoreSlot(slot);
   }
