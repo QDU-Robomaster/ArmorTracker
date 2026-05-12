@@ -339,7 +339,8 @@ class ArmorTracker : public LibXR::Application
                      const ArmorDetectorResults& detector_armors,
                      const ArmorTrackerTarget& target_msg,
                      const CandidateDebugMsg& candidate_debug_msg,
-                     const armor_tracker_detail::Output& output);
+                     const armor_tracker_detail::Output& output,
+                     const Eigen::Quaterniond& q_gimbal_to_world);
 
   Config cfg_;
   armor_tracker_detail::TrackerCore tracker_{};

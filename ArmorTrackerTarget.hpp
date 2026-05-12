@@ -46,5 +46,5 @@ struct ArmorTrackerTarget
   double measured_face_yaw{};               ///< 当前可见面 yaw，单位 rad。
   Eigen::Matrix<double, 3, 1> velocity_variance =
       Eigen::Matrix<double, 3, 1>::Zero();  ///< 速度状态方差，单位 (m/s)^2。
-  double velocity_confidence{1.0};          ///< 速度可外推置信度，范围约为 0~1。
+  double velocity_confidence{};             ///< 速度可外推置信度，范围约为 0~1。
 };

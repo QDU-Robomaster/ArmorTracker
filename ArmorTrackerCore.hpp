@@ -10,6 +10,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <list>
 #include <memory>
 #include <string>
@@ -56,6 +57,8 @@ struct TrackOutput
   double radius_even = 0.0;
   double radius_odd = 0.0;
   double dz = 0.0;
+  Eigen::Vector3d center_world = Eigen::Vector3d::Zero();
+  double yaw_world = 0.0;
   std::vector<Eigen::Vector4d> faces;
 };
 
@@ -78,8 +81,16 @@ struct Output
   double radius_even = 0.0;
   double radius_odd = 0.0;
   double dz = 0.0;
+  Eigen::Vector3d center_world = Eigen::Vector3d::Zero();
+  double yaw_world = 0.0;
   Eigen::Vector3d armor = Eigen::Vector3d::Zero();
   double armor_yaw = 0.0;
+  bool measured_face_valid = false;
+  int measured_face_index = -1;
+  Eigen::Vector3d measured_face_position = Eigen::Vector3d::Zero();
+  double measured_face_yaw = 0.0;
+  Eigen::Vector3d velocity_variance = Eigen::Vector3d::Zero();
+  double velocity_confidence = 0.0;
   std::vector<Eigen::Vector4d> faces;
   std::vector<TrackOutput> tracks;
 };
@@ -240,20 +251,26 @@ class TrackerCore
     const auto tp = base_tp_ + std::chrono::duration_cast<
                                    std::chrono::steady_clock::duration>(
                                    std::chrono::microseconds(delta_us));
-    const auto targets = tracker_->Track(armors, tp);
+    (void)tracker_->Track(armors, tp);
 
     Output out;
     out.state = tracker_->State();
     out.selected_tag_id = config_.target_tag_id;
-    for (const auto& snapshot : tracker_->Snapshots())
+    const auto snapshots = tracker_->Snapshots();
+    const Tracker::TrackSnapshot* selected_snapshot = nullptr;
+    for (const auto& snapshot : snapshots)
     {
+      if (snapshot.selected)
+      {
+        selected_snapshot = &snapshot;
+      }
       out.tracks.push_back(MakeTrackOutput(snapshot));
     }
-    if (targets.empty())
+    if (selected_snapshot == nullptr)
     {
       return out;
     }
-    const Target& target = targets.front();
+    const Target& target = selected_snapshot->target;
     out.has_target = true;
     out.selected_tag_id = ModelNameToDetectorNumber(target.name);
     out.selected_armor_type = target.armor_type == ArmorType::BIG ? 1 : 0;
@@ -264,6 +281,8 @@ class TrackerCore
     out.radius_odd = x[8] + x[9];
     out.faces = target.ArmorXyzaList();
     out.armors_num = static_cast<int>(out.faces.size());
+    out.center_world = {x[0], x[2], x[4]};
+    out.yaw_world = LimitRad(x[6]);
     if (config_.output_frame == 0)
     {
       out.center = {x[0], x[2], x[4]};
@@ -294,6 +313,32 @@ class TrackerCore
         out.armor_yaw = LimitRad(face[3] - kPi * 0.5);
       }
     }
+    const Eigen::Vector4d measurement = target.MeasurementXyza();
+    const bool measurement_valid =
+        selected_snapshot->measurement_valid_current_frame &&
+        target.HasMeasurement() && measurement.allFinite() &&
+        target.MeasurementFaceIndex() >= 0 &&
+        target.MeasurementFaceIndex() < out.armors_num;
+    if (measurement_valid)
+    {
+      const Eigen::Vector3d measurement_position = measurement.head<3>();
+      out.measured_face_valid = true;
+      out.measured_face_index = target.MeasurementFaceIndex();
+      if (config_.output_frame == 0)
+      {
+        out.measured_face_position = measurement_position;
+        out.measured_face_yaw = LimitRad(measurement[3]);
+      }
+      else
+      {
+        out.measured_face_position = WorldToCameraFrame(measurement_position);
+        out.measured_face_yaw = LimitRad(measurement[3] - kPi * 0.5);
+      }
+    }
+    out.velocity_variance = OutputVelocityVariance(target, config_.output_frame);
+    out.velocity_confidence =
+        VelocityConfidence(target, out.state, out.measured_face_valid,
+                           out.velocity);
     return out;
   }
 
@@ -319,6 +364,8 @@ class TrackerCore
     out.armor_type = target.armor_type == ArmorType::BIG ? 1 : 0;
     out.selected_face = target.last_id;
     const Eigen::VectorXd x = target.EkfX();
+    out.center_world = {x[0], x[2], x[4]};
+    out.yaw_world = LimitRad(x[6]);
     out.radius_even = x[8];
     out.radius_odd = x[8] + x[9];
     out.faces = target.ArmorXyzaList();
@@ -340,6 +387,65 @@ class TrackerCore
       out.dz = -x[10];
     }
     return out;
+  }
+
+  /**
+   * @brief Return a non-negative EKF state variance or infinity if unavailable.
+   */
+  static double StateVariance(const Target& target, int index)
+  {
+    const auto& covariance = target.Ekf().P;
+    if (index < 0 || covariance.rows() <= index || covariance.cols() <= index)
+    {
+      return std::numeric_limits<double>::infinity();
+    }
+    const double variance = covariance(index, index);
+    if (!std::isfinite(variance))
+    {
+      return std::numeric_limits<double>::infinity();
+    }
+    return std::max(0.0, variance);
+  }
+
+  /**
+   * @brief Return center-velocity variance in the configured output frame.
+   */
+  static Eigen::Vector3d OutputVelocityVariance(const Target& target,
+                                                int output_frame)
+  {
+    const Eigen::Vector3d world_variance(StateVariance(target, 1),
+                                         StateVariance(target, 3),
+                                         StateVariance(target, 5));
+    if (output_frame == 0)
+    {
+      return world_variance;
+    }
+    return {world_variance.y(), world_variance.z(), world_variance.x()};
+  }
+
+  /**
+   * @brief Estimate how much downstream prediction should trust target velocity.
+   */
+  static double VelocityConfidence(const Target& target, const std::string& state,
+                                   bool measurement_valid_current_frame,
+                                   const Eigen::Vector3d& output_velocity)
+  {
+    constexpr double kInitialVelocitySigma = 8.0;
+    const double xy_velocity_sigma =
+        std::sqrt(std::max(StateVariance(target, 1), StateVariance(target, 3)));
+    double confidence =
+        std::clamp(1.0 - xy_velocity_sigma / kInitialVelocitySigma, 0.0, 1.0);
+    if (!std::isfinite(confidence))
+    {
+      confidence = 0.0;
+    }
+
+    if (state == "temp_lost" || !measurement_valid_current_frame ||
+        !output_velocity.allFinite())
+    {
+      confidence *= 0.25;
+    }
+    return std::clamp(confidence, 0.0, 1.0);
   }
 
   /**

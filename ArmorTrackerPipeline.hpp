@@ -296,17 +296,27 @@ void ArmorTracker<CameraInfoV>::ArmorsCallback(
     target_msg.dz = output.dz;
     target_msg.tracked_face_index = output.selected_face;
     target_msg.face_switch_observed = output.jumped;
-    target_msg.measured_face_valid = output.selected_face >= 0;
-    target_msg.use_measured_face_anchor = true;
-    target_msg.measured_face_index = output.selected_face;
-    target_msg.measured_face_position = output.armor;
-    target_msg.measured_face_yaw = output.armor_yaw;
-    target_msg.velocity_confidence = output.state == "tracking" ? 1.0 : 0.25;
+    target_msg.measured_face_valid = output.measured_face_valid;
+    target_msg.use_measured_face_anchor = output.measured_face_valid;
+    target_msg.measured_face_index = output.measured_face_valid
+                                         ? output.measured_face_index
+                                         : -1;
+    target_msg.measured_face_position = output.measured_face_valid
+                                            ? output.measured_face_position
+                                            : Eigen::Vector3d::Zero();
+    target_msg.measured_face_yaw =
+        output.measured_face_valid ? output.measured_face_yaw : 0.0;
+    target_msg.velocity_variance = output.velocity_variance;
+    target_msg.velocity_confidence = output.velocity_confidence;
 
-    info_msg.position.x() = output.armor.x();
-    info_msg.position.y() = output.armor.y();
-    info_msg.position.z() = output.armor.z();
-    info_msg.yaw = output.armor_yaw;
+    const Eigen::Vector3d info_position = output.measured_face_valid
+                                              ? output.measured_face_position
+                                              : output.armor;
+    info_msg.position.x() = info_position.x();
+    info_msg.position.y() = info_position.y();
+    info_msg.position.z() = info_position.z();
+    info_msg.yaw = output.measured_face_valid ? output.measured_face_yaw
+                                              : output.armor_yaw;
 
     ekf_msg.count = static_cast<uint8_t>(std::clamp(output.armors_num, 0, 4));
     ekf_msg.center_cam =
@@ -339,12 +349,14 @@ void ArmorTracker<CameraInfoV>::ArmorsCallback(
       }
     }
 
-    candidate_debug.matched = 1;
-    candidate_debug.selected_index = 0;
-    candidate_debug.ekf_update_valid = 1;
-    candidate_debug.ekf_update_mode = 1;
-    candidate_debug.ekf_update_face = static_cast<int8_t>(output.selected_face);
-    candidate_debug.ekf_range_m = static_cast<float>(output.armor.norm());
+    candidate_debug.matched = output.measured_face_valid ? 1 : 0;
+    candidate_debug.selected_index = 255;
+    candidate_debug.ekf_update_valid = output.measured_face_valid ? 1 : 0;
+    candidate_debug.ekf_update_mode = output.measured_face_valid ? 1 : 0;
+    candidate_debug.ekf_update_face = static_cast<int8_t>(
+        output.measured_face_valid ? output.measured_face_index : -1);
+    candidate_debug.ekf_range_m = static_cast<float>(
+        output.measured_face_valid ? output.measured_face_position.norm() : 0.0);
   }
   else
   {
@@ -364,7 +376,7 @@ void ArmorTracker<CameraInfoV>::ArmorsCallback(
   ekf_points_topic_.Publish(ekf_msg_, publish_timestamp);
   target_topic_.Publish(target_msg, publish_timestamp);
   SubmitPreview(*source_frame.image_frame, detector_armors, target_msg,
-                candidate_debug_msg_, output);
+                candidate_debug_msg_, output, q_gimbal_to_world);
 }
 
 template <CameraTypes::CameraInfo CameraInfoV>
@@ -372,7 +384,8 @@ void ArmorTracker<CameraInfoV>::SubmitPreview(
     const ImageFrame& image_frame, const ArmorDetectorResults& detector_armors,
     const ArmorTrackerTarget& target_msg,
     const CandidateDebugMsg& candidate_debug_msg,
-    const armor_tracker_detail::Output& output)
+    const armor_tracker_detail::Output& output,
+    const Eigen::Quaterniond& q_gimbal_to_world)
 {
   if (!preview_.Running())
   {
@@ -454,13 +467,24 @@ void ArmorTracker<CameraInfoV>::SubmitPreview(
   {
     return LibXR::Position<double>(point.x(), point.y(), point.z());
   };
-  const auto face_to_camera = [this](const Eigen::Vector4d& face)
+
+  Eigen::Quaterniond q = q_gimbal_to_world;
+  if (!std::isfinite(q.norm()) || q.norm() < 1e-9)
   {
-    const Eigen::Vector3d xyz = face.head<3>();
-    return cfg_.tracker.output_frame == 0
-               ? xyz
-               : armor_tracker_detail::WorldToCameraFrame(xyz);
-  };
+    q = Eigen::Quaterniond::Identity();
+  }
+  q.normalize();
+  Eigen::Matrix3d r_camera_to_gimbal = Eigen::Matrix3d::Identity();
+  if (cfg_.tracker.output_frame != 0)
+  {
+    r_camera_to_gimbal << 0.0, 0.0, 1.0, -1.0, 0.0, 0.0, 0.0, -1.0,
+        0.0;
+  }
+  const Eigen::Matrix3d r_world_to_camera =
+      r_camera_to_gimbal.transpose() * q.toRotationMatrix().transpose();
+  const auto world_to_camera = [&r_world_to_camera](
+                                   const Eigen::Vector3d& point)
+  { return r_world_to_camera * point; };
 
   std::vector<TrackOverlay> track_overlays;
   track_overlays.reserve(output.tracks.size());
@@ -471,8 +495,8 @@ void ArmorTracker<CameraInfoV>::SubmitPreview(
     overlay.state = track.state;
     overlay.selected = track.selected;
     overlay.score = track.score;
-    overlay.center_valid = track.center.allFinite();
-    overlay.center_cam = to_position(track.center);
+    overlay.center_valid = track.center_world.allFinite();
+    overlay.center_cam = to_position(world_to_camera(track.center_world));
     overlay.face_count = std::min(
         4, std::min(track.armors_num, static_cast<int>(track.faces.size())));
 
@@ -483,53 +507,49 @@ void ArmorTracker<CameraInfoV>::SubmitPreview(
         0.5;
     const double half_height_m = cfg_.overlay.armor_height_m * 0.5;
     const double pitch =
+        (track.tag_id == static_cast<int>(ArmorNumber::OUTPOST) ? -1.0 : 1.0) *
         cfg_.overlay.armor_pitch_deg * armor_tracker_detail::kPi / 180.0;
-    const double pitch_sign =
-        track.tag_id == static_cast<int>(ArmorNumber::OUTPOST) ? -1.0 : 1.0;
-    const double angle_step = overlay.face_count > 0
-                                  ? 2.0 * armor_tracker_detail::kPi /
-                                        static_cast<double>(overlay.face_count)
-                                  : 0.0;
+    const double sin_pitch = std::sin(pitch);
+    const double cos_pitch = std::cos(pitch);
 
     for (int i = 0; i < overlay.face_count; ++i)
     {
-      const double yaw = track.yaw + angle_step * static_cast<double>(i);
-      Eigen::Vector3d width_cam(std::sin(yaw), 0.0, -std::cos(yaw));
-      Eigen::Vector3d normal_cam(-std::cos(yaw), 0.0, -std::sin(yaw));
-      Eigen::Vector3d vertical_cam(0.0, -1.0, 0.0);
-      Eigen::Vector3d height_cam =
-          std::cos(pitch) * vertical_cam +
-          pitch_sign * std::sin(pitch) * normal_cam;
-      if (!width_cam.allFinite() || !height_cam.allFinite() ||
-          width_cam.norm() < 1e-9 || height_cam.norm() < 1e-9)
+      const Eigen::Vector4d face = track.faces[static_cast<std::size_t>(i)];
+      const Eigen::Vector3d center_world = face.head<3>();
+      const double yaw = face[3];
+      if (!center_world.allFinite() || !std::isfinite(yaw))
       {
         continue;
       }
-      width_cam.normalize();
-      height_cam.normalize();
 
-      const Eigen::Vector3d center_cam =
-          i < static_cast<int>(track.faces.size())
-              ? face_to_camera(track.faces[static_cast<std::size_t>(i)])
-              : Eigen::Vector3d::Zero();
+      const double sin_yaw = std::sin(yaw);
+      const double cos_yaw = std::cos(yaw);
+      Eigen::Matrix3d r_armor_to_world;
+      r_armor_to_world << cos_yaw * cos_pitch, -sin_yaw,
+          cos_yaw * sin_pitch, sin_yaw * cos_pitch, cos_yaw,
+          sin_yaw * sin_pitch, -sin_pitch, 0.0, cos_pitch;
+
+      const Eigen::Vector3d center_cam = world_to_camera(center_world);
       if (!center_cam.allFinite())
       {
         continue;
       }
       overlay.faces[static_cast<std::size_t>(i)].center_cam =
           to_position(center_cam);
+      const Eigen::Vector3d width_world = r_armor_to_world.col(1);
+      const Eigen::Vector3d height_world = r_armor_to_world.col(2);
       overlay.faces[static_cast<std::size_t>(i)].corners_cam[0] =
-          to_position(center_cam - half_width_m * width_cam -
-                      half_height_m * height_cam);
+          to_position(world_to_camera(center_world - half_width_m * width_world -
+                                      half_height_m * height_world));
       overlay.faces[static_cast<std::size_t>(i)].corners_cam[1] =
-          to_position(center_cam + half_width_m * width_cam -
-                      half_height_m * height_cam);
+          to_position(world_to_camera(center_world + half_width_m * width_world -
+                                      half_height_m * height_world));
       overlay.faces[static_cast<std::size_t>(i)].corners_cam[2] =
-          to_position(center_cam + half_width_m * width_cam +
-                      half_height_m * height_cam);
+          to_position(world_to_camera(center_world + half_width_m * width_world +
+                                      half_height_m * height_world));
       overlay.faces[static_cast<std::size_t>(i)].corners_cam[3] =
-          to_position(center_cam - half_width_m * width_cam +
-                      half_height_m * height_cam);
+          to_position(world_to_camera(center_world - half_width_m * width_world +
+                                      half_height_m * height_world));
       overlay.faces[static_cast<std::size_t>(i)].valid = true;
     }
 
@@ -658,7 +678,38 @@ void ArmorTracker<CameraInfoV>::SubmitPreview(
           }
 
           cv::Point center_uv;
-          if (track.center_valid && project(track.center_cam, center_uv))
+          bool center_projected = track.center_valid &&
+                                  project(track.center_cam, center_uv);
+          const auto in_frame = [&canvas](const cv::Point& point)
+          {
+            return point.x >= 0 && point.x < canvas.cols && point.y >= 0 &&
+                   point.y < canvas.rows;
+          };
+          if (!center_projected || !in_frame(center_uv))
+          {
+            cv::Point2d average(0.0, 0.0);
+            int count = 0;
+            for (int i = 0; i < track.face_count; ++i)
+            {
+              if (!armor_center_valid[static_cast<std::size_t>(i)] ||
+                  !in_frame(armor_center_uv[static_cast<std::size_t>(i)]))
+              {
+                continue;
+              }
+              average.x += armor_center_uv[static_cast<std::size_t>(i)].x;
+              average.y += armor_center_uv[static_cast<std::size_t>(i)].y;
+              ++count;
+            }
+            if (count > 0)
+            {
+              center_uv = cv::Point(static_cast<int>(std::lround(
+                                       average.x / static_cast<double>(count))),
+                                    static_cast<int>(std::lround(
+                                       average.y / static_cast<double>(count))));
+              center_projected = true;
+            }
+          }
+          if (center_projected && in_frame(center_uv))
           {
             cv::circle(canvas, center_uv, track.selected ? 6 : 5, body_color, -1,
                        cv::LINE_AA);
@@ -668,7 +719,14 @@ void ArmorTracker<CameraInfoV>::SubmitPreview(
             char label[64];
             std::snprintf(label, sizeof(label), "%s%d %.2f",
                           track.selected ? "*" : "", track.tag_id, track.score);
-            const cv::Point label_pos = center_uv + cv::Point(8, -8);
+            int baseline = 0;
+            const cv::Size label_size = cv::getTextSize(
+                label, cv::FONT_HERSHEY_SIMPLEX, 0.52, 1, &baseline);
+            cv::Point label_pos = center_uv + cv::Point(8, -8);
+            label_pos.x =
+                std::clamp(label_pos.x, 2, canvas.cols - label_size.width - 2);
+            label_pos.y = std::clamp(label_pos.y, label_size.height + 2,
+                                     canvas.rows - baseline - 2);
             cv::putText(canvas, label, label_pos, cv::FONT_HERSHEY_SIMPLEX,
                         0.52, cv::Scalar(0, 0, 0), 3, cv::LINE_AA);
             cv::putText(canvas, label, label_pos, cv::FONT_HERSHEY_SIMPLEX,
