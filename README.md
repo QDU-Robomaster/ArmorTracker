@@ -20,10 +20,9 @@
 
 ## 配置
 
-运行配置只保留当前链路实际使用的三组字段：
+运行配置只保留当前链路实际使用的两组字段：
 
 - `cfg.tracker`：目标过滤、进入跟踪与丢失阈值、输出坐标帧。
-- `cfg.overlay`：内置 preview 的装甲板物理尺寸和固定安装 pitch。
 - `cfg.preview`：`VisionPreview::RuntimeParam`，控制本模块自带预览线程。
 
 默认 detector topic 为 `armor_detector/armors_frame`。tracker 输出 topic 位于
@@ -47,5 +46,5 @@ tracker 内部按装甲板编号维护多套车辆 EKF 状态，同一 slot 丢�
 
 单车过滤回归使用 `tools/tracker_replay/armor_tracker_replay.cpp` 对固定数据集重放；多车目标选择
 需要使用不按编号过滤的 replay，确认同帧多编号输入会独立更新各 slot 并只输出当前选中的目标。
-BSP 验证需要生成当前 `cfg.tracker` / `cfg.overlay` 结构对应的 `User/xrobot_main.hpp` 后再构建
+BSP 验证需要生成当前 `cfg.tracker` / `cfg.preview` 结构对应的 `User/xrobot_main.hpp` 后再构建
 Linux 和 Webots 目标。

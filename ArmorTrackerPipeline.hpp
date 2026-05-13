@@ -126,9 +126,6 @@ int ArmorTracker<CameraInfoV>::CommandFun(ArmorTracker<CameraInfoV>* self,
                          self->cfg_.tracker.outpost_max_temp_lost_count);
     TRACKER_STDIO_PRINTF("    output_frame: %d\r\n",
                          self->cfg_.tracker.output_frame);
-    TRACKER_STDIO_PRINT("  overlay:\r\n");
-    TRACKER_STDIO_PRINTF("    armor_pitch_deg: %f\r\n",
-                         self->cfg_.overlay.armor_pitch_deg);
     return 0;
   }
 

@@ -18,12 +18,6 @@ constructor_args:
       outpost_max_temp_lost_count: 75
       output_frame: 1
 
-    overlay:
-      armor_pitch_deg: 15.0
-      small_armor_width_m: 0.135
-      big_armor_width_m: 0.225
-      armor_height_m: 0.056
-
     preview:
       enabled: false
       preview_window_name: "armor_tracker_preview"
@@ -139,17 +133,6 @@ class ArmorTracker : public LibXR::Application
       int outpost_max_temp_lost_count = 75;
       int output_frame = 1;
     } tracker;
-
-    /**
-     * @brief Physical armor dimensions used by the tracker preview overlay.
-     */
-    struct Overlay
-    {
-      double armor_pitch_deg = 15.0;
-      double small_armor_width_m = 0.135;
-      double big_armor_width_m = 0.225;
-      double armor_height_m = 0.056;
-    } overlay;
 
     VisionPreview::RuntimeParam preview{};
   };
