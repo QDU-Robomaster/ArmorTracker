@@ -264,6 +264,26 @@ class ArmorTracker : public LibXR::Application
   };
 
   /**
+   * @brief tracker/target_frame 的同帧目标与源图像载荷。
+   *
+   * 该 topic 只用于同进程视觉链路回调，语义与 detector 给 tracker 的
+   * armors_frame 一致：图像和 IMU 指针只在当前发布回调期间有效，跨线程或
+   * 异步预览必须立即深拷贝图像。
+   */
+  struct TargetFramePacket
+  {
+    /// tracker 输入所用的 detector 同源图像/IMU 帧。
+    ArmorDetectionsSourceFrame<CameraInfoV> source_frame{};
+    /// 本帧发布到 tracker/target 的目标结果。
+    const ArmorTrackerTarget* target{nullptr};
+  };
+
+  /**
+   * @brief tracker/target_frame topic 的实际载荷类型。
+   */
+  using TargetFrameMessage = TargetFramePacket*;
+
+  /**
    * @brief Construct the module and subscribe to the detector topic.
    */
   explicit ArmorTracker(LibXR::HardwareContainer& hw, LibXR::ApplicationManager& app,
@@ -336,6 +356,8 @@ class ArmorTracker : public LibXR::Application
       LibXR::Topic("info", sizeof(TrackerInfo), &tracker_domain_);
   LibXR::Topic target_topic_ =
       LibXR::Topic("target", sizeof(ArmorTrackerTarget), &tracker_domain_);
+  LibXR::Topic target_frame_topic_ =
+      LibXR::Topic("target_frame", sizeof(TargetFrameMessage), &tracker_domain_);
   LibXR::Topic ekf_points_topic_ =
       LibXR::Topic("ekf_points", sizeof(EkfPointsMsg), &tracker_domain_);
   LibXR::Topic candidate_debug_topic_ =
@@ -346,7 +368,23 @@ class ArmorTracker : public LibXR::Application
   std::atomic<bool> params_is_changed_{false};
   EkfPointsMsg ekf_msg_{};
   CandidateDebugMsg candidate_debug_msg_{};
+  ArmorTrackerTarget target_frame_target_msg_{};
+  TargetFramePacket target_frame_packet_{};
   FrameSync& sync_;
 };
+
+/**
+ * @brief tracker/target_frame 的跨模块 frame packet 类型。
+ */
+template <CameraTypes::CameraInfo CameraInfoV>
+using ArmorTrackerTargetFramePacket =
+    typename ArmorTracker<CameraInfoV>::TargetFramePacket;
+
+/**
+ * @brief tracker/target_frame 的跨模块 topic payload 类型。
+ */
+template <CameraTypes::CameraInfo CameraInfoV>
+using ArmorTrackerTargetFrameMessage =
+    typename ArmorTracker<CameraInfoV>::TargetFrameMessage;
 
 #include "ArmorTrackerPipeline.hpp"

@@ -349,6 +349,11 @@ void ArmorTracker<CameraInfoV>::ArmorsCallback(
   candidate_debug_topic_.Publish(candidate_debug_msg_, publish_timestamp);
   ekf_points_topic_.Publish(ekf_msg_, publish_timestamp);
   target_topic_.Publish(target_msg, publish_timestamp);
+  target_frame_target_msg_ = target_msg;
+  target_frame_packet_.source_frame = source_frame;
+  target_frame_packet_.target = &target_frame_target_msg_;
+  TargetFrameMessage target_frame_msg = &target_frame_packet_;
+  target_frame_topic_.Publish(target_frame_msg, publish_timestamp);
   SubmitPreview(*source_frame.image_frame, detector_armors, target_msg,
                 candidate_debug_msg_, output);
 }
