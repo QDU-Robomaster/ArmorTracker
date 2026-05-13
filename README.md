@@ -28,6 +28,9 @@
 默认 detector topic 为 `armor_detector/armors_frame`。tracker 输出 topic 位于
 `tracker` 域。
 
+默认 `cfg.tracker.output_frame: 1` 输出右手系：`x` 向右，`y` 向前，`z` 向上；
+yaw 以前向为 0，左转为正。`output_frame: 0` 保留 tracker 内部 world frame。
+
 ## Preview
 
 内置 preview 只在 `cfg.preview.enabled: true` 时启动，不订阅 topic、不录像、不反压主链路。

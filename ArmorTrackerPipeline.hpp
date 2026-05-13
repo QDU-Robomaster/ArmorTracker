@@ -301,25 +301,29 @@ void ArmorTracker<CameraInfoV>::ArmorsCallback(
     ekf_msg.center_cam =
         LibXR::Position<double>(output.center.x(), output.center.y(),
                                 output.center.z());
-    ekf_msg.valid[0] = output.center.z() > 1e-6;
+    ekf_msg.valid[0] =
+        cfg_.tracker.output_frame == 0 ? output.center.x() > 1e-6
+                                       : output.center.y() > 1e-6;
     for (int face = 0; face < 4; ++face)
     {
       if (face < static_cast<int>(output.faces.size()))
       {
-        Eigen::Vector3d face_camera;
+        Eigen::Vector3d face_output;
         if (cfg_.tracker.output_frame == 0)
         {
-          face_camera = output.faces[static_cast<std::size_t>(face)].head<3>();
+          face_output = output.faces[static_cast<std::size_t>(face)].head<3>();
         }
         else
         {
-          face_camera = armor_tracker_detail::WorldToCameraFrame(
+          face_output = armor_tracker_detail::WorldToOutputFrame(
               output.faces[static_cast<std::size_t>(face)].head<3>());
         }
         ekf_msg.armors_cam[face] =
-            LibXR::Position<double>(face_camera.x(), face_camera.y(),
-                                    face_camera.z());
-        ekf_msg.valid[face + 1] = face_camera.z() > 1e-6;
+            LibXR::Position<double>(face_output.x(), face_output.y(),
+                                    face_output.z());
+        ekf_msg.valid[face + 1] =
+            cfg_.tracker.output_frame == 0 ? face_output.x() > 1e-6
+                                           : face_output.y() > 1e-6;
       }
       else
       {

@@ -117,11 +117,13 @@ inline bool DetectorTypeIsLarge(const InputArmor& input)
 }
 
 /**
- * @brief Convert the tracker world frame vector to the camera output frame.
+ * @brief Convert the tracker world frame vector to the public output frame.
+ *
+ * The default public frame is right-handed: x right, y forward, z up.
  */
-inline Eigen::Vector3d WorldToCameraFrame(const Eigen::Vector3d& point)
+inline Eigen::Vector3d WorldToOutputFrame(const Eigen::Vector3d& point)
 {
-  return {-point.y(), -point.z(), point.x()};
+  return {-point.y(), point.x(), point.z()};
 }
 
 /**
@@ -293,17 +295,17 @@ class TrackerCore
     }
     else
     {
-      out.center = WorldToCameraFrame({x[0], x[2], x[4]});
-      out.velocity = WorldToCameraFrame({x[1], x[3], x[5]});
-      out.yaw = LimitRad(x[6] - kPi * 0.5);
+      out.center = WorldToOutputFrame({x[0], x[2], x[4]});
+      out.velocity = WorldToOutputFrame({x[1], x[3], x[5]});
+      out.yaw = LimitRad(x[6]);
       out.vyaw = x[7];
-      out.dz = -x[10];
+      out.dz = x[10];
       if (target.last_id >= 0 &&
           target.last_id < static_cast<int>(out.faces.size()))
       {
         const auto& face = out.faces[static_cast<std::size_t>(target.last_id)];
-        out.armor = WorldToCameraFrame(face.head<3>());
-        out.armor_yaw = LimitRad(face[3] - kPi * 0.5);
+        out.armor = WorldToOutputFrame(face.head<3>());
+        out.armor_yaw = LimitRad(face[3]);
       }
     }
     return out;
@@ -366,11 +368,11 @@ class TrackerCore
     }
     else
     {
-      out.center = WorldToCameraFrame({x[0], x[2], x[4]});
-      out.velocity = WorldToCameraFrame({x[1], x[3], x[5]});
-      out.yaw = LimitRad(x[6] - kPi * 0.5);
+      out.center = WorldToOutputFrame({x[0], x[2], x[4]});
+      out.velocity = WorldToOutputFrame({x[1], x[3], x[5]});
+      out.yaw = LimitRad(x[6]);
       out.vyaw = x[7];
-      out.dz = -x[10];
+      out.dz = x[10];
     }
     return out;
   }
