@@ -217,7 +217,7 @@ class Solver
    * @brief Construct a pose solver from camera and output-frame parameters.
    */
   explicit Solver(const Config& config)
-      : R_gimbal2imubody_(Eigen::Matrix3d::Identity()),
+      : R_imu_basis_to_tracker_basis_(Eigen::Matrix3d::Identity()),
         R_camera2gimbal_(Eigen::Matrix3d::Identity()),
         t_camera2gimbal_(Eigen::Vector3d::Zero()),
         R_gimbal2world_(Eigen::Matrix3d::Identity())
@@ -240,6 +240,10 @@ class Solver
     {
       R_camera2gimbal_ << 0.0, 0.0, 1.0, -1.0, 0.0, 0.0, 0.0, -1.0,
           0.0;
+      // IMU 按公开 B 系安装，tracker 内部几何仍使用历史 x前/y左/z上 基。
+      // Webots/InertialUnit 姿态矩阵需要先换到内部几何基再参与 PnP 后处理。
+      R_imu_basis_to_tracker_basis_ << 0.0, -1.0, 0.0, 1.0, 0.0, 0.0,
+          0.0, 0.0, 1.0;
     }
   }
 
@@ -250,7 +254,8 @@ class Solver
   {
     Eigen::Matrix3d R_imubody2imuabs = q.toRotationMatrix();
     R_gimbal2world_ =
-        R_gimbal2imubody_.transpose() * R_imubody2imuabs * R_gimbal2imubody_;
+        R_imu_basis_to_tracker_basis_ * R_imubody2imuabs *
+        R_imu_basis_to_tracker_basis_.transpose();
   }
 
   /**
@@ -331,7 +336,7 @@ class Solver
  private:
   cv::Mat camera_matrix_;
   cv::Mat distort_coeffs_;
-  Eigen::Matrix3d R_gimbal2imubody_;
+  Eigen::Matrix3d R_imu_basis_to_tracker_basis_;
   Eigen::Matrix3d R_camera2gimbal_;
   Eigen::Vector3d t_camera2gimbal_;
   Eigen::Matrix3d R_gimbal2world_;

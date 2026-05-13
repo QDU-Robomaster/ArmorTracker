@@ -17,9 +17,9 @@
 /**
  * @brief tracker/target topic 的目标状态载荷。
  *
- * 该结构表达当前跟踪到的机器人中心、速度、yaw、半径和高低差。默认输出帧
- * 是右手系：x 向右，y 向前，z 向上；yaw 以前向为 0，左转为正。字段保持
- * 平凡聚合，方便 SharedTopic / recorder 直接按结构体尺寸注册和传输。
+ * 该结构表达当前跟踪到的机器人中心、速度、yaw、半径和高低差。默认输出帧是
+ * 当前本体系 B：右手系，x 向右，y 向前，z 向上；yaw 以前向为 0，左转为正。
+ * 字段保持平凡聚合，方便 SharedTopic / recorder 直接按结构体尺寸注册和传输。
  */
 struct ArmorTrackerTarget
 {

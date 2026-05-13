@@ -117,9 +117,10 @@ inline bool DetectorTypeIsLarge(const InputArmor& input)
 }
 
 /**
- * @brief Convert the tracker world frame vector to the public output frame.
+ * @brief 将历史内部坐标轴命名转换为公开输出坐标轴命名。
  *
- * The default public frame is right-handed: x right, y forward, z up.
+ * tracker 内部惯性世界系使用 x 向前、y 向左、z 向上；公开本体系 B
+ * 使用 x 向右、y 向前、z 向上。这里保留惯性/本体系语义，只做轴名映射。
  */
 inline Eigen::Vector3d WorldToOutputFrame(const Eigen::Vector3d& point)
 {
