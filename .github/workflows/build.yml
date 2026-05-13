@@ -31,7 +31,7 @@ jobs:
 
           int main() {
               LibXR::PlatformInit();
-              LibXR::STDIO::Printf<"This is XRobot Module Template Test\n">();
+              LibXR::STDIO::Printf<"ArmorTracker module CI\n">();
               LibXR::HardwareContainer hw;
               XRobotMain(hw);
               return 0;
@@ -41,15 +41,15 @@ jobs:
       - name: Create minimal CMakeLists.txt
         run: |
           cat > CMakeLists.txt <<'EOF'
-          cmake_minimum_required(VERSION 3.10)
+          cmake_minimum_required(VERSION 3.16)
           project(xrobot_mod_test CXX)
           set(CMAKE_CXX_STANDARD 20)
           set(CMAKE_CXX_STANDARD_REQUIRED ON)
           add_executable(xr_test main.cpp)
           set(XROBOT_MODULES_DIR ${CMAKE_CURRENT_SOURCE_DIR}/Modules/)
           set(WEBOTS_HOME /usr/local/webots)
-          set(LIBXR_PRINT_FLOAT_ENABLE_DOUBLE ON CACHE BOOL "" FORCE)
           set(LIBXR_PRINT_INTEGER_ENABLE_64BIT ON CACHE BOOL "" FORCE)
+          set(LIBXR_PRINT_FLOAT_ENABLE_DOUBLE ON CACHE BOOL "" FORCE)
           set(LIBXR_PRINT_ENABLE_POINTER ON CACHE BOOL "" FORCE)
           add_subdirectory(libxr)
           set_property(TARGET xr PROPERTY CXX_STANDARD 20)
@@ -63,63 +63,51 @@ jobs:
           EOF
 
       - name: Pull libxr to ./libxr
-        run: |
-          git clone --depth=1 --branch master \
-            https://github.com/Jiu-xiao/libxr ./libxr
+        run: git clone --depth=1 --branch master https://github.com/Jiu-xiao/libxr ./libxr
 
-      - name: Setup Python & Install deps
+      - name: Setup Python and build deps
         run: |
           apt-get update
-          apt-get install -y libgpiod-dev
+          apt-get install -y --no-install-recommends libgpiod-dev
           python3 -m pip install --upgrade pip
           pip3 install pyyaml requests
 
       - name: Add XRobot tools to PATH
-        run: |
-          echo "$HOME/.local/bin" >> $GITHUB_PATH
+        run: echo "$HOME/.local/bin" >> $GITHUB_PATH
 
       - name: Install xrobot toolchain
-        run: |
-          pip3 install xrobot libxr
+        run: pip3 install xrobot libxr
 
-      - name: Register module sources
+      - name: Prepare module sources
         run: |
+          xrobot_setup || true
           xrobot_src_man add-source https://qdu-robomaster.github.io/qdu-future-modules/index.yaml
-          xrobot_src_man add-source https://xrobot-org.github.io/xrobot-modules/index.yaml
-
-      - name: Register dependency repos
-        run: |
-          rm -f Modules/modules.yaml
-          xrobot_add_mod xrobot-org/BlinkLED@master
-          xrobot_add_mod qdu-future/CameraBase@master
-          xrobot_add_mod qdu-future/WebotsCamera@master
-          xrobot_add_mod qdu-future/CameraFrameSync@master
-          xrobot_add_mod qdu-future/VisionPreview@master
-          xrobot_add_mod qdu-future/ArmorDetector@master
+          xrobot_add_mod qdu-future/${{ env.XR_MODULE_NAME }}
+          cat Modules/sources.yaml
           cat Modules/modules.yaml
 
-      - name: Sync dependency repos
-        run: |
-          if ! xrobot_init_mod; then
-            echo "xrobot_init_mod reported a dependency map error; verifying required repos before continuing"
-            test -d Modules/BlinkLED
-            test -d Modules/CameraBase
-            test -d Modules/WebotsCamera
-            test -d Modules/CameraFrameSync
-            test -d Modules/CameraSync
-            test -d Modules/VisionPreview
-            test -d Modules/ArmorDetector
-          fi
+      - name: Sync module repos from MANIFEST dependencies
+        run: xrobot_init_mod
 
-      - name: Create test module config
-        run: |
-          cat > tracker_ci.yaml <<'EOF'
-          constexpr_namespace: ProjectConstexpr
+      - name: Restore current module checkout
+        run: rm -rf Modules/${{ env.XR_MODULE_NAME }}
 
-          constexprs:
-            MainCameraInfo:
-              type: CameraTypes::CameraInfo
-              value:
+      - name: Checkout current module repo again
+        uses: actions/checkout@v4
+        with:
+          path: Modules/${{ env.XR_MODULE_NAME }}
+
+      - name: Create FakeCamera test fixture
+        run: |
+          mkdir -p Modules/FakeCamera
+          cat > Modules/FakeCamera/FakeCamera.hpp <<'EOF'
+          #pragma once
+
+          /* === MODULE MANIFEST V2 ===
+          module_description: Minimal CameraBase fixture for module CI
+          constructor_args: []
+          template_args:
+            - Info:
                 width: 1280
                 height: 720
                 step: 3840
@@ -129,89 +117,61 @@ jobs:
                 distortion_coefficients: [0.0, 0.0, 0.0, 0.0, 0.0]
                 rectification_matrix: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
                 projection_matrix: [800.0, 0.0, 640.0, 0.0, 0.0, 800.0, 360.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+          required_hardware: []
+          depends:
+            - qdu-future/CameraBase
+          === END MANIFEST === */
 
-          modules:
-            - id: BlinkLED_0
-              name: BlinkLED
-              constructor_args:
-                blink_cycle: 250
+          #include "CameraBase.hpp"
+          #include "app_framework.hpp"
+          #include "libxr.hpp"
 
-            - id: camera
-              name: WebotsCamera
-              template_args:
-                Info: {constexpr: MainCameraInfo}
-              constructor_args:
-                runtime:
-                  device_name: camera
-                  fps: 30
-                  exposure: 1.0
-                  gain: 0.0
-                  pose_def_name: camera
+          template <CameraTypes::CameraInfo CameraInfoV>
+          class FakeCamera : public CameraBase<CameraInfoV>, public LibXR::Application
+          {
+           public:
+            explicit FakeCamera(LibXR::HardwareContainer &hw, LibXR::ApplicationManager &app)
+                : CameraBase<CameraInfoV>(hw, "fake_camera")
+            {
+              app.Register(*this);
+            }
 
-            - id: camera_frame_sync
-              name: CameraFrameSync
-              template_args:
-                Info: {constexpr: MainCameraInfo}
-              constructor_args:
-                camera: '@camera'
-
-            - id: ArmorDetector_0
-              name: ArmorDetector
-              template_args:
-                Info: {constexpr: MainCameraInfo}
-              constructor_args:
-                cfg:
-                  detect_color: 1
-                  network:
-                    min_confidence: 0.1
-                    enable_quad_check: true
-                    min_quad_area_px: 16.0
-                    openvino_device: CPU
-                    openvino_performance_mode: LATENCY
-                sync: '@camera_frame_sync'
-
-            - id: ArmorTracker_0
-              name: ArmorTracker
-              template_args:
-                Info: {constexpr: MainCameraInfo}
-              constructor_args:
-                cfg:
-                  tracker:
-                    require_target_tag: false
-                    target_tag_id: -1
-                    min_detect_count: 2
-                    max_temp_lost_count: 15
-                    outpost_max_temp_lost_count: 75
-                    output_frame: 1
-                  overlay:
-                    armor_pitch_deg: 15.0
-                    small_armor_width_m: 0.135
-                    big_armor_width_m: 0.225
-                    armor_height_m: 0.056
-                  preview:
-                    enabled: false
-                    preview_window_name: armor_tracker_preview
-                    preview_scale: 0.5
-                    preview_wait_key_ms: 1
-                    queue_capacity: 1
-                    output_mode: window
-                    web_bind_address: 0.0.0.0
-                    web_port: 8080
-                    web_stream_name: armor_tracker
-                    max_fps: 30.0
-                sync: '@camera_frame_sync'
+            void OnMonitor() override {}
+            void SetExposure(double) override {}
+            void SetGain(double) override {}
+          };
           EOF
-          cat tracker_ci.yaml
+
+          cat > Modules/FakeCamera/CMakeLists.txt <<'EOF'
+          target_include_directories(xr PUBLIC ${CMAKE_CURRENT_LIST_DIR})
+          EOF
+
+      - name: Create module config from MANIFEST defaults
+        run: |
+          mkdir -p User
+          cat > User/xrobot.yaml <<'EOF'
+          global_settings:
+            monitor_sleep_ms: 1000
+          modules: []
+          EOF
+          xrobot_add_mod BlinkLED --instance-id BlinkLED_0
+          xrobot_add_mod FakeCamera --instance-id camera
+          xrobot_add_mod CameraFrameSync --instance-id camera_frame_sync
+          xrobot_add_mod ArmorTracker --instance-id ArmorTracker_0
+          cat User/xrobot.yaml
 
       - name: Generate main
-        run: |
-          xrobot_gen_main --config tracker_ci.yaml --output User/xrobot_main.hpp
+        run: xrobot_gen_main --output User/xrobot_main.hpp
 
       - name: Build
         run: |
           mkdir -p build
           cd build
-          cmake .. -DOpenVINO_DIR=/opt/intel/openvino_2025.4.0/runtime/cmake
+          cmake .. \
+            -DOpenVINO_DIR=/opt/intel/openvino_2025.4.0/runtime/cmake \
+            -DLIBXR_PRINT_INTEGER_ENABLE_64BIT=ON \
+            -DLIBXR_PRINT_FLOAT_ENABLE_DOUBLE=ON \
+            -DLIBXR_PRINT_ENABLE_POINTER=ON
           make
 
       - name: Create Tag via GitHub API
@@ -229,9 +189,7 @@ jobs:
             const MM = String(date.getUTCMinutes()).padStart(2, '0');
             const SS = String(date.getUTCSeconds()).padStart(2, '0');
             const tagName = `${tagPrefix}${yyyy}${mm}${dd}-${HH}${MM}${SS}`;
-
             const sha = process.env.GITHUB_SHA;
-
             await github.rest.git.createRef({
               owner: context.repo.owner,
               repo: context.repo.repo,
