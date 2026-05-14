@@ -23,7 +23,6 @@ armor_tracker_detail::Config ArmorTracker<CameraInfoV>::BuildTrackerConfig() con
   config.min_detect_count = cfg_.tracker.min_detect_count;
   config.max_temp_lost_count = cfg_.tracker.max_temp_lost_count;
   config.outpost_max_temp_lost_count = cfg_.tracker.outpost_max_temp_lost_count;
-  config.output_frame = cfg_.tracker.output_frame == 0 ? 0 : 1;
   config.camera_matrix = {
       kCameraInfo.camera_matrix[0], kCameraInfo.camera_matrix[1],
       kCameraInfo.camera_matrix[2], kCameraInfo.camera_matrix[3],
@@ -126,8 +125,6 @@ int ArmorTracker<CameraInfoV>::CommandFun(ArmorTracker<CameraInfoV>* self,
                          self->cfg_.tracker.max_temp_lost_count);
     TRACKER_STDIO_PRINTF("    outpost_max_temp_lost_count: %d\r\n",
                          self->cfg_.tracker.outpost_max_temp_lost_count);
-    TRACKER_STDIO_PRINTF("    output_frame: %d\r\n",
-                         self->cfg_.tracker.output_frame);
     TRACKER_STDIO_PRINT("  extrinsic:\r\n");
     TRACKER_STDIO_PRINT("    camera_to_body:\r\n");
     TRACKER_STDIO_PRINT("      rotation:\r\n");
@@ -247,17 +244,17 @@ void ArmorTracker<CameraInfoV>::ArmorsCallback(
     inputs.push_back(input);
   }
 
-  Eigen::Quaterniond q_gimbal_to_world(
+  Eigen::Quaterniond q_body_to_world(
       source_frame.imu->rotation_wxyz[0], source_frame.imu->rotation_wxyz[1],
       source_frame.imu->rotation_wxyz[2], source_frame.imu->rotation_wxyz[3]);
-  if (!std::isfinite(q_gimbal_to_world.norm()) ||
-      q_gimbal_to_world.norm() < 1e-9)
+  if (!std::isfinite(q_body_to_world.norm()) ||
+      q_body_to_world.norm() < 1e-9)
   {
-    q_gimbal_to_world = Eigen::Quaterniond::Identity();
+    q_body_to_world = Eigen::Quaterniond::Identity();
   }
-  q_gimbal_to_world.normalize();
+  q_body_to_world.normalize();
 
-  const auto output = tracker_.Step(image_timestamp_us, q_gimbal_to_world, inputs);
+  const auto output = tracker_.Step(image_timestamp_us, q_body_to_world, inputs);
 
   ArmorTrackerTarget target_msg{};
   target_msg.image_timestamp_us = image_timestamp_us;
@@ -288,6 +285,29 @@ void ArmorTracker<CameraInfoV>::ArmorsCallback(
   target_frame_target_msg_ = target_msg;
   target_frame_packet_.source_frame = source_frame;
   target_frame_packet_.target = &target_frame_target_msg_;
+
+  const Eigen::Matrix3d R_camera_to_body =
+      armor_tracker_detail::RotationMatrixFromWxyz(
+          cfg_.extrinsic.camera_to_body.rotation);
+  const Eigen::Vector3d t_camera_to_body(
+      cfg_.extrinsic.camera_to_body.translation[0],
+      cfg_.extrinsic.camera_to_body.translation[1],
+      cfg_.extrinsic.camera_to_body.translation[2]);
+  const Eigen::Matrix3d R_output_to_camera =
+      R_camera_to_body.transpose();
+  const Eigen::Vector3d t_output_to_camera =
+      -R_camera_to_body.transpose() * t_camera_to_body;
+  for (int row = 0; row < 3; ++row)
+  {
+    for (int col = 0; col < 3; ++col)
+    {
+      target_frame_packet_.output_to_camera_rotation[static_cast<std::size_t>(
+          row * 3 + col)] = R_output_to_camera(row, col);
+    }
+    target_frame_packet_.output_to_camera_translation[static_cast<std::size_t>(
+        row)] = t_output_to_camera(row);
+  }
+
   TargetFrameMessage target_frame_msg = &target_frame_packet_;
   target_frame_topic_.Publish(target_frame_msg, publish_timestamp);
   SubmitPreview(*source_frame.image_frame, detector_armors, target_msg, output);
@@ -391,11 +411,13 @@ void ArmorTracker<CameraInfoV>::SubmitPreview(
     overlay.selected = track.selected;
     overlay.score = track.score;
     overlay.face_count = std::min(
-        4, std::min(track.armors_num, static_cast<int>(track.faces.size())));
+        4, std::min(track.armors_num,
+                    static_cast<int>(track.faces_world.size())));
 
     for (int i = 0; i < overlay.face_count; ++i)
     {
-      const Eigen::Vector4d face = track.faces[static_cast<std::size_t>(i)];
+      const Eigen::Vector4d face =
+          track.faces_world[static_cast<std::size_t>(i)];
       const Eigen::Vector3d center_world = face.head<3>();
       const double yaw = face[3];
       if (!center_world.allFinite() || !std::isfinite(yaw))

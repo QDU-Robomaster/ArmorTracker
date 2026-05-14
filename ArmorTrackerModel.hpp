@@ -119,9 +119,9 @@ struct Armor
   ArmorPriority priority{FIFTH};
   cv::Rect box{};
   double confidence{};
-  Eigen::Vector3d xyz_in_gimbal = Eigen::Vector3d::Zero();
+  Eigen::Vector3d xyz_in_body = Eigen::Vector3d::Zero();
   Eigen::Vector3d xyz_in_world = Eigen::Vector3d::Zero();
-  Eigen::Vector3d ypr_in_gimbal = Eigen::Vector3d::Zero();
+  Eigen::Vector3d ypr_in_body = Eigen::Vector3d::Zero();
   Eigen::Vector3d ypr_in_world = Eigen::Vector3d::Zero();
   Eigen::Vector3d ypd_in_world = Eigen::Vector3d::Zero();
   double yaw_raw{};
@@ -200,7 +200,6 @@ struct Config
   int min_detect_count = 2;
   int max_temp_lost_count = 15;
   int outpost_max_temp_lost_count = 75;
-  int output_frame = 1;
   std::array<double, 9> camera_matrix{
       1164.3428599490444, 0.0, 366.6782312546237,
       0.0, 1164.335053894998, 270.30936434613865,
@@ -211,19 +210,59 @@ struct Config
 };
 
 /**
- * @brief Solves detector armor corners into camera/gimbal/world pose estimates.
+ * @brief Convert a wxyz quaternion to a normalized rotation matrix.
+ */
+inline Eigen::Matrix3d RotationMatrixFromWxyz(
+    const std::array<double, 4>& rotation)
+{
+  Eigen::Quaterniond q(rotation[0], rotation[1], rotation[2], rotation[3]);
+  if (!std::isfinite(q.norm()) || q.norm() < 1e-9)
+  {
+    q = Eigen::Quaterniond(0.7071067811865476, -0.7071067811865475, 0.0,
+                           0.0);
+  }
+  q.normalize();
+  return q.toRotationMatrix();
+}
+
+/**
+ * @brief Build an armor-to-frame rotation from public yaw and armor tilt.
+ */
+inline Eigen::Matrix3d ArmorRotationFromYaw(double yaw, double tilt)
+{
+  const auto sin_yaw = std::sin(yaw);
+  const auto cos_yaw = std::cos(yaw);
+  const auto sin_tilt = std::sin(tilt);
+  const auto cos_tilt = std::cos(tilt);
+
+  Eigen::Matrix3d rotation;
+  rotation << -sin_yaw * cos_tilt, -cos_yaw, -sin_yaw * sin_tilt,
+      cos_yaw * cos_tilt, -sin_yaw, cos_yaw * sin_tilt, -sin_tilt, 0.0,
+      cos_tilt;
+  return rotation;
+}
+
+/**
+ * @brief Extract public-frame yaw from an armor rotation.
+ */
+inline double ArmorYawFromRotation(const Eigen::Matrix3d& rotation)
+{
+  return BearingYaw(rotation.col(0));
+}
+
+/**
+ * @brief Solves detector armor corners into camera/body/world pose estimates.
  */
 class Solver
 {
  public:
   /**
-   * @brief Construct a pose solver from camera and output-frame parameters.
+   * @brief Construct a pose solver from camera and hand-eye parameters.
    */
   explicit Solver(const Config& config)
-      : R_imu_basis_to_tracker_basis_(Eigen::Matrix3d::Identity()),
-        R_camera2gimbal_(Eigen::Matrix3d::Identity()),
-        t_camera2gimbal_(Eigen::Vector3d::Zero()),
-        R_gimbal2world_(Eigen::Matrix3d::Identity())
+      : R_camera_to_body_(Eigen::Matrix3d::Identity()),
+        t_camera_to_body_(Eigen::Vector3d::Zero()),
+        R_body_to_world_(Eigen::Matrix3d::Identity())
   {
     Eigen::Matrix<double, 3, 3, Eigen::RowMajor> camera_matrix(
         config.camera_matrix.data());
@@ -235,37 +274,19 @@ class Solver
     {
       distort_coeffs_.at<double>(0, col) = distort_coeffs(0, col);
     }
-    if (config.output_frame == 0)
-    {
-      R_camera2gimbal_ = Eigen::Matrix3d::Identity();
-    }
-    else
-    {
-      const Eigen::Matrix3d tracker_from_body = TrackerFromBodyFrame();
-      R_camera2gimbal_ =
-          tracker_from_body *
-          RotationMatrixFromWxyz(config.camera_to_body_rotation);
-      t_camera2gimbal_ =
-          tracker_from_body *
-          Eigen::Vector3d(config.camera_to_body_translation[0],
-                          config.camera_to_body_translation[1],
-                          config.camera_to_body_translation[2]);
-      // IMU 按公开 B 系安装，tracker 内部几何仍使用历史 x前/y左/z上 基。
-      // Webots/InertialUnit 姿态矩阵需要先换到内部几何基再参与 PnP 后处理。
-      R_imu_basis_to_tracker_basis_ << 0.0, -1.0, 0.0, 1.0, 0.0, 0.0,
-          0.0, 0.0, 1.0;
-    }
+    R_camera_to_body_ = RotationMatrixFromWxyz(config.camera_to_body_rotation);
+    t_camera_to_body_ =
+        Eigen::Vector3d(config.camera_to_body_translation[0],
+                        config.camera_to_body_translation[1],
+                        config.camera_to_body_translation[2]);
   }
 
   /**
-   * @brief Update the gimbal-to-world orientation used by PnP postprocessing.
+   * @brief Update the body-to-world orientation used by PnP postprocessing.
    */
-  void SetRGimbal2World(const Eigen::Quaterniond& q)
+  void SetRBodyToWorld(const Eigen::Quaterniond& q)
   {
-    Eigen::Matrix3d R_imubody2imuabs = q.toRotationMatrix();
-    R_gimbal2world_ =
-        R_imu_basis_to_tracker_basis_ * R_imubody2imuabs *
-        R_imu_basis_to_tracker_basis_.transpose();
+    R_body_to_world_ = q.toRotationMatrix();
   }
 
   /**
@@ -281,16 +302,16 @@ class Solver
                  rvec, tvec, false, cv::SOLVEPNP_IPPE);
 
     Eigen::Vector3d xyz_in_camera(tvec[0], tvec[1], tvec[2]);
-    armor.xyz_in_gimbal = R_camera2gimbal_ * xyz_in_camera + t_camera2gimbal_;
-    armor.xyz_in_world = R_gimbal2world_ * armor.xyz_in_gimbal;
+    armor.xyz_in_body = R_camera_to_body_ * xyz_in_camera + t_camera_to_body_;
+    armor.xyz_in_world = R_body_to_world_ * armor.xyz_in_body;
 
     cv::Mat rmat;
     cv::Rodrigues(rvec, rmat);
     Eigen::Matrix3d R_armor2camera = CvMatToMat3d(rmat);
-    Eigen::Matrix3d R_armor2gimbal = R_camera2gimbal_ * R_armor2camera;
-    Eigen::Matrix3d R_armor2world = R_gimbal2world_ * R_armor2gimbal;
-    armor.ypr_in_gimbal = Eulers(R_armor2gimbal, 2, 1, 0);
-    armor.ypr_in_world = Eulers(R_armor2world, 2, 1, 0);
+    Eigen::Matrix3d R_armor2body = R_camera_to_body_ * R_armor2camera;
+    Eigen::Matrix3d R_armor2world = R_body_to_world_ * R_armor2body;
+    armor.ypr_in_body = {ArmorYawFromRotation(R_armor2body), 0.0, 0.0};
+    armor.ypr_in_world = {ArmorYawFromRotation(R_armor2world), 0.0, 0.0};
     armor.ypd_in_world = XyzToYpd(armor.xyz_in_world);
 
     const auto is_balance =
@@ -311,25 +332,17 @@ class Solver
                                           double yaw, ArmorType type,
                                           ArmorName name) const
   {
-    const auto sin_yaw = std::sin(yaw);
-    const auto cos_yaw = std::cos(yaw);
-    const auto pitch =
+    const auto tilt =
         name == ArmorName::OUTPOST ? -15.0 * kPi / 180.0 : 15.0 * kPi / 180.0;
-    const auto sin_pitch = std::sin(pitch);
-    const auto cos_pitch = std::cos(pitch);
-
-    Eigen::Matrix3d R_armor2world;
-    R_armor2world << cos_yaw * cos_pitch, -sin_yaw, cos_yaw * sin_pitch,
-        sin_yaw * cos_pitch, cos_yaw, sin_yaw * sin_pitch, -sin_pitch, 0.0,
-        cos_pitch;
+    const Eigen::Matrix3d R_armor2world = ArmorRotationFromYaw(yaw, tilt);
 
     const Eigen::Vector3d& t_armor2world = xyz_in_world;
     Eigen::Matrix3d R_armor2camera =
-        R_camera2gimbal_.transpose() * R_gimbal2world_.transpose() *
+        R_camera_to_body_.transpose() * R_body_to_world_.transpose() *
         R_armor2world;
     Eigen::Vector3d t_armor2camera =
-        R_camera2gimbal_.transpose() *
-        (R_gimbal2world_.transpose() * t_armor2world - t_camera2gimbal_);
+        R_camera_to_body_.transpose() *
+        (R_body_to_world_.transpose() * t_armor2world - t_camera_to_body_);
 
     cv::Vec3d rvec;
     cv::Rodrigues(Mat3dToCv(R_armor2camera), rvec);
@@ -346,37 +359,9 @@ class Solver
  private:
   cv::Mat camera_matrix_;
   cv::Mat distort_coeffs_;
-  Eigen::Matrix3d R_imu_basis_to_tracker_basis_;
-  Eigen::Matrix3d R_camera2gimbal_;
-  Eigen::Vector3d t_camera2gimbal_;
-  Eigen::Matrix3d R_gimbal2world_;
-
-  /**
-   * @brief Convert public body-frame components into tracker internal basis.
-   */
-  static Eigen::Matrix3d TrackerFromBodyFrame()
-  {
-    Eigen::Matrix3d tracker_from_body;
-    tracker_from_body << 0.0, 1.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0,
-        1.0;
-    return tracker_from_body;
-  }
-
-  /**
-   * @brief Convert a wxyz quaternion to a normalized rotation matrix.
-   */
-  static Eigen::Matrix3d RotationMatrixFromWxyz(
-      const std::array<double, 4>& rotation)
-  {
-    Eigen::Quaterniond q(rotation[0], rotation[1], rotation[2], rotation[3]);
-    if (!std::isfinite(q.norm()) || q.norm() < 1e-9)
-    {
-      q = Eigen::Quaterniond(0.7071067811865476, -0.7071067811865475, 0.0,
-                             0.0);
-    }
-    q.normalize();
-    return q.toRotationMatrix();
-  }
+  Eigen::Matrix3d R_camera_to_body_;
+  Eigen::Vector3d t_camera_to_body_;
+  Eigen::Matrix3d R_body_to_world_;
 
   /**
    * @brief Return object points for large armor PnP.
@@ -409,9 +394,9 @@ class Solver
    */
   void OptimizeYaw(Armor& armor) const
   {
-    Eigen::Vector3d gimbal_ypr = Eulers(R_gimbal2world_, 2, 1, 0);
+    const double body_yaw = BearingYaw(R_body_to_world_.col(1));
     constexpr double search_range = 140.0;
-    auto yaw0 = LimitRad(gimbal_ypr[0] - search_range / 2.0 * kPi / 180.0);
+    auto yaw0 = LimitRad(body_yaw - search_range / 2.0 * kPi / 180.0);
 
     auto min_error = 1e10;
     auto best_yaw = armor.ypr_in_world[0];
@@ -483,8 +468,8 @@ class Target
     const auto r = radius;
     const Eigen::VectorXd& xyz = armor.xyz_in_world;
     const Eigen::VectorXd& ypr = armor.ypr_in_world;
-    const auto center_x = xyz[0] + r * std::cos(ypr[0]);
-    const auto center_y = xyz[1] + r * std::sin(ypr[0]);
+    const auto center_x = xyz[0] - r * std::sin(ypr[0]);
+    const auto center_y = xyz[1] + r * std::cos(ypr[0]);
     const auto center_z = xyz[2];
 
     Eigen::VectorXd x0(11);
@@ -630,7 +615,7 @@ class Target
   const ExtendedKalmanFilter& Ekf() const { return ekf_; }
 
   /**
-   * @brief Return the modeled armor face centers and yaws in world frame.
+   * @brief Return the modeled armor face centers and yaws in inertial W frame.
    */
   std::vector<Eigen::Vector4d> ArmorXyzaList() const
   {
@@ -679,12 +664,12 @@ class Target
   std::chrono::steady_clock::time_point t_{};
 
   /**
-   * @brief Update EKF with yaw, pitch, distance, and armor yaw measurement.
+   * @brief Update EKF with yaw, elevation, distance, and armor yaw measurement.
    */
   void UpdateYpda(const Armor& armor, int id)
   {
     Eigen::MatrixXd H = HJacobian(ekf_.x, id);
-    auto center_yaw = std::atan2(armor.xyz_in_world[1], armor.xyz_in_world[0]);
+    auto center_yaw = BearingYaw(armor.xyz_in_world);
     auto delta_angle = LimitRad(armor.ypr_in_world[0] - center_yaw);
     Eigen::VectorXd R_dig(4);
     R_dig << 4e-3, 4e-3, std::log(std::abs(delta_angle) + 1.0) + 1.0,
@@ -723,8 +708,8 @@ class Target
     auto angle = LimitRad(x[6] + id * 2.0 * kPi / armor_num_);
     auto use_l_h = (armor_num_ == 4) && (id == 1 || id == 3);
     auto r = use_l_h ? x[8] + x[9] : x[8];
-    auto armor_x = x[0] - r * std::cos(angle);
-    auto armor_y = x[2] - r * std::sin(angle);
+    auto armor_x = x[0] + r * std::sin(angle);
+    auto armor_y = x[2] - r * std::cos(angle);
     auto armor_z = use_l_h ? x[4] + x[10] : x[4];
     return {armor_x, armor_y, armor_z};
   }
@@ -737,12 +722,12 @@ class Target
     auto angle = LimitRad(x[6] + id * 2.0 * kPi / armor_num_);
     auto use_l_h = (armor_num_ == 4) && (id == 1 || id == 3);
     auto r = use_l_h ? x[8] + x[9] : x[8];
-    auto dx_da = r * std::sin(angle);
-    auto dy_da = -r * std::cos(angle);
-    auto dx_dr = -std::cos(angle);
-    auto dy_dr = -std::sin(angle);
-    auto dx_dl = use_l_h ? -std::cos(angle) : 0.0;
-    auto dy_dl = use_l_h ? -std::sin(angle) : 0.0;
+    auto dx_da = r * std::cos(angle);
+    auto dy_da = r * std::sin(angle);
+    auto dx_dr = std::sin(angle);
+    auto dy_dr = -std::cos(angle);
+    auto dx_dl = use_l_h ? std::sin(angle) : 0.0;
+    auto dy_dl = use_l_h ? -std::cos(angle) : 0.0;
     auto dz_dh = use_l_h ? 1.0 : 0.0;
 
     Eigen::MatrixXd H_armor_xyza = Eigen::MatrixXd::Zero(4, 11);

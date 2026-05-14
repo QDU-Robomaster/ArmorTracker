@@ -43,7 +43,6 @@ struct CaseSpec
   int color{};
   int number{};
   Camera camera{};
-  int output_frame{1};
 };
 
 struct QuatRow
@@ -312,7 +311,6 @@ std::vector<CaseSpec> read_cases(const fs::path& path)
     spec.camera.fy = as_double(row, "fy");
     spec.camera.cx = as_double(row, "cx");
     spec.camera.cy = as_double(row, "cy");
-    spec.output_frame = as_int(row, "output_frame", 1);
     cases.push_back(spec);
   }
   return cases;
@@ -382,7 +380,6 @@ int main(int argc, char** argv)
     config.min_detect_count = 2;
     config.max_temp_lost_count = 15;
     config.outpost_max_temp_lost_count = 75;
-    config.output_frame = spec.output_frame;
     config.camera_matrix = {spec.camera.fx, 0.0, spec.camera.cx,
                             0.0, spec.camera.fy, spec.camera.cy,
                             0.0, 0.0, 1.0};

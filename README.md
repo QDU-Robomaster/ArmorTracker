@@ -22,7 +22,7 @@
 
 运行配置只保留当前链路实际使用的三组字段：
 
-- `cfg.tracker`：目标过滤、进入跟踪与丢失阈值、输出坐标帧。
+- `cfg.tracker`：目标过滤、进入跟踪与丢失阈值。
 - `cfg.extrinsic.camera_to_body`：手眼外参，表达从 OpenCV 相机系 `C` 到公开本体系
   `B` 的变换 `p_B = R_BC * p_C + t_BC`。`rotation` 为 `wxyz` 四元数，
   `translation` 单位为 m。`B` 为右手系，`x` 向右，`y` 向前，`z` 向上。
@@ -31,14 +31,16 @@
 默认 detector topic 为 `armor_detector/armors_frame`。tracker 对外只发布
 `tracker/target_frame`。
 
-默认 `cfg.tracker.output_frame: 1` 输出右手系：`x` 向右，`y` 向前，`z` 向上；
-yaw 以前向为 0，左转为正。`output_frame: 0` 保留 tracker 内部 world frame。
+输出统一使用当前公开本体系 `B`：右手系，`x` 向右，`y` 向前，`z` 向上；
+yaw 以前向为 0，左转为正。内部 EKF 使用同一轴约定的惯性 `W` 帧做跨帧稳定，
+发布 `ArmorTrackerTarget` 前显式转回当前 `B`。历史 tracker `x` 前、`y` 左坐标基
+已经不再作为配置或输出选项暴露。
 
 ## Preview
 
 内置 preview 只在 `cfg.preview.enabled: true` 时启动，不订阅 topic、不录像、不反压主链路。
 它绘制 detector 原始四边形、tracker 整车中心、四个装甲面中心、相邻装甲面连线，以及带固定
-pitch 的装甲板物理框。多车跟踪时，preview 会绘制所有 active 车辆，并在车体中心标注编号和
+倾角的装甲板物理框。多车跟踪时，preview 会绘制所有 active 车辆，并在车体中心标注编号和
 当前选择评分；被选中的车辆用更醒目的中心和连线显示。detector preview 不在这里处理。
 
 ## Target Selection

@@ -16,7 +16,6 @@ constructor_args:
       min_detect_count: 2
       max_temp_lost_count: 15
       outpost_max_temp_lost_count: 75
-      output_frame: 1
 
     extrinsic:
       camera_to_body:
@@ -136,7 +135,6 @@ class ArmorTracker : public LibXR::Application
       int min_detect_count = 2;
       int max_temp_lost_count = 15;
       int outpost_max_temp_lost_count = 75;
-      int output_frame = 1;
     } tracker;
 
     /**
@@ -173,8 +171,13 @@ class ArmorTracker : public LibXR::Application
   {
     /// tracker 输入所用的 detector 同源图像/IMU 帧。
     ArmorDetectionsSourceFrame<CameraInfoV> source_frame{};
-    /// 本帧 tracker 输出的目标结果。
+    /// 本帧 tracker 输出的目标结果，使用当前公开本体系 B。
     const ArmorTrackerTarget* target{nullptr};
+    /// output 坐标到 OpenCV camera 坐标的旋转，row-major，满足 p_C = R_CO p_O + t_CO。
+    std::array<double, 9> output_to_camera_rotation{
+        1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0};
+    /// output 坐标到 OpenCV camera 坐标的平移，单位 m。
+    std::array<double, 3> output_to_camera_translation{0.0, 0.0, 0.0};
   };
 
   /**

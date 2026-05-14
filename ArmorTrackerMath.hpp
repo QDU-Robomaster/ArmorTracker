@@ -187,14 +187,25 @@ inline Eigen::Vector3d Eulers(Eigen::Matrix3d rotation, int axis0, int axis1,
 }
 
 /**
- * @brief Convert XYZ position to yaw, pitch, distance.
+ * @brief Return yaw in the public B-axis convention.
+ *
+ * The public frame is right-handed: x right, y forward, z up. Yaw is zero when
+ * pointing forward and positive when turning left.
+ */
+inline double BearingYaw(const Eigen::Vector3d& xyz)
+{
+  return std::atan2(-xyz[0], xyz[1]);
+}
+
+/**
+ * @brief Convert public-frame XYZ position to yaw, elevation, distance.
  */
 inline Eigen::Vector3d XyzToYpd(const Eigen::Vector3d& xyz)
 {
   const auto x = xyz[0];
   const auto y = xyz[1];
   const auto z = xyz[2];
-  return {std::atan2(y, x), std::atan2(z, std::sqrt(x * x + y * y)),
+  return {BearingYaw(xyz), std::atan2(z, std::sqrt(x * x + y * y)),
           std::sqrt(x * x + y * y + z * z)};
 }
 
@@ -211,13 +222,13 @@ inline Eigen::MatrixXd XyzToYpdJacobian(const Eigen::Vector3d& xyz)
   const auto dyaw_dy = x / (x * x + y * y);
   const auto dyaw_dz = 0.0;
 
-  const auto dpitch_dx =
+  const auto delevation_dx =
       -(x * z) / ((z * z / (x * x + y * y) + 1.0) *
                   std::pow((x * x + y * y), 1.5));
-  const auto dpitch_dy =
+  const auto delevation_dy =
       -(y * z) / ((z * z / (x * x + y * y) + 1.0) *
                   std::pow((x * x + y * y), 1.5));
-  const auto dpitch_dz =
+  const auto delevation_dz =
       1.0 / ((z * z / (x * x + y * y) + 1.0) *
              std::pow((x * x + y * y), 0.5));
 
@@ -226,8 +237,8 @@ inline Eigen::MatrixXd XyzToYpdJacobian(const Eigen::Vector3d& xyz)
   const auto ddistance_dz = z / std::pow((x * x + y * y + z * z), 0.5);
 
   Eigen::MatrixXd jacobian(3, 3);
-  jacobian << dyaw_dx, dyaw_dy, dyaw_dz, dpitch_dx, dpitch_dy,
-      dpitch_dz, ddistance_dx, ddistance_dy, ddistance_dz;
+  jacobian << dyaw_dx, dyaw_dy, dyaw_dz, delevation_dx, delevation_dy,
+      delevation_dz, ddistance_dx, ddistance_dy, ddistance_dz;
   return jacobian;
 }
 
@@ -275,7 +286,7 @@ class ExtendedKalmanFilter
         x_add_(std::move(x_add_in))
   {
     data["residual_yaw"] = 0.0;
-    data["residual_pitch"] = 0.0;
+    data["residual_elevation"] = 0.0;
     data["residual_distance"] = 0.0;
     data["residual_angle"] = 0.0;
     data["nis"] = 0.0;
@@ -369,7 +380,7 @@ class ExtendedKalmanFilter
         static_cast<double>(recent_failures) / recent_nis_failures.size();
 
     data["residual_yaw"] = residual[0];
-    data["residual_pitch"] = residual[1];
+    data["residual_elevation"] = residual[1];
     data["residual_distance"] = residual[2];
     data["residual_angle"] = residual[3];
     data["nis"] = nis;
