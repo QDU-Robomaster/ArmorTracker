@@ -205,6 +205,9 @@ struct Config
       1164.3428599490444, 0.0, 366.6782312546237,
       0.0, 1164.335053894998, 270.30936434613865,
       0.0, 0.0, 1.0};
+  std::array<double, 4> camera_to_body_rotation{
+      0.7071067811865476, -0.7071067811865475, 0.0, 0.0};
+  std::array<double, 3> camera_to_body_translation{0.0, 0.0, 0.0};
 };
 
 /**
@@ -238,8 +241,15 @@ class Solver
     }
     else
     {
-      R_camera2gimbal_ << 0.0, 0.0, 1.0, -1.0, 0.0, 0.0, 0.0, -1.0,
-          0.0;
+      const Eigen::Matrix3d tracker_from_body = TrackerFromBodyFrame();
+      R_camera2gimbal_ =
+          tracker_from_body *
+          RotationMatrixFromWxyz(config.camera_to_body_rotation);
+      t_camera2gimbal_ =
+          tracker_from_body *
+          Eigen::Vector3d(config.camera_to_body_translation[0],
+                          config.camera_to_body_translation[1],
+                          config.camera_to_body_translation[2]);
       // IMU 按公开 B 系安装，tracker 内部几何仍使用历史 x前/y左/z上 基。
       // Webots/InertialUnit 姿态矩阵需要先换到内部几何基再参与 PnP 后处理。
       R_imu_basis_to_tracker_basis_ << 0.0, -1.0, 0.0, 1.0, 0.0, 0.0,
@@ -340,6 +350,33 @@ class Solver
   Eigen::Matrix3d R_camera2gimbal_;
   Eigen::Vector3d t_camera2gimbal_;
   Eigen::Matrix3d R_gimbal2world_;
+
+  /**
+   * @brief Convert public body-frame components into tracker internal basis.
+   */
+  static Eigen::Matrix3d TrackerFromBodyFrame()
+  {
+    Eigen::Matrix3d tracker_from_body;
+    tracker_from_body << 0.0, 1.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0,
+        1.0;
+    return tracker_from_body;
+  }
+
+  /**
+   * @brief Convert a wxyz quaternion to a normalized rotation matrix.
+   */
+  static Eigen::Matrix3d RotationMatrixFromWxyz(
+      const std::array<double, 4>& rotation)
+  {
+    Eigen::Quaterniond q(rotation[0], rotation[1], rotation[2], rotation[3]);
+    if (!std::isfinite(q.norm()) || q.norm() < 1e-9)
+    {
+      q = Eigen::Quaterniond(0.7071067811865476, -0.7071067811865475, 0.0,
+                             0.0);
+    }
+    q.normalize();
+    return q.toRotationMatrix();
+  }
 
   /**
    * @brief Return object points for large armor PnP.

@@ -20,9 +20,12 @@
 
 ## 配置
 
-运行配置只保留当前链路实际使用的两组字段：
+运行配置只保留当前链路实际使用的三组字段：
 
 - `cfg.tracker`：目标过滤、进入跟踪与丢失阈值、输出坐标帧。
+- `cfg.extrinsic.camera_to_body`：手眼外参，表达从 OpenCV 相机系 `C` 到公开本体系
+  `B` 的变换 `p_B = R_BC * p_C + t_BC`。`rotation` 为 `wxyz` 四元数，
+  `translation` 单位为 m。`B` 为右手系，`x` 向右，`y` 向前，`z` 向上。
 - `cfg.preview`：`VisionPreview::RuntimeParam`，控制本模块自带预览线程。
 
 默认 detector topic 为 `armor_detector/armors_frame`。tracker 对外只发布

@@ -18,6 +18,11 @@ constructor_args:
       outpost_max_temp_lost_count: 75
       output_frame: 1
 
+    extrinsic:
+      camera_to_body:
+        rotation: [0.7071067811865476, -0.7071067811865475, 0.0, 0.0]
+        translation: [0.0, 0.0, 0.0]
+
     preview:
       enabled: false
       preview_window_name: "armor_tracker_preview"
@@ -133,6 +138,26 @@ class ArmorTracker : public LibXR::Application
       int outpost_max_temp_lost_count = 75;
       int output_frame = 1;
     } tracker;
+
+    /**
+     * @brief Camera hand-eye extrinsic expressed in public body frame B.
+     */
+    struct ExtrinsicParams
+    {
+      /**
+       * @brief Transform from OpenCV camera frame C to body frame B.
+       *
+       * Rotation is a unit quaternion in wxyz order and translation is in
+       * meters. The transform is p_B = R_BC * p_C + t_BC, where B is the
+       * public right-handed frame: x right, y forward, z up.
+       */
+      struct CameraToBody
+      {
+        std::array<double, 4> rotation = {
+            0.7071067811865476, -0.7071067811865475, 0.0, 0.0};
+        std::array<double, 3> translation = {0.0, 0.0, 0.0};
+      } camera_to_body;
+    } extrinsic;
 
     VisionPreview::RuntimeParam preview{};
   };
