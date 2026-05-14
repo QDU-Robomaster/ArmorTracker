@@ -97,8 +97,8 @@ depends:
  * @brief Application module that tracks RoboMaster armor targets.
  *
  * The module subscribes to detector frame packets, runs the header-only tracker
- * core, publishes target/debug topics, and optionally submits a built-in preview
- * overlay. Topic payloads stay plain aggregate types for SharedTopic recorders.
+ * core, publishes the same-frame target packet, and optionally submits a built-in
+ * preview overlay.
  */
 template <CameraTypes::CameraInfo CameraInfoV>
 class ArmorTracker : public LibXR::Application
@@ -138,132 +138,6 @@ class ArmorTracker : public LibXR::Application
   };
 
   /**
-   * @brief Compact topic payload with the selected face position and yaw.
-   */
-  struct TrackerInfo
-  {
-    double position_diff{};
-    double yaw_diff{};
-    LibXR::Position<double> position{};
-    double yaw{};
-  };
-
-  /**
-   * @brief Projected target center and armor-face anchors for preview/debug.
-   */
-  struct EkfPointsMsg
-  {
-    uint64_t image_timestamp_us{};
-    uint8_t count{};
-    LibXR::Position<double> center_cam{};
-    LibXR::Position<double> armors_cam[4]{};
-    bool valid[5]{};
-  };
-
-  /**
-   * @brief Per-detection candidate metadata kept for recorder compatibility.
-   */
-  struct CandidateDebugItem
-  {
-    uint8_t armor_index{};
-    uint8_t face_index{};
-    uint8_t same_number{};
-    uint8_t reserved0{};
-    int16_t image_track_id{-1};
-    uint8_t image_track_confirmed{};
-    uint8_t same_persistent_track{};
-    ArmorNumber number{ArmorNumber::INVALID};
-    ArmorType type{ArmorType::INVALID};
-    uint8_t reserved1{};
-    uint8_t reserved2{};
-    float score{};
-    float position_diff{};
-    float yaw_diff{};
-    float view_bonus{};
-    float area_score{};
-    float frontality{};
-    float observation_quality_penalty{};
-    float center_x{};
-    float center_y{};
-    float predicted_yaw{};
-    float measured_yaw{};
-  };
-
-  /**
-   * @brief Candidate/debug topic payload consumed by preview and record tools.
-   *
-   * Several fields are zero-filled by the simplified tracker. They remain in the
-   * payload because current BSP previews and offline recorders use this topic
-   * contract by structure size and field offsets.
-   */
-  struct CandidateDebugMsg
-  {
-    static constexpr uint8_t kMaxItems = 24;
-    static constexpr uint8_t kMaxDetections = 8;
-
-    uint64_t image_timestamp_us{};
-    uint8_t count{};
-    uint8_t selected_index{255};
-    uint8_t matched{};
-    uint8_t accepted_mode{};
-    uint8_t detection_count{};
-    int8_t preferred_adjacent_face{-1};
-    uint8_t tracked_armors_num{};
-    uint8_t has_same_number_candidate{};
-    uint8_t face_switch_enabled{};
-    uint8_t relaxed_face_switch_enabled{};
-    uint8_t odd_face_switch_enabled{};
-    uint8_t view_priority_enabled{};
-    uint8_t directional_face_switch_enabled{};
-    uint8_t tracked_face_track_id_valid{};
-    int16_t tracked_face_track_id{-1};
-    float predicted_vyaw{};
-    float max_match_distance{};
-    float max_match_yaw_diff{};
-    float relaxed_same_face_distance{};
-    float relaxed_face_switch_distance{};
-    float relaxed_face_switch_yaw_diff{};
-    float face_switch_score_deadzone{};
-    float face_switch_position_deadzone{};
-    float face_switch_yaw_deadzone{};
-    float face_switch_timeout_sec{};
-    float face_switch_cooldown_remaining{};
-    float best_same_face_score{};
-    float best_switch_face_score{};
-    uint8_t same_face_matched{};
-    uint8_t switch_face_matched{};
-    uint8_t switch_blocked_by_timeout{};
-    uint8_t switch_allowed{};
-    uint8_t ekf_update_valid{};
-    uint8_t ekf_update_mode{};
-    int8_t ekf_update_face{-1};
-    uint8_t ekf_freeze_delta_z{};
-    uint8_t ekf_range_clamped{};
-    float ekf_raw_range_m{};
-    float ekf_range_m{};
-    float ekf_mahalanobis{};
-    float ekf_pre_res_x{};
-    float ekf_pre_res_y{};
-    float ekf_pre_res_z{};
-    float ekf_pre_res_norm{};
-    float ekf_post_res_x{};
-    float ekf_post_res_y{};
-    float ekf_post_res_z{};
-    float ekf_post_res_norm{};
-    float ekf_innov_0{};
-    float ekf_innov_1{};
-    float ekf_innov_2{};
-    float ekf_innov_3{};
-    float ekf_r_0{};
-    float ekf_r_1{};
-    float ekf_r_2{};
-    float ekf_r_3{};
-    std::array<int16_t, kMaxDetections> detection_track_ids{};
-    std::array<uint8_t, kMaxDetections> detection_track_confirmed{};
-    CandidateDebugItem items[kMaxItems]{};
-  };
-
-  /**
    * @brief tracker/target_frame 的同帧目标与源图像载荷。
    *
    * 该 topic 只用于同进程视觉链路回调，语义与 detector 给 tracker 的
@@ -274,7 +148,7 @@ class ArmorTracker : public LibXR::Application
   {
     /// tracker 输入所用的 detector 同源图像/IMU 帧。
     ArmorDetectionsSourceFrame<CameraInfoV> source_frame{};
-    /// 本帧发布到 tracker/target 的目标结果。
+    /// 本帧 tracker 输出的目标结果。
     const ArmorTrackerTarget* target{nullptr};
   };
 
@@ -331,7 +205,7 @@ class ArmorTracker : public LibXR::Application
   void ArmorsCallback(DetectionMessageArg message);
 
   /**
-   * @brief Resolve and subscribe to the detector result topic.
+   * @brief Resolve and subscribe to the detector frame topic.
    */
   void SubscribeDetectorTopic();
 
@@ -341,7 +215,6 @@ class ArmorTracker : public LibXR::Application
   void SubmitPreview(const ImageFrame& image_frame,
                      const ArmorDetectorResults& detector_armors,
                      const ArmorTrackerTarget& target_msg,
-                     const CandidateDebugMsg& candidate_debug_msg,
                      const armor_tracker_detail::Output& output);
 
   Config cfg_;
@@ -352,22 +225,12 @@ class ArmorTracker : public LibXR::Application
       LibXR::Topic::Domain("armor_detector");
   LibXR::Topic::Domain tracker_domain_ = LibXR::Topic::Domain("tracker");
   LibXR::Topic armors_topic_ = LibXR::Topic();
-  LibXR::Topic info_topic_ =
-      LibXR::Topic("info", sizeof(TrackerInfo), &tracker_domain_);
-  LibXR::Topic target_topic_ =
-      LibXR::Topic("target", sizeof(ArmorTrackerTarget), &tracker_domain_);
   LibXR::Topic target_frame_topic_ =
       LibXR::Topic("target_frame", sizeof(TargetFrameMessage), &tracker_domain_);
-  LibXR::Topic ekf_points_topic_ =
-      LibXR::Topic("ekf_points", sizeof(EkfPointsMsg), &tracker_domain_);
-  LibXR::Topic candidate_debug_topic_ =
-      LibXR::Topic("candidate_debug", sizeof(CandidateDebugMsg), &tracker_domain_);
 
   const char* name_ = "armor_tracker";
   LibXR::RamFS::File cmd_file_;
   std::atomic<bool> params_is_changed_{false};
-  EkfPointsMsg ekf_msg_{};
-  CandidateDebugMsg candidate_debug_msg_{};
   ArmorTrackerTarget target_frame_target_msg_{};
   TargetFramePacket target_frame_packet_{};
   FrameSync& sync_;

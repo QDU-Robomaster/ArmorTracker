@@ -2,17 +2,17 @@
 
 `ArmorTracker` 是 Webots/Linux 自瞄链路里的目标级跟踪模块。输入来自
 `ArmorDetector` 发布的检测结果和 `CameraFrameSync` 同步帧，输出
-`tracker/target`、`tracker/ekf_points`、`tracker/info` 和轻量候选调试信息。
+`tracker/target_frame` 同帧目标包。
 云台角、发送包和开火判定由后级 Aimer 负责。
 
 ## 文件结构
 
-- `ArmorTracker.hpp`：模块入口、配置、topic payload 和运行态成员。
-- `ArmorTrackerPipeline.hpp`：detector topic 回调、消息发布和内置 preview 绘制。
+- `ArmorTracker.hpp`：模块入口、配置、`target_frame` payload 和运行态成员。
+- `ArmorTrackerPipeline.hpp`：detector topic 回调、target_frame 发布和内置 preview 绘制。
 - `ArmorTrackerCore.hpp`：detector 输入到 tracker 输出的门面适配。
 - `ArmorTrackerModel.hpp`：PnP、目标状态、整车 EKF 和跟踪状态机。
 - `ArmorTrackerMath.hpp`：角度/坐标转换和 EKF 基础工具。
-- `ArmorTrackerTarget.hpp`：`tracker/target` 发布的目标状态消息。
+- `ArmorTrackerTarget.hpp`：`tracker/target_frame` 内携带的目标状态消息。
 - `tools/tracker_replay/armor_tracker_replay.cpp`：离线重放一致性检查工具。
 
 `ArmorTracker` 主体是模板头文件实现，CMake 只暴露 include 目录；模块本身不再编译
@@ -25,8 +25,8 @@
 - `cfg.tracker`：目标过滤、进入跟踪与丢失阈值、输出坐标帧。
 - `cfg.preview`：`VisionPreview::RuntimeParam`，控制本模块自带预览线程。
 
-默认 detector topic 为 `armor_detector/armors_frame`。tracker 输出 topic 位于
-`tracker` 域。
+默认 detector topic 为 `armor_detector/armors_frame`。tracker 对外只发布
+`tracker/target_frame`。
 
 默认 `cfg.tracker.output_frame: 1` 输出右手系：`x` 向右，`y` 向前，`z` 向上；
 yaw 以前向为 0，左转为正。`output_frame: 0` 保留 tracker 内部 world frame。
@@ -42,7 +42,7 @@ pitch 的装甲板物理框。多车跟踪时，preview 会绘制所有 active �
 
 tracker 内部按装甲板编号维护多套车辆 EKF 状态，同一 slot 丢失后不会清空 EKF。
 同一帧里出现多个编号时，各编号状态独立更新；
-`tracker/target` 仍只发布一个当前选择目标。当前选择分数使用装甲板观测数量的低通值、距离、
+`tracker/target_frame` 中只携带一个当前选择目标。当前选择分数使用装甲板观测数量的低通值、距离、
 可打击面积、自旋速度和目标相对当前云台视轴的角度差，并用滞回 margin 避免输出目标抖动。
 
 ## 验证

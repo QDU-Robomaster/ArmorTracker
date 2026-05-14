@@ -239,43 +239,9 @@ void ArmorTracker<CameraInfoV>::ArmorsCallback(
 
   const auto output = tracker_.Step(image_timestamp_us, q_gimbal_to_world, inputs);
 
-  TrackerInfo info_msg{};
   ArmorTrackerTarget target_msg{};
-  CandidateDebugMsg candidate_debug{};
-  EkfPointsMsg ekf_msg{};
-  ekf_msg.image_timestamp_us = image_timestamp_us;
   target_msg.image_timestamp_us = image_timestamp_us;
   target_msg.id = ArmorNumber::INVALID;
-  candidate_debug.image_timestamp_us = image_timestamp_us;
-  candidate_debug.detection_count = static_cast<uint8_t>(
-      std::min<std::size_t>(detector_armors.size(),
-                            CandidateDebugMsg::kMaxDetections));
-  candidate_debug.count = static_cast<uint8_t>(
-      std::min<std::size_t>(detector_armors.size(), CandidateDebugMsg::kMaxItems));
-  candidate_debug.detection_track_ids.fill(static_cast<int16_t>(-1));
-  candidate_debug.detection_track_confirmed.fill(static_cast<uint8_t>(0));
-  candidate_debug.tracked_armors_num =
-      static_cast<uint8_t>(std::clamp(output.armors_num, 0, 4));
-  candidate_debug.accepted_mode =
-      output.state == "tracking"    ? 2
-      : output.state == "detecting" ? 1
-      : output.state == "temp_lost" ? 3
-                                    : 0;
-  for (uint8_t i = 0; i < candidate_debug.count; ++i)
-  {
-    const auto& armor = detector_armors[i];
-    auto& item = candidate_debug.items[i];
-    item.armor_index = i;
-    item.face_index = 0;
-    item.same_number =
-        output.has_target &&
-        static_cast<int>(armor.number) == output.selected_tag_id ? 1 : 0;
-    item.number = armor.number;
-    item.type = armor.type;
-    item.score = static_cast<float>(1.0 - armor.confidence);
-    item.center_x = armor.center.x;
-    item.center_y = armor.center.y;
-  }
 
   if (output.has_target)
   {
@@ -292,77 +258,25 @@ void ArmorTracker<CameraInfoV>::ArmorsCallback(
     target_msg.dz = output.dz;
     target_msg.tracked_face_index = output.selected_face;
     target_msg.face_switch_observed = output.jumped;
-    info_msg.position.x() = output.armor.x();
-    info_msg.position.y() = output.armor.y();
-    info_msg.position.z() = output.armor.z();
-    info_msg.yaw = output.armor_yaw;
-
-    ekf_msg.count = static_cast<uint8_t>(std::clamp(output.armors_num, 0, 4));
-    ekf_msg.center_cam =
-        LibXR::Position<double>(output.center.x(), output.center.y(),
-                                output.center.z());
-    ekf_msg.valid[0] =
-        cfg_.tracker.output_frame == 0 ? output.center.x() > 1e-6
-                                       : output.center.y() > 1e-6;
-    for (int face = 0; face < 4; ++face)
-    {
-      if (face < static_cast<int>(output.faces.size()))
-      {
-        Eigen::Vector3d face_output;
-        if (cfg_.tracker.output_frame == 0)
-        {
-          face_output = output.faces[static_cast<std::size_t>(face)].head<3>();
-        }
-        else
-        {
-          face_output = armor_tracker_detail::WorldToOutputFrame(
-              output.faces[static_cast<std::size_t>(face)].head<3>());
-        }
-        ekf_msg.armors_cam[face] =
-            LibXR::Position<double>(face_output.x(), face_output.y(),
-                                    face_output.z());
-        ekf_msg.valid[face + 1] =
-            cfg_.tracker.output_frame == 0 ? face_output.x() > 1e-6
-                                           : face_output.y() > 1e-6;
-      }
-      else
-      {
-        ekf_msg.armors_cam[face] = ekf_msg.center_cam;
-        ekf_msg.valid[face + 1] = false;
-      }
-    }
   }
   else
   {
     target_msg.tracking = false;
-    ekf_msg.count = 0;
-    for (bool& valid : ekf_msg.valid)
-    {
-      valid = false;
-    }
   }
 
   const LibXR::MicrosecondTimestamp publish_timestamp(image_timestamp_us);
-  info_topic_.Publish(info_msg, publish_timestamp);
-  candidate_debug_msg_ = candidate_debug;
-  ekf_msg_ = ekf_msg;
-  candidate_debug_topic_.Publish(candidate_debug_msg_, publish_timestamp);
-  ekf_points_topic_.Publish(ekf_msg_, publish_timestamp);
-  target_topic_.Publish(target_msg, publish_timestamp);
   target_frame_target_msg_ = target_msg;
   target_frame_packet_.source_frame = source_frame;
   target_frame_packet_.target = &target_frame_target_msg_;
   TargetFrameMessage target_frame_msg = &target_frame_packet_;
   target_frame_topic_.Publish(target_frame_msg, publish_timestamp);
-  SubmitPreview(*source_frame.image_frame, detector_armors, target_msg,
-                candidate_debug_msg_, output);
+  SubmitPreview(*source_frame.image_frame, detector_armors, target_msg, output);
 }
 
 template <CameraTypes::CameraInfo CameraInfoV>
 void ArmorTracker<CameraInfoV>::SubmitPreview(
     const ImageFrame& image_frame, const ArmorDetectorResults& detector_armors,
     const ArmorTrackerTarget& target_msg,
-    const CandidateDebugMsg& candidate_debug_msg,
     const armor_tracker_detail::Output& output)
 {
   if (!preview_.Running())
@@ -521,8 +435,7 @@ void ArmorTracker<CameraInfoV>::SubmitPreview(
 
   preview_.Submit(
       bgr_image,
-      [detector_armors, target_msg, candidate_debug_msg,
-       track_overlays](cv::Mat& canvas)
+      [detector_armors, target_msg, track_overlays](cv::Mat& canvas)
       {
         for (const auto& armor : detector_armors)
         {
@@ -682,12 +595,5 @@ void ArmorTracker<CameraInfoV>::SubmitPreview(
                     cv::FONT_HERSHEY_SIMPLEX, 0.75, cv::Scalar(40, 240, 40),
                     2, cv::LINE_AA);
 
-        const std::string debug_line =
-            "candidate count=" + std::to_string(candidate_debug_msg.count) +
-            " selected=" + std::to_string(candidate_debug_msg.selected_index) +
-            " matched=" + std::to_string(candidate_debug_msg.matched);
-        cv::putText(canvas, debug_line, cv::Point(12, 56),
-                    cv::FONT_HERSHEY_SIMPLEX, 0.58, cv::Scalar(230, 230, 230),
-                    2, cv::LINE_AA);
       });
 }
