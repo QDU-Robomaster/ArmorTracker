@@ -204,9 +204,8 @@ struct Config
       1164.3428599490444, 0.0, 366.6782312546237,
       0.0, 1164.335053894998, 270.30936434613865,
       0.0, 0.0, 1.0};
-  std::array<double, 4> camera_to_body_rotation{
-      0.7071067811865476, -0.7071067811865475, 0.0, 0.0};
-  std::array<double, 3> camera_to_body_translation{0.0, 0.0, 0.0};
+  std::array<double, 4> camera_mount_to_body_rotation{1.0, 0.0, 0.0, 0.0};
+  std::array<double, 3> camera_mount_to_body_translation{0.0, 0.0, 0.0};
 };
 
 /**
@@ -218,11 +217,33 @@ inline Eigen::Matrix3d RotationMatrixFromWxyz(
   Eigen::Quaterniond q(rotation[0], rotation[1], rotation[2], rotation[3]);
   if (!std::isfinite(q.norm()) || q.norm() < 1e-9)
   {
-    q = Eigen::Quaterniond(0.7071067811865476, -0.7071067811865475, 0.0,
-                           0.0);
+    q = Eigen::Quaterniond::Identity();
   }
   q.normalize();
   return q.toRotationMatrix();
+}
+
+/**
+ * @brief Fixed transform from OpenCV camera frame C to camera mount frame M.
+ *
+ * C uses x right, y down, z forward. M has the same origin as C and uses the
+ * public axis convention: x right, y forward, z up.
+ */
+inline Eigen::Matrix3d CameraToMountRotation()
+{
+  Eigen::Matrix3d rotation;
+  rotation << 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, -1.0, 0.0;
+  return rotation;
+}
+
+/**
+ * @brief Build the internal C-to-B rotation from the configured M-to-B mount.
+ */
+inline Eigen::Matrix3d CameraToBodyRotationFromMountExtrinsic(
+    const std::array<double, 4>& camera_mount_to_body_rotation)
+{
+  return RotationMatrixFromWxyz(camera_mount_to_body_rotation) *
+         CameraToMountRotation();
 }
 
 /**
@@ -274,11 +295,13 @@ class Solver
     {
       distort_coeffs_.at<double>(0, col) = distort_coeffs(0, col);
     }
-    R_camera_to_body_ = RotationMatrixFromWxyz(config.camera_to_body_rotation);
+    R_camera_to_body_ =
+        CameraToBodyRotationFromMountExtrinsic(
+            config.camera_mount_to_body_rotation);
     t_camera_to_body_ =
-        Eigen::Vector3d(config.camera_to_body_translation[0],
-                        config.camera_to_body_translation[1],
-                        config.camera_to_body_translation[2]);
+        Eigen::Vector3d(config.camera_mount_to_body_translation[0],
+                        config.camera_mount_to_body_translation[1],
+                        config.camera_mount_to_body_translation[2]);
   }
 
   /**

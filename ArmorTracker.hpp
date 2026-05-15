@@ -18,8 +18,8 @@ constructor_args:
       outpost_max_temp_lost_count: 75
 
     extrinsic:
-      camera_to_body:
-        rotation: [0.7071067811865476, -0.7071067811865475, 0.0, 0.0]
+      camera_mount_to_body:
+        rotation: [1.0, 0.0, 0.0, 0.0]
         translation: [0.0, 0.0, 0.0]
 
     preview:
@@ -138,23 +138,24 @@ class ArmorTracker : public LibXR::Application
     } tracker;
 
     /**
-     * @brief Camera hand-eye extrinsic expressed in public body frame B.
+     * @brief Camera mounting extrinsic expressed in public body frame B.
      */
     struct ExtrinsicParams
     {
       /**
-       * @brief Transform from OpenCV camera frame C to body frame B.
+       * @brief Transform from camera mount frame M to body frame B.
        *
        * Rotation is a unit quaternion in wxyz order and translation is in
-       * meters. The transform is p_B = R_BC * p_C + t_BC, where B is the
-       * public right-handed frame: x right, y forward, z up.
+       * meters. M shares the OpenCV camera origin and uses the same axis
+       * convention as B: x right, y forward, z up. The fixed OpenCV camera
+       * frame C to mount frame M axis conversion is handled inside
+       * ArmorTracker and is not part of this user config.
        */
-      struct CameraToBody
+      struct CameraMountToBody
       {
-        std::array<double, 4> rotation = {
-            0.7071067811865476, -0.7071067811865475, 0.0, 0.0};
+        std::array<double, 4> rotation = {1.0, 0.0, 0.0, 0.0};
         std::array<double, 3> translation = {0.0, 0.0, 0.0};
-      } camera_to_body;
+      } camera_mount_to_body;
     } extrinsic;
 
     VisionPreview::RuntimeParam preview{};

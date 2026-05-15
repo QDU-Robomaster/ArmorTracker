@@ -29,8 +29,10 @@ armor_tracker_detail::Config ArmorTracker<CameraInfoV>::BuildTrackerConfig() con
       kCameraInfo.camera_matrix[4], kCameraInfo.camera_matrix[5],
       kCameraInfo.camera_matrix[6], kCameraInfo.camera_matrix[7],
       kCameraInfo.camera_matrix[8]};
-  config.camera_to_body_rotation = cfg_.extrinsic.camera_to_body.rotation;
-  config.camera_to_body_translation = cfg_.extrinsic.camera_to_body.translation;
+  config.camera_mount_to_body_rotation =
+      cfg_.extrinsic.camera_mount_to_body.rotation;
+  config.camera_mount_to_body_translation =
+      cfg_.extrinsic.camera_mount_to_body.translation;
   return config;
 }
 
@@ -126,23 +128,23 @@ int ArmorTracker<CameraInfoV>::CommandFun(ArmorTracker<CameraInfoV>* self,
     TRACKER_STDIO_PRINTF("    outpost_max_temp_lost_count: %d\r\n",
                          self->cfg_.tracker.outpost_max_temp_lost_count);
     TRACKER_STDIO_PRINT("  extrinsic:\r\n");
-    TRACKER_STDIO_PRINT("    camera_to_body:\r\n");
+    TRACKER_STDIO_PRINT("    camera_mount_to_body:\r\n");
     TRACKER_STDIO_PRINT("      rotation:\r\n");
     TRACKER_STDIO_PRINTF("        - %f\r\n",
-                         self->cfg_.extrinsic.camera_to_body.rotation[0]);
+                         self->cfg_.extrinsic.camera_mount_to_body.rotation[0]);
     TRACKER_STDIO_PRINTF("        - %f\r\n",
-                         self->cfg_.extrinsic.camera_to_body.rotation[1]);
+                         self->cfg_.extrinsic.camera_mount_to_body.rotation[1]);
     TRACKER_STDIO_PRINTF("        - %f\r\n",
-                         self->cfg_.extrinsic.camera_to_body.rotation[2]);
+                         self->cfg_.extrinsic.camera_mount_to_body.rotation[2]);
     TRACKER_STDIO_PRINTF("        - %f\r\n",
-                         self->cfg_.extrinsic.camera_to_body.rotation[3]);
+                         self->cfg_.extrinsic.camera_mount_to_body.rotation[3]);
     TRACKER_STDIO_PRINT("      translation:\r\n");
     TRACKER_STDIO_PRINTF("        - %f\r\n",
-                         self->cfg_.extrinsic.camera_to_body.translation[0]);
+                         self->cfg_.extrinsic.camera_mount_to_body.translation[0]);
     TRACKER_STDIO_PRINTF("        - %f\r\n",
-                         self->cfg_.extrinsic.camera_to_body.translation[1]);
+                         self->cfg_.extrinsic.camera_mount_to_body.translation[1]);
     TRACKER_STDIO_PRINTF("        - %f\r\n",
-                         self->cfg_.extrinsic.camera_to_body.translation[2]);
+                         self->cfg_.extrinsic.camera_mount_to_body.translation[2]);
     return 0;
   }
 
@@ -287,12 +289,12 @@ void ArmorTracker<CameraInfoV>::ArmorsCallback(
   target_frame_packet_.target = &target_frame_target_msg_;
 
   const Eigen::Matrix3d R_camera_to_body =
-      armor_tracker_detail::RotationMatrixFromWxyz(
-          cfg_.extrinsic.camera_to_body.rotation);
+      armor_tracker_detail::CameraToBodyRotationFromMountExtrinsic(
+          cfg_.extrinsic.camera_mount_to_body.rotation);
   const Eigen::Vector3d t_camera_to_body(
-      cfg_.extrinsic.camera_to_body.translation[0],
-      cfg_.extrinsic.camera_to_body.translation[1],
-      cfg_.extrinsic.camera_to_body.translation[2]);
+      cfg_.extrinsic.camera_mount_to_body.translation[0],
+      cfg_.extrinsic.camera_mount_to_body.translation[1],
+      cfg_.extrinsic.camera_mount_to_body.translation[2]);
   const Eigen::Matrix3d R_output_to_camera =
       R_camera_to_body.transpose();
   const Eigen::Vector3d t_output_to_camera =
