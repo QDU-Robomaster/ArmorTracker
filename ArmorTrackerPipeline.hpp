@@ -295,8 +295,10 @@ void ArmorTracker<CameraInfoV>::ArmorsCallback(
       cfg_.extrinsic.camera_mount_to_body.translation[0],
       cfg_.extrinsic.camera_mount_to_body.translation[1],
       cfg_.extrinsic.camera_mount_to_body.translation[2]);
+  const Eigen::Matrix3d R_body_to_world =
+      armor_tracker_detail::BodyToWorldRotationFromImu(q_body_to_world);
   const Eigen::Matrix3d R_output_to_camera =
-      R_camera_to_body.transpose();
+      R_camera_to_body.transpose() * R_body_to_world.transpose();
   const Eigen::Vector3d t_output_to_camera =
       -R_camera_to_body.transpose() * t_camera_to_body;
   for (int row = 0; row < 3; ++row)

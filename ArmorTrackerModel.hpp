@@ -247,6 +247,17 @@ inline Eigen::Matrix3d CameraToBodyRotationFromMountExtrinsic(
 }
 
 /**
+ * @brief Convert the published gimbal IMU attitude into tracker inertial axes.
+ */
+inline Eigen::Matrix3d BodyToWorldRotationFromImu(const Eigen::Quaterniond& q)
+{
+  Eigen::Matrix3d basis = Eigen::Matrix3d::Identity();
+  basis(0, 0) = -1.0;
+  basis(1, 1) = -1.0;
+  return basis * q.toRotationMatrix() * basis;
+}
+
+/**
  * @brief Build an armor-to-frame rotation from public yaw and armor tilt.
  */
 inline Eigen::Matrix3d ArmorRotationFromYaw(double yaw, double tilt)
@@ -309,7 +320,7 @@ class Solver
    */
   void SetRBodyToWorld(const Eigen::Quaterniond& q)
   {
-    R_body_to_world_ = q.toRotationMatrix();
+    R_body_to_world_ = BodyToWorldRotationFromImu(q);
   }
 
   /**

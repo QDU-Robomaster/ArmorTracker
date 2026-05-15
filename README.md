@@ -33,10 +33,12 @@
 默认 detector topic 为 `armor_detector/armors_frame`。tracker 对外只发布
 `tracker/target_frame`。
 
-输出统一使用当前公开本体系 `B`：右手系，`x` 向右，`y` 向前，`z` 向上；
-yaw 以前向为 0，左转为正。内部 EKF 使用同一轴约定的惯性 `W` 帧做跨帧稳定，
-发布 `ArmorTrackerTarget` 前显式转回当前 `B`。历史 tracker `x` 前、`y` 左坐标基
-已经不再作为配置或输出选项暴露。
+输出统一使用与公开本体系 `B` 同向的惯性解算轴 `O`：右手系，`x` 向右，
+`y` 向前，`z` 向上；yaw 以前向为 0，左转为正。`O` 的轴向不随当前云台 yaw
+转动，因此后级 Aimer 从 `tracker/target_frame` 解出的 `host/target_euler.yaw`
+是下位机可直接消费的绝对云台目标角。preview 使用 `output_to_camera` 把 `O`
+中的目标几何投回同帧相机图像。历史 tracker `x` 前、`y` 左坐标基已经不再作为
+配置或输出选项暴露。
 
 ## Preview
 

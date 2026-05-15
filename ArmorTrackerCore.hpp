@@ -62,7 +62,7 @@ struct TrackOutput
 };
 
 /**
- * @brief Tracker result prepared for public target output and preview drawing.
+ * @brief Tracker result prepared for public-axis target output and preview drawing.
  */
 struct Output
 {
@@ -117,24 +117,24 @@ inline bool DetectorTypeIsLarge(const InputArmor& input)
 }
 
 /**
- * @brief Convert an inertial W-frame yaw into the current public body frame B.
+ * @brief Convert an inertial W-frame yaw into the public output axes.
  */
-inline double WorldYawToBodyYaw(double yaw_world, double body_yaw_world)
+inline double WorldYawToOutputYaw(double yaw_world, double output_yaw_world)
 {
-  return LimitRad(yaw_world - body_yaw_world);
+  return LimitRad(yaw_world - output_yaw_world);
 }
 
 /**
- * @brief Convert an inertial W-frame armor face pose into current B axes.
+ * @brief Convert an inertial W-frame armor face pose into public output axes.
  */
-inline Eigen::Vector4d WorldFaceToBodyFace(
-    const Eigen::Vector4d& face_world, const Eigen::Matrix3d& R_world_to_body,
-    double body_yaw_world)
+inline Eigen::Vector4d WorldFaceToOutputFace(
+    const Eigen::Vector4d& face_world, const Eigen::Matrix3d& R_world_to_output,
+    double output_yaw_world)
 {
-  const Eigen::Vector3d position_body =
-      R_world_to_body * face_world.head<3>();
-  return {position_body.x(), position_body.y(), position_body.z(),
-          WorldYawToBodyYaw(face_world[3], body_yaw_world)};
+  const Eigen::Vector3d position_output =
+      R_world_to_output * face_world.head<3>();
+  return {position_output.x(), position_output.y(), position_output.z(),
+          WorldYawToOutputYaw(face_world[3], output_yaw_world)};
 }
 
 /**
@@ -223,7 +223,7 @@ class TrackerCore
    * @param timestamp_us Sensor timestamp of the detector frame.
    * @param q_body_to_world Body-to-world IMU orientation in public B axes.
    * @param inputs Detector armors from the same image frame.
-   * @return Tracker output in the public right-handed B-axis frame.
+   * @return Tracker output in the public right-handed inertial B-axis frame.
    */
   Output Step(uint64_t timestamp_us, const Eigen::Quaterniond& q_body_to_world,
               const std::vector<InputArmor>& inputs)
@@ -234,10 +234,9 @@ class TrackerCore
       q = Eigen::Quaterniond::Identity();
     }
     q.normalize();
-    const Eigen::Matrix3d R_body_to_world = q.toRotationMatrix();
-    const Eigen::Matrix3d R_world_to_body = R_body_to_world.transpose();
-    const double body_yaw_world = BearingYaw(R_body_to_world.col(1));
     solver_->SetRBodyToWorld(q);
+    const Eigen::Matrix3d R_world_to_output = Eigen::Matrix3d::Identity();
+    constexpr double output_yaw_world = 0.0;
 
     std::list<Armor> armors;
     for (const auto& input : inputs)
@@ -274,7 +273,7 @@ class TrackerCore
         selected_snapshot = &snapshot;
       }
       out.tracks.push_back(
-          MakeTrackOutput(snapshot, R_world_to_body, body_yaw_world));
+          MakeTrackOutput(snapshot, R_world_to_output, output_yaw_world));
     }
     if (selected_snapshot == nullptr)
     {
@@ -293,17 +292,17 @@ class TrackerCore
     out.armors_num = static_cast<int>(out.faces_world.size());
     out.center_world = {x[0], x[2], x[4]};
     out.yaw_world = LimitRad(x[6]);
-    out.center = R_world_to_body * out.center_world;
-    out.velocity = R_world_to_body * Eigen::Vector3d(x[1], x[3], x[5]);
-    out.yaw = WorldYawToBodyYaw(out.yaw_world, body_yaw_world);
+    out.center = R_world_to_output * out.center_world;
+    out.velocity = R_world_to_output * Eigen::Vector3d(x[1], x[3], x[5]);
+    out.yaw = WorldYawToOutputYaw(out.yaw_world, output_yaw_world);
     out.vyaw = x[7];
     out.dz = x[10];
     if (target.last_id >= 0 &&
         target.last_id < static_cast<int>(out.faces_world.size()))
     {
-      const auto face = WorldFaceToBodyFace(
+      const auto face = WorldFaceToOutputFace(
           out.faces_world[static_cast<std::size_t>(target.last_id)],
-          R_world_to_body, body_yaw_world);
+          R_world_to_output, output_yaw_world);
       out.armor = face.head<3>();
       out.armor_yaw = face[3];
     }
@@ -341,8 +340,8 @@ class TrackerCore
    * @brief Convert an internal target snapshot to public output-frame fields.
    */
   TrackOutput MakeTrackOutput(const Tracker::TrackSnapshot& snapshot,
-                              const Eigen::Matrix3d& R_world_to_body,
-                              double body_yaw_world) const
+                              const Eigen::Matrix3d& R_world_to_output,
+                              double output_yaw_world) const
   {
     const Target& target = snapshot.target;
     TrackOutput out;
@@ -359,9 +358,9 @@ class TrackerCore
     out.radius_odd = x[8] + x[9];
     out.faces_world = target.ArmorXyzaList();
     out.armors_num = static_cast<int>(out.faces_world.size());
-    out.center = R_world_to_body * out.center_world;
-    out.velocity = R_world_to_body * Eigen::Vector3d(x[1], x[3], x[5]);
-    out.yaw = WorldYawToBodyYaw(out.yaw_world, body_yaw_world);
+    out.center = R_world_to_output * out.center_world;
+    out.velocity = R_world_to_output * Eigen::Vector3d(x[1], x[3], x[5]);
+    out.yaw = WorldYawToOutputYaw(out.yaw_world, output_yaw_world);
     out.vyaw = x[7];
     out.dz = x[10];
     return out;

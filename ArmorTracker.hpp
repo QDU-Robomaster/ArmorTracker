@@ -172,7 +172,7 @@ class ArmorTracker : public LibXR::Application
   {
     /// tracker 输入所用的 detector 同源图像/IMU 帧。
     ArmorDetectionsSourceFrame<CameraInfoV> source_frame{};
-    /// 本帧 tracker 输出的目标结果，使用当前公开本体系 B。
+    /// 本帧 tracker 输出的目标结果，使用与公开 B 系同向的惯性输出轴 O。
     const ArmorTrackerTarget* target{nullptr};
     /// output 坐标到 OpenCV camera 坐标的旋转，row-major，满足 p_C = R_CO p_O + t_CO。
     std::array<double, 9> output_to_camera_rotation{
