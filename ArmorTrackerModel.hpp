@@ -248,13 +248,21 @@ inline Eigen::Matrix3d CameraToBodyRotationFromMountExtrinsic(
 
 /**
  * @brief Convert the published gimbal IMU attitude into tracker inertial axes.
+ *
+ * The `gimbal_quat` ABI is already expressed as the public body frame B
+ * attitude (`x` right, `y` forward, `z` up). Board-specific IMU mounting
+ * corrections belong before AHRS, e.g. in the BMI088 rotation config, so the
+ * tracker must not add another fixed basis rotation here.
  */
 inline Eigen::Matrix3d BodyToWorldRotationFromImu(const Eigen::Quaterniond& q)
 {
-  Eigen::Matrix3d basis = Eigen::Matrix3d::Identity();
-  basis(0, 0) = -1.0;
-  basis(1, 1) = -1.0;
-  return basis * q.toRotationMatrix() * basis;
+  Eigen::Quaterniond normalized = q;
+  if (!std::isfinite(normalized.norm()) || normalized.norm() < 1e-9)
+  {
+    normalized = Eigen::Quaterniond::Identity();
+  }
+  normalized.normalize();
+  return normalized.toRotationMatrix();
 }
 
 /**

@@ -13,6 +13,8 @@
 - `ArmorTrackerModel.hpp`：PnP、目标状态、整车 EKF 和跟踪状态机。
 - `ArmorTrackerMath.hpp`：角度/坐标转换和 EKF 基础工具。
 - `ArmorTrackerTarget.hpp`：`tracker/target_frame` 内携带的目标状态消息。
+- `tools/coordinate_semantics_check.cpp`：公开坐标系姿态语义回归检查，防止
+  `host/gimbal_quat` 被额外固定旋转翻转 roll/pitch。
 - `tools/tracker_replay/armor_tracker_replay.cpp`：离线重放一致性检查工具。
 
 `ArmorTracker` 主体是模板头文件实现，CMake 只暴露 include 目录；模块本身不再编译
@@ -60,3 +62,7 @@ tracker 内部按装甲板编号维护多套车辆 EKF 状态，同一 slot 丢�
 需要使用不按编号过滤的 replay，确认同帧多编号输入会独立更新各 slot 并只输出当前选中的目标。
 BSP 验证需要生成当前 `cfg.tracker` / `cfg.preview` 结构对应的 `User/xrobot_main.hpp` 后再构建
 Linux 和 Webots 目标。
+
+坐标语义回归需要至少覆盖 `tools/coordinate_semantics_check.cpp`：
+`host/gimbal_quat` 已经是公开本体系 `B` 的姿态，Tracker 只能归一化后直接转矩阵；
+任何额外的固定 basis 旋转都会让 roll/pitch 反号，并污染输出目标高度。
