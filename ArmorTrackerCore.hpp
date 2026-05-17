@@ -2,7 +2,7 @@
 
 /**
  * @file ArmorTrackerCore.hpp
- * @brief 将 detector 装甲板结果转为 tracker 输出。
+ * @brief Header-only facade that adapts detector armors into tracker outputs.
  */
 
 #include <algorithm>
@@ -25,7 +25,7 @@
 namespace armor_tracker_detail
 {
 /**
- * @brief tracker core 使用的 detector 装甲板观测。
+ * @brief Detector armor observation consumed by the tracker core.
  */
 struct InputArmor
 {
@@ -38,7 +38,7 @@ struct InputArmor
 };
 
 /**
- * @brief 用于 preview 和调试绘制的一个有效车辆状态。
+ * @brief One active tracked vehicle slot prepared for preview/debug drawing.
  */
 struct TrackOutput
 {
@@ -62,7 +62,7 @@ struct TrackOutput
 };
 
 /**
- * @brief tracker 单帧输出结果，用于目标输出和 preview 绘制。
+ * @brief Tracker result prepared for public-axis target output and preview drawing.
  */
 struct Output
 {
@@ -90,7 +90,7 @@ struct Output
 };
 
 /**
- * @brief 将 detector 数字枚举转为 tracker 内部装甲板 ID。
+ * @brief Convert detector number enum values to the internal armor-name id.
  */
 inline int DetectorNumberToModelNameId(int number)
 {
@@ -110,7 +110,7 @@ inline int DetectorNumberToModelNameId(int number)
 }
 
 /**
- * @brief 判断 detector 装甲板是否使用大装甲几何尺寸。
+ * @brief Return whether a detector armor should use the large armor geometry.
  */
 inline bool DetectorTypeIsLarge(const InputArmor& input)
 {
@@ -118,7 +118,7 @@ inline bool DetectorTypeIsLarge(const InputArmor& input)
 }
 
 /**
- * @brief 将惯性 W 系 yaw 转为公开输出轴约定。
+ * @brief Convert an inertial W-frame yaw into the public output axes.
  */
 inline double WorldYawToOutputYaw(double yaw_world, double output_yaw_world)
 {
@@ -126,7 +126,7 @@ inline double WorldYawToOutputYaw(double yaw_world, double output_yaw_world)
 }
 
 /**
- * @brief 将惯性 W 系装甲面位姿转为公开输出轴约定。
+ * @brief Convert an inertial W-frame armor face pose into public output axes.
  */
 inline Eigen::Vector4d WorldFaceToOutputFace(
     const Eigen::Vector4d& face_world, const Eigen::Matrix3d& R_world_to_output,
@@ -139,7 +139,7 @@ inline Eigen::Vector4d WorldFaceToOutputFace(
 }
 
 /**
- * @brief 将内部装甲板 ID 转回 detector 数字枚举。
+ * @brief Convert an internal armor name back to the detector number enum value.
  */
 inline int ModelNameToDetectorNumber(ArmorName name)
 {
@@ -168,7 +168,7 @@ inline int ModelNameToDetectorNumber(ArmorName name)
 }
 
 /**
- * @brief 由 detector 输出生成内部装甲板观测。
+ * @brief Build an internal armor observation from detector output.
  */
 inline Armor MakeTrackedArmor(const InputArmor& input)
 {
@@ -188,18 +188,18 @@ inline Armor MakeTrackedArmor(const InputArmor& input)
 }
 
 /**
- * @brief 模块和 replay 工具共用的有状态 tracker core。
+ * @brief Stateful facade used by the module and replay tool.
  */
 class TrackerCore
 {
  public:
   /**
-   * @brief 使用默认配置构造 tracker core。
+   * @brief Construct with default tracker configuration.
    */
   TrackerCore() { Configure(config_); }
 
   /**
-   * @brief 构造 tracker core 并设置配置。
+   * @brief Construct and configure the tracker core.
    */
   explicit TrackerCore(const Config& config)
   {
@@ -207,7 +207,7 @@ class TrackerCore
   }
 
   /**
-   * @brief 使用新配置重置 tracker core。
+   * @brief Reset the core using a new configuration.
    */
   void Configure(const Config& config)
   {
@@ -219,7 +219,7 @@ class TrackerCore
   }
 
   /**
-   * @brief 使用一帧 detector 结果推进 tracker 状态。
+   * @brief Advance tracker state with one detector frame.
    *
    * @param timestamp_us Sensor timestamp of the detector frame.
    * @param q_body_to_world Body-to-world IMU orientation in public B axes.
@@ -312,7 +312,7 @@ class TrackerCore
   }
 
   /**
-   * @brief 使用当前解算位姿重投影一个模型装甲面。
+   * @brief Reproject one modeled armor face using the current solver pose.
    *
    * The solver pose is updated by Step() before preview submission, so this
    * keeps preview projection on the same geometry path as tracker yaw fitting.
@@ -331,7 +331,7 @@ class TrackerCore
   }
 
   /**
-   * @brief 为 preview 绘制重投影一个装甲面。
+   * @brief Reproject one armor face for preview drawing.
    */
   std::vector<cv::Point2f> ReprojectPreviewArmorFace(
       const Eigen::Vector3d& center_world, double yaw_world, int armor_type,
@@ -355,7 +355,7 @@ class TrackerCore
   std::chrono::steady_clock::time_point base_tp_{};
 
   /**
-   * @brief 将内部目标快照转为公开输出坐标字段。
+   * @brief Convert an internal target snapshot to public output-frame fields.
    */
   TrackOutput MakeTrackOutput(const Tracker::TrackSnapshot& snapshot,
                               const Eigen::Matrix3d& R_world_to_output,
@@ -385,7 +385,7 @@ class TrackerCore
   }
 
   /**
-   * @brief 生成内部装甲板观测前检查 detector 字段。
+   * @brief Validate detector fields before constructing an internal armor.
    */
   static bool ValidInput(const InputArmor& input)
   {

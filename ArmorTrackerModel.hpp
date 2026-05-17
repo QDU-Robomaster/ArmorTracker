@@ -2,7 +2,7 @@
 
 /**
  * @file ArmorTrackerModel.hpp
- * @brief 装甲板几何、目标状态和 tracker 状态机。
+ * @brief Internal armor geometry, target state, and tracker state machine.
  */
 
 #include <algorithm>
@@ -29,7 +29,7 @@
 namespace armor_tracker_detail
 {
 /**
- * @brief PnP 几何使用的装甲板尺寸类型。
+ * @brief Internal armor size labels used by PnP geometry.
  */
 enum ArmorType
 {
@@ -38,7 +38,7 @@ enum ArmorType
 };
 
 /**
- * @brief tracker 模型使用的装甲板身份类型。
+ * @brief Internal armor identity labels used by the tracker model.
  */
 enum ArmorName
 {
@@ -54,13 +54,13 @@ enum ArmorName
 };
 
 /**
- * @brief 持久车辆轨道数量，不包含无效装甲板类型。
+ * @brief Number of persistent vehicle tracks, excluding invalid armor labels.
  */
 inline constexpr std::size_t kTrackSlotCount =
     static_cast<std::size_t>(ArmorName::NOT_ARMOR);
 
 /**
- * @brief 将 detector 数字枚举转为内部装甲板名称。
+ * @brief Convert a detector number enum value to the internal armor name.
  */
 inline ArmorName ArmorNameFromDetectorNumber(int number)
 {
@@ -84,7 +84,7 @@ inline ArmorName ArmorNameFromDetectorNumber(int number)
 }
 
 /**
- * @brief 返回装甲板名称对应的持久轨道槽位。
+ * @brief Return the persistent track slot index for an armor name.
  */
 inline int TrackSlotIndex(ArmorName name)
 {
@@ -125,7 +125,7 @@ inline int SignNonZero(double value)
 }
 
 /**
- * @brief detector 装甲板的目标选择优先级。
+ * @brief Target selection priority for a detected armor.
  */
 enum ArmorPriority
 {
@@ -137,7 +137,7 @@ enum ArmorPriority
 };
 
 /**
- * @brief 带 3D 位姿解算结果的内部装甲板观测。
+ * @brief Internal armor observation enriched with solved 3D pose.
  */
 struct Armor
 {
@@ -159,12 +159,12 @@ struct Armor
   double yaw_raw{};
 
   /**
-   * @brief 构造空装甲板观测。
+   * @brief Construct an empty armor observation.
    */
   Armor() = default;
 
   /**
-   * @brief 由 detector 几何结果构造装甲板观测。
+   * @brief Build an armor observation from detector geometry.
    */
   Armor(int num_id, float confidence_in, const cv::Rect& box_in,
         std::vector<cv::Point2f> armor_keypoints)
@@ -198,7 +198,7 @@ struct Armor
 };
 
 /**
- * @brief 将装甲板身份映射到 tracker 目标选择优先级。
+ * @brief Map armor identity to tracker target-selection priority.
  */
 inline ArmorPriority PriorityFromName(ArmorName name)
 {
@@ -223,7 +223,7 @@ inline ArmorPriority PriorityFromName(ArmorName name)
 }
 
 /**
- * @brief tracker 内部配置。
+ * @brief Internal tracker configuration independent of module/runtime wiring.
  */
 struct Config
 {
@@ -241,7 +241,7 @@ struct Config
 };
 
 /**
- * @brief 将 wxyz 四元数转为归一化旋转矩阵。
+ * @brief Convert a wxyz quaternion to a normalized rotation matrix.
  */
 inline Eigen::Matrix3d RotationMatrixFromWxyz(
     const std::array<double, 4>& rotation)
@@ -256,10 +256,10 @@ inline Eigen::Matrix3d RotationMatrixFromWxyz(
 }
 
 /**
- * @brief OpenCV 相机系 C 到相机安装系 M 的固定轴变换。
+ * @brief Fixed transform from OpenCV camera frame C to camera mount frame M.
  *
- * C 使用 x 向右、y 向下、z 向前。M 与 C 同原点，轴向使用公开约定：
- * x 向右、y 向前、z 向上。
+ * C uses x right, y down, z forward. M has the same origin as C and uses the
+ * public axis convention: x right, y forward, z up.
  */
 inline Eigen::Matrix3d CameraToMountRotation()
 {
@@ -269,7 +269,7 @@ inline Eigen::Matrix3d CameraToMountRotation()
 }
 
 /**
- * @brief 由配置的 M 到 B 安装旋转生成 C 到 B 的内部旋转。
+ * @brief Build the internal C-to-B rotation from the configured M-to-B mount.
  */
 inline Eigen::Matrix3d CameraToBodyRotationFromMountExtrinsic(
     const std::array<double, 4>& camera_mount_to_body_rotation)
@@ -279,11 +279,12 @@ inline Eigen::Matrix3d CameraToBodyRotationFromMountExtrinsic(
 }
 
 /**
- * @brief 将发布的云台 IMU 姿态转为 tracker 惯性解算轴。
+ * @brief Convert the published gimbal IMU attitude into tracker inertial axes.
  *
- * `gimbal_quat` 已经按公开本体系 B 表达：x 向右，y 向前，z 向上。
- * 单板 IMU 安装修正应在 AHRS 前完成，例如 BMI088 rotation 配置。
- * tracker 这里只能归一化四元数，不能再叠加固定轴变换。
+ * The `gimbal_quat` ABI is already expressed as the public body frame B
+ * attitude (`x` right, `y` forward, `z` up). Board-specific IMU mounting
+ * corrections belong before AHRS, e.g. in the BMI088 rotation config, so the
+ * tracker must not add another fixed basis rotation here.
  */
 inline Eigen::Matrix3d BodyToWorldRotationFromImu(const Eigen::Quaterniond& q)
 {
@@ -297,7 +298,7 @@ inline Eigen::Matrix3d BodyToWorldRotationFromImu(const Eigen::Quaterniond& q)
 }
 
 /**
- * @brief 由公开 yaw 和装甲板倾角生成装甲板旋转。
+ * @brief Build an armor-to-frame rotation from public yaw and armor tilt.
  */
 inline Eigen::Matrix3d ArmorRotationFromYaw(double yaw, double tilt)
 {
@@ -314,7 +315,7 @@ inline Eigen::Matrix3d ArmorRotationFromYaw(double yaw, double tilt)
 }
 
 /**
- * @brief 从装甲板旋转中提取公开坐标系 yaw。
+ * @brief Extract public-frame yaw from an armor rotation.
  */
 inline double ArmorYawFromRotation(const Eigen::Matrix3d& rotation)
 {
@@ -322,13 +323,13 @@ inline double ArmorYawFromRotation(const Eigen::Matrix3d& rotation)
 }
 
 /**
- * @brief 将 detector 装甲板角点解算为相机、本体和惯性位姿。
+ * @brief Solves detector armor corners into camera/body/world pose estimates.
  */
 class Solver
 {
  public:
   /**
-   * @brief 使用相机内参和手眼参数构造位姿解算器。
+   * @brief Construct a pose solver from camera and hand-eye parameters.
    */
   explicit Solver(const Config& config)
       : R_camera_to_body_(Eigen::Matrix3d::Identity()),
@@ -355,7 +356,7 @@ class Solver
   }
 
   /**
-   * @brief 更新 PnP 后处理使用的本体到惯性姿态。
+   * @brief Update the body-to-world orientation used by PnP postprocessing.
    */
   void SetRBodyToWorld(const Eigen::Quaterniond& q)
   {
@@ -363,7 +364,7 @@ class Solver
   }
 
   /**
-   * @brief 解算 detector 装甲板位姿并填充其 3D 字段。
+   * @brief Solve a detector armor pose and fill its 3D fields in-place.
    */
   void Solve(Armor& armor) const
   {
@@ -401,7 +402,7 @@ class Solver
   }
 
   /**
-   * @brief 将惯性坐标中的装甲面投影到图像像素。
+   * @brief Project an armor face from world coordinates into image pixels.
    */
   std::vector<cv::Point2f> ReprojectArmor(const Eigen::Vector3d& xyz_in_world,
                                           double yaw, ArmorType type,
@@ -434,7 +435,7 @@ class Solver
   }
 
   /**
-   * @brief 投影 preview 装甲面，不改变 PnP/yaw 拟合模型。
+   * @brief Project a preview face without changing the PnP/yaw fitting model.
    */
   std::vector<cv::Point2f> ReprojectPreviewArmor(
       const Eigen::Vector3d& xyz_in_world, double yaw, ArmorType type,
@@ -451,7 +452,7 @@ class Solver
   Eigen::Matrix3d R_body_to_world_;
 
   /**
-   * @brief 返回大装甲 PnP 物点。
+   * @brief Return object points for large armor PnP.
    */
   static const std::vector<cv::Point3f>& BigArmorPoints()
   {
@@ -464,7 +465,7 @@ class Solver
   }
 
   /**
-   * @brief 返回小装甲 PnP 物点。
+   * @brief Return object points for small armor PnP.
    */
   static const std::vector<cv::Point3f>& SmallArmorPoints()
   {
@@ -477,7 +478,7 @@ class Solver
   }
 
   /**
-   * @brief 返回前哨站装甲 PnP 物点。
+   * @brief Return object points for outpost armor PnP.
    */
   static const std::vector<cv::Point3f>& OutpostPnpPoints()
   {
@@ -490,7 +491,7 @@ class Solver
   }
 
   /**
-   * @brief 通过最小化重投影误差修正装甲板 yaw。
+   * @brief Refine armor yaw by minimizing reprojection error.
    */
   void OptimizeYaw(Armor& armor) const
   {
@@ -517,7 +518,7 @@ class Solver
   }
 
   /**
-   * @brief 返回候选 yaw 下装甲板的重投影误差。
+   * @brief Return reprojection error for an armor under a candidate yaw.
    */
   double ArmorReprojectionError(const Armor& armor, double yaw,
                                 const double&) const
@@ -534,7 +535,7 @@ class Solver
 };
 
 /**
- * @brief 单个被跟踪机器人的扩展目标状态。
+ * @brief Extended target state for a single tracked robot.
  */
 class Target
 {
@@ -546,7 +547,7 @@ class Target
   int last_id{};
 
   /**
-   * @brief 返回当前前哨站高度相位，用于展开三块装甲。
+   * @brief 返回当前前哨站高度相位，供下游展开三块装甲。
    */
   int OutpostHeightPhase() const { return outpost_height_phase_; }
 
@@ -556,12 +557,12 @@ class Target
   bool OutpostHeightPhaseValid() const { return outpost_height_phase_valid_; }
 
   /**
-   * @brief 构造空目标状态。
+   * @brief Construct an empty target state.
    */
   Target() = default;
 
   /**
-   * @brief 使用首个选中装甲板观测初始化目标。
+   * @brief Initialize a target from the first selected armor observation.
    */
   Target(const Armor& armor, std::chrono::steady_clock::time_point t,
          double radius, int armor_num, const Eigen::VectorXd& P0_dig,
@@ -618,7 +619,7 @@ class Target
   }
 
   /**
-   * @brief 将目标状态预测到指定时刻。
+   * @brief Predict target state to a wall-clock time point.
    */
   void Predict(std::chrono::steady_clock::time_point t)
   {
@@ -628,7 +629,7 @@ class Target
   }
 
   /**
-   * @brief 按经过时间预测目标状态，单位 s。
+   * @brief Predict target state by an elapsed time in seconds.
    */
   void Predict(double dt)
   {
@@ -689,7 +690,7 @@ class Target
   }
 
   /**
-   * @brief 使用一个匹配的装甲板观测更新目标状态。
+   * @brief Update target state with one matching armor observation.
    */
   void Update(const Armor& armor)
   {
@@ -743,17 +744,17 @@ class Target
   }
 
   /**
-   * @brief 返回 EKF 状态向量副本。
+   * @brief Return a copy of the EKF state vector.
    */
   Eigen::VectorXd EkfX() const { return ekf_.x; }
 
   /**
-   * @brief 返回 EKF 对象，用于调试指标和健康检查。
+   * @brief Return the EKF object for debug metrics and health checks.
    */
   const ExtendedKalmanFilter& Ekf() const { return ekf_; }
 
   /**
-   * @brief 返回惯性 W 系下的模型装甲面中心和 yaw。
+   * @brief Return the modeled armor face centers and yaws in inertial W frame.
    */
   std::vector<Eigen::Vector4d> ArmorXyzaList() const
   {
@@ -814,7 +815,7 @@ class Target
   }
 
   /**
-   * @brief 返回输出使用的高度参数。
+   * @brief 返回输出给下游的高度参数。
    */
   double DzForOutput() const
   {
@@ -822,7 +823,7 @@ class Target
   }
 
   /**
-   * @brief 检查估计几何是否超出允许半径范围。
+   * @brief Check whether estimated geometry has left the accepted radius range.
    */
   bool Diverged() const
   {
@@ -832,7 +833,7 @@ class Target
   }
 
   /**
-   * @brief 更新并返回目标收敛标志。
+   * @brief Update and return the target convergence flag.
    */
   bool Converged()
   {
@@ -945,7 +946,7 @@ class Target
   }
 
   /**
-   * @brief 使用 yaw、仰角、距离和装甲板 yaw 观测更新 EKF。
+   * @brief Update EKF with yaw, elevation, distance, and armor yaw measurement.
    */
   void UpdateYpda(const Armor& armor, int id)
   {
@@ -1021,7 +1022,7 @@ class Target
   }
 
   /**
-   * @brief 由 EKF 状态计算一个模型装甲面中心。
+   * @brief Calculate one modeled armor center from an EKF state.
    */
   Eigen::Vector3d HArmorXyz(const Eigen::VectorXd& x, int id) const
   {
@@ -1039,7 +1040,7 @@ class Target
   }
 
   /**
-   * @brief 返回一个模型装甲面的观测雅可比矩阵。
+   * @brief Return measurement Jacobian for one modeled armor face.
    */
   Eigen::MatrixXd HJacobian(const Eigen::VectorXd& x, int id) const
   {
@@ -1079,13 +1080,13 @@ class Target
 };
 
 /**
- * @brief 基于装甲板位姿观测运行的目标状态机。
+ * @brief Target state machine operating on solved armor observations.
  */
 class Tracker
 {
  public:
   /**
-   * @brief 使用位姿解算器构造 tracker。
+   * @brief Construct a tracker over a pose solver.
    */
   Tracker(const Config& config, Solver& solver)
       : solver_(solver),
@@ -1103,12 +1104,12 @@ class Tracker
   }
 
   /**
-   * @brief 返回当前状态机状态字符串。
+   * @brief Return the current state-machine state string.
    */
   const std::string& State() const { return state_; }
 
   /**
-   * @brief 一个有效目标槽位的快照，用于 preview 和调试输出。
+   * @brief Snapshot of one active target slot for preview and debug output.
    */
   struct TrackSnapshot
   {
@@ -1119,7 +1120,7 @@ class Tracker
   };
 
   /**
-   * @brief 返回最近一次跟踪后的有效目标槽位。
+   * @brief Return active target slots after the latest tracking step.
    */
   std::vector<TrackSnapshot> Snapshots() const
   {
@@ -1139,7 +1140,7 @@ class Tracker
   }
 
   /**
-   * @brief 对候选装甲板执行一次跟踪。
+   * @brief Run one tracking step over candidate armors.
    */
   std::list<Target> Track(std::list<Armor>& armors,
                           std::chrono::steady_clock::time_point t)
@@ -1187,7 +1188,7 @@ class Tracker
 
  private:
   /**
-   * @brief 单个车辆编号的持久状态和选择指标。
+   * @brief Persistent state and selection metrics for one vehicle number.
    */
   struct TrackSlot
   {
@@ -1219,7 +1220,7 @@ class Tracker
   int selected_index_ = -1;
 
   /**
-   * @brief 将标量限制到 [0, 1]。
+   * @brief Clamp a scalar into [0, 1].
    */
   static double Clamp01(double value)
   {
@@ -1227,7 +1228,7 @@ class Tracker
   }
 
   /**
-   * @brief 判断槽位是否可作为公开目标输出。
+   * @brief Return whether a slot can be selected for the public target output.
    */
   static bool Selectable(const TrackSlot& slot)
   {
@@ -1236,7 +1237,7 @@ class Tracker
   }
 
   /**
-   * @brief 更新目标选择使用的当前帧观测指标。
+   * @brief Update current-frame observation metrics for target selection.
    */
   static void UpdateObservationMetrics(TrackSlot& slot,
                                        const std::list<Armor>& armors)
@@ -1263,7 +1264,7 @@ class Tracker
   }
 
   /**
-   * @brief 判断槽位 EKF 最近是否未通过 innovation gate。
+   * @brief Return whether the slot's EKF has failed recent innovation gates.
    */
   static bool RecentNisFailed(const TrackSlot& slot)
   {
@@ -1274,7 +1275,7 @@ class Tracker
   }
 
   /**
-   * @brief 判断保留的 EKF 状态是否已经不可用。
+   * @brief Return whether the retained EKF state is no longer usable.
    */
   static bool TargetHealthFailed(const TrackSlot& slot)
   {
@@ -1325,7 +1326,7 @@ class Tracker
   }
 
   /**
-   * @brief EKF 健康检查失败后清空保留目标状态。
+   * @brief Clear the retained target state after an EKF health failure.
    *
    * The slot identity, timestamp, and current-frame observation metrics are
    * preserved; only the target/EKF and state-machine counters are discarded.
@@ -1342,7 +1343,7 @@ class Tracker
   }
 
   /**
-   * @brief 更新当前帧中的一个车辆编号槽位。
+   * @brief Update one vehicle-number slot for the current frame.
    */
   void UpdateSlot(TrackSlot& slot, std::list<Armor>& armors,
                   std::chrono::steady_clock::time_point t)
@@ -1399,7 +1400,7 @@ class Tracker
   }
 
   /**
-   * @brief 计算一个槽位的当前目标选择分数。
+   * @brief Calculate the current target-selection score for one slot.
    */
   static double ScoreSlot(const TrackSlot& slot)
   {
@@ -1431,7 +1432,7 @@ class Tracker
   }
 
   /**
-   * @brief 使用小滞回选择输出目标。
+   * @brief Select the output target with a small hysteresis margin.
    */
   int SelectTrack() const
   {
@@ -1479,7 +1480,7 @@ class Tracker
   }
 
   /**
-   * @brief 推进 lost/detecting/tracking/temp-lost 状态机。
+   * @brief Advance the lost/detecting/tracking/temp-lost state machine.
    */
   void StateMachine(TrackSlot& slot, bool found)
   {
@@ -1558,7 +1559,7 @@ class Tracker
   }
 
   /**
-   * @brief 使用排序后的最佳装甲板候选初始化目标状态。
+   * @brief Initialize target state from the best sorted armor candidate.
    */
   bool SetTarget(TrackSlot& slot, std::list<Armor>& armors,
                  std::chrono::steady_clock::time_point t)
@@ -1609,7 +1610,7 @@ class Tracker
   }
 
   /**
-   * @brief 使用匹配装甲板预测并更新当前目标。
+   * @brief Predict and update the current target from matching armors.
    */
   bool UpdateTarget(TrackSlot& slot, std::list<Armor>& armors,
                     std::chrono::steady_clock::time_point t)

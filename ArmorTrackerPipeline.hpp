@@ -2,7 +2,7 @@
 
 /**
  * @file ArmorTrackerPipeline.hpp
- * @brief tracker topic 接线、发布和 preview 输出的模板实现。
+ * @brief Template implementations for tracker topic wiring and preview output.
  */
 
 #include <algorithm>

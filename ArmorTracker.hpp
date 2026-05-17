@@ -2,7 +2,7 @@
 
 /**
  * @file ArmorTracker.hpp
- * @brief ArmorTracker 模块入口、配置和 topic 数据类型。
+ * @brief ArmorTracker module interface, configuration, and topic payloads.
  */
 
 // clang-format off
@@ -98,10 +98,11 @@ depends:
 #endif
 
 /**
- * @brief RoboMaster 装甲板目标跟踪模块。
+ * @brief Application module that tracks RoboMaster armor targets.
  *
- * 模块订阅 detector 同帧结果，运行整车目标跟踪，发布同帧目标包，并可提交
- * 内置 preview 绘制任务。
+ * The module subscribes to detector frame packets, runs the header-only tracker
+ * core, publishes the same-frame target packet, and optionally submits a built-in
+ * preview overlay.
  */
 template <CameraTypes::CameraInfo CameraInfoV>
 class ArmorTracker : public LibXR::Application
@@ -120,12 +121,12 @@ class ArmorTracker : public LibXR::Application
   static inline constexpr CameraInfo kCameraInfo = CameraInfoV;
 
   /**
-   * @brief 从 YAML 读取的运行配置。
+   * @brief Runtime configuration loaded from the module YAML config.
    */
   struct Config
   {
     /**
-     * @brief 目标选择和状态机参数。
+     * @brief Core target selection and state-machine parameters.
      */
     struct TrackerParams
     {
@@ -137,16 +138,18 @@ class ArmorTracker : public LibXR::Application
     } tracker;
 
     /**
-     * @brief 相机安装外参，表达在公开本体系 B 中。
+     * @brief Camera mounting extrinsic expressed in public body frame B.
      */
     struct ExtrinsicParams
     {
       /**
-       * @brief 相机安装系 M 到本体系 B 的变换。
+       * @brief Transform from camera mount frame M to body frame B.
        *
-       * rotation 为 wxyz 四元数，translation 单位为 m。M 与 OpenCV 相机系 C
-       * 同原点，并使用公开本体系 B 的轴向：x 向右，y 向前，z 向上。OpenCV
-       * 相机系 C 到 M 的固定轴变换由 ArmorTracker 内部处理。
+       * Rotation is a unit quaternion in wxyz order and translation is in
+       * meters. M shares the OpenCV camera origin and uses the same axis
+       * convention as B: x right, y forward, z up. The fixed OpenCV camera
+       * frame C to mount frame M axis conversion is handled inside
+       * ArmorTracker and is not part of this user config.
        */
       struct CameraMountToBody
       {
@@ -159,7 +162,7 @@ class ArmorTracker : public LibXR::Application
   };
 
   /**
-   * @brief tracker/target_frame 的同帧目标和源图像数据包。
+   * @brief tracker/target_frame 的同帧目标与源图像载荷。
    *
    * 该 topic 只用于同进程视觉链路回调，语义与 detector 给 tracker 的
    * armors_frame 一致：图像和 IMU 指针只在当前发布回调期间有效，跨线程或
@@ -179,33 +182,33 @@ class ArmorTracker : public LibXR::Application
   };
 
   /**
-   * @brief tracker/target_frame topic 的数据类型。
+   * @brief tracker/target_frame topic 的实际载荷类型。
    */
   using TargetFrameMessage = TargetFramePacket*;
 
   /**
-   * @brief 构造模块并订阅 detector topic。
+   * @brief Construct the module and subscribe to the detector topic.
    */
   explicit ArmorTracker(LibXR::HardwareContainer& hw, LibXR::ApplicationManager& app,
                         Config cfg, FrameSync& sync);
 
   /**
-   * @brief RamFS 命令入口，用于查看或修改 tracker 参数。
+   * @brief RamFS command entry used to show or update selected tracker params.
    */
   static int CommandFun(ArmorTracker* self, int argc, char** argv);
 
   /**
-   * @brief 获取当前运行配置。
+   * @brief Get the current runtime configuration.
    */
   const Config& GetConfig() const { return cfg_; }
 
   /**
-   * @brief 替换运行配置并重启相关运行态对象。
+   * @brief Replace runtime configuration and restart dependent runtime services.
    */
   void SetConfig(const Config& cfg);
 
   /**
-   * @brief RamFS 命令回调转接函数。
+   * @brief C-style adapter for the RamFS command callback.
    */
   static int CommandAdapter(void* instance, int argc, char** argv)
   {
@@ -213,7 +216,7 @@ class ArmorTracker : public LibXR::Application
   }
 
   /**
-   * @brief 应用 monitor hook，当前 tracker 没有周期任务。
+   * @brief Application monitor hook; tracker has no periodic monitor work.
    */
   void OnMonitor() override;
 
@@ -221,22 +224,22 @@ class ArmorTracker : public LibXR::Application
   static constexpr const char* kDetectorTopicName = "armors_frame";
 
   /**
-   * @brief 将模块配置转为 tracker core 配置。
+   * @brief Convert module config into the internal tracker core config.
    */
   armor_tracker_detail::Config BuildTrackerConfig() const;
 
   /**
-   * @brief 处理一帧 detector 数据并发布 tracker 输出。
+   * @brief Process one detector frame packet and publish tracker outputs.
    */
   void ArmorsCallback(DetectionMessageArg message);
 
   /**
-   * @brief 解析并订阅 detector 同帧结果 topic。
+   * @brief Resolve and subscribe to the detector frame topic.
    */
   void SubscribeDetectorTopic();
 
   /**
-   * @brief preview 启用时提交绘制任务。
+   * @brief Submit a preview overlay job when the preview runtime is enabled.
    */
   void SubmitPreview(const ImageFrame& image_frame,
                      const ArmorDetectorResults& detector_armors,
@@ -263,14 +266,14 @@ class ArmorTracker : public LibXR::Application
 };
 
 /**
- * @brief tracker/target_frame 的跨模块数据包类型。
+ * @brief tracker/target_frame 的跨模块 frame packet 类型。
  */
 template <CameraTypes::CameraInfo CameraInfoV>
 using ArmorTrackerTargetFramePacket =
     typename ArmorTracker<CameraInfoV>::TargetFramePacket;
 
 /**
- * @brief tracker/target_frame 的跨模块 topic 数据类型。
+ * @brief tracker/target_frame 的跨模块 topic payload 类型。
  */
 template <CameraTypes::CameraInfo CameraInfoV>
 using ArmorTrackerTargetFrameMessage =

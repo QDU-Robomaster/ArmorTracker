@@ -3,21 +3,22 @@
 `ArmorTracker` 是 Webots/Linux 自瞄链路里的目标级跟踪模块。输入来自
 `ArmorDetector` 发布的检测结果和 `CameraFrameSync` 同步帧，输出
 `tracker/target_frame` 同帧目标包。
-云台角、发送包和开火判定由 Aimer 负责。
+云台角、发送包和开火判定由后级 Aimer 负责。
 
 ## 文件结构
 
-- `ArmorTracker.hpp`：模块入口、配置、`target_frame` 数据包和运行态成员。
+- `ArmorTracker.hpp`：模块入口、配置、`target_frame` payload 和运行态成员。
 - `ArmorTrackerPipeline.hpp`：detector topic 回调、target_frame 发布和内置 preview 绘制。
-- `ArmorTrackerCore.hpp`：detector 输入到 tracker 输出的转换入口。
+- `ArmorTrackerCore.hpp`：detector 输入到 tracker 输出的门面适配。
 - `ArmorTrackerModel.hpp`：PnP、目标状态、整车 EKF 和跟踪状态机。
 - `ArmorTrackerMath.hpp`：角度/坐标转换和 EKF 基础工具。
 - `ArmorTrackerTarget.hpp`：`tracker/target_frame` 内携带的目标状态消息。
 - `tools/coordinate_semantics_check.cpp`：公开坐标系姿态语义回归检查，防止
-  `host/gimbal_quat` 被固定旋转翻转 roll/pitch。
+  `host/gimbal_quat` 被额外固定旋转翻转 roll/pitch。
 - `tools/tracker_replay/armor_tracker_replay.cpp`：离线重放一致性检查工具。
 
-`ArmorTracker` 主体是模板头文件实现，CMake 只暴露 include 目录。
+`ArmorTracker` 主体是模板头文件实现，CMake 只暴露 include 目录；模块本身不再编译
+额外 `.cpp` 源文件。
 
 ## 配置
 
@@ -36,9 +37,10 @@
 
 输出统一使用与公开本体系 `B` 同向的惯性解算轴 `O`：右手系，`x` 向右，
 `y` 向前，`z` 向上；yaw 以前向为 0，左转为正。`O` 的轴向不随当前云台 yaw
-转动，因此 Aimer 从 `tracker/target_frame` 解出的 `host/target_euler.yaw`
+转动，因此后级 Aimer 从 `tracker/target_frame` 解出的 `host/target_euler.yaw`
 是下位机可直接消费的绝对云台目标角。preview 使用 `output_to_camera` 把 `O`
-中的目标几何投回同帧相机图像。
+中的目标几何投回同帧相机图像。历史 tracker `x` 前、`y` 左坐标基已经不再作为
+配置或输出选项暴露。
 
 ## Preview
 
@@ -63,4 +65,4 @@ Linux 和 Webots 目标。
 
 坐标语义回归需要至少覆盖 `tools/coordinate_semantics_check.cpp`：
 `host/gimbal_quat` 已经是公开本体系 `B` 的姿态，Tracker 只能归一化后直接转矩阵；
-任何固定轴变换都会让 roll/pitch 反号，并污染输出目标高度。
+任何额外的固定 basis 旋转都会让 roll/pitch 反号，并污染输出目标高度。
