@@ -5,7 +5,7 @@
  * @brief 定义 ArmorTracker 对外发布的目标状态消息。
  *
  * 该文件只描述 tracker 输出的目标几何，不包含弹道、开火或云台命令语义。
- * 后级 Aimer 应当以此消息作为输入自行完成瞄准解算。
+ * Aimer 以此消息作为输入完成瞄准解算。
  */
 
 #include <cstdint>
@@ -15,7 +15,7 @@
 #include "ArmorDetectorTypes.hpp"
 
 /**
- * @brief tracker 输出目标状态载荷。
+ * @brief tracker 输出目标状态数据。
  *
  * 该结构表达当前跟踪到的机器人中心、速度、yaw、半径和高低差。当前通过
  * tracker/target_frame 随同源图像帧一起发布。输出坐标使用与公开 B 系同向的

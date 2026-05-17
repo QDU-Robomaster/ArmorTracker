@@ -2,7 +2,7 @@
 
 /**
  * @file ArmorTrackerMath.hpp
- * @brief Internal math helpers and Kalman filter used by ArmorTracker.
+ * @brief ArmorTracker 使用的数学函数和 Kalman 滤波实现。
  */
 
 #include <chrono>
@@ -21,7 +21,7 @@
 namespace armor_tracker_detail
 {
 /**
- * @brief Mathematical constants and physical dimensions used by the model.
+ * @brief 模型使用的数学常量和装甲板物理尺寸。
  */
 constexpr double kPi = 3.14159265358979323846;
 constexpr double kLightbarLength = 56e-3;
@@ -29,7 +29,7 @@ constexpr double kBigArmorWidth = 230e-3;
 constexpr double kSmallArmorWidth = 135e-3;
 
 /**
- * @brief Convert an Eigen 3x3 matrix to an OpenCV double matrix.
+ * @brief 将 Eigen 3x3 矩阵转为 OpenCV double 矩阵。
  */
 inline cv::Mat Mat3dToCv(const Eigen::Matrix3d& matrix)
 {
@@ -45,7 +45,7 @@ inline cv::Mat Mat3dToCv(const Eigen::Matrix3d& matrix)
 }
 
 /**
- * @brief Convert an OpenCV double 3x3 matrix to Eigen.
+ * @brief 将 OpenCV double 3x3 矩阵转为 Eigen 矩阵。
  */
 inline Eigen::Matrix3d CvMatToMat3d(const cv::Mat& matrix)
 {
@@ -61,7 +61,7 @@ inline Eigen::Matrix3d CvMatToMat3d(const cv::Mat& matrix)
 }
 
 /**
- * @brief Normalize an angle into (-pi, pi].
+ * @brief 将角度归一化到 (-pi, pi]。
  */
 inline double LimitRad(double angle)
 {
@@ -77,7 +77,7 @@ inline double LimitRad(double angle)
 }
 
 /**
- * @brief Convert a quaternion to Euler angles with the requested axis order.
+ * @brief 按指定轴顺序将四元数转为欧拉角。
  */
 inline Eigen::Vector3d Eulers(Eigen::Quaterniond q, int axis0, int axis1,
                               int axis2, bool extrinsic = false)
@@ -178,7 +178,7 @@ inline Eigen::Vector3d Eulers(Eigen::Quaterniond q, int axis0, int axis1,
 }
 
 /**
- * @brief Convert a rotation matrix to Euler angles with the requested axis order.
+ * @brief 按指定轴顺序将旋转矩阵转为欧拉角。
  */
 inline Eigen::Vector3d Eulers(Eigen::Matrix3d rotation, int axis0, int axis1,
                               int axis2, bool extrinsic = false)
@@ -187,7 +187,7 @@ inline Eigen::Vector3d Eulers(Eigen::Matrix3d rotation, int axis0, int axis1,
 }
 
 /**
- * @brief Return yaw in the public B-axis convention.
+ * @brief 返回公开 B 轴约定下的 yaw。
  *
  * The public frame is right-handed: x right, y forward, z up. Yaw is zero when
  * pointing forward and positive when turning left.
@@ -198,7 +198,7 @@ inline double BearingYaw(const Eigen::Vector3d& xyz)
 }
 
 /**
- * @brief Convert public-frame XYZ position to yaw, elevation, distance.
+ * @brief 将公开坐标系 XYZ 位置转为 yaw、仰角和距离。
  */
 inline Eigen::Vector3d XyzToYpd(const Eigen::Vector3d& xyz)
 {
@@ -210,7 +210,7 @@ inline Eigen::Vector3d XyzToYpd(const Eigen::Vector3d& xyz)
 }
 
 /**
- * @brief Return the Jacobian of XyzToYpd().
+ * @brief 返回 XyzToYpd() 的雅可比矩阵。
  */
 inline Eigen::MatrixXd XyzToYpdJacobian(const Eigen::Vector3d& xyz)
 {
@@ -243,7 +243,7 @@ inline Eigen::MatrixXd XyzToYpdJacobian(const Eigen::Vector3d& xyz)
 }
 
 /**
- * @brief Return the signed duration from b to a in seconds.
+ * @brief 返回 b 到 a 的有符号时间差，单位 s。
  */
 inline double DeltaTime(const std::chrono::steady_clock::time_point& a,
                         const std::chrono::steady_clock::time_point& b)
@@ -253,7 +253,7 @@ inline double DeltaTime(const std::chrono::steady_clock::time_point& a,
 }
 
 /**
- * @brief Minimal EKF used by the armor target model.
+ * @brief 装甲目标模型使用的 EKF。
  */
 class ExtendedKalmanFilter
 {
@@ -266,12 +266,12 @@ class ExtendedKalmanFilter
   double last_nis{};
 
   /**
-   * @brief Construct an empty EKF object.
+   * @brief 构造空 EKF 对象。
    */
   ExtendedKalmanFilter() = default;
 
   /**
-   * @brief Construct an EKF with initial state, covariance, and state addition.
+   * @brief 使用初始状态、协方差和状态加法构造 EKF。
    */
   ExtendedKalmanFilter(
       const Eigen::VectorXd& x0, const Eigen::MatrixXd& P0,
@@ -297,7 +297,7 @@ class ExtendedKalmanFilter
   }
 
   /**
-   * @brief Predict with a linear transition matrix.
+   * @brief 使用线性转移矩阵预测。
    */
   Eigen::VectorXd Predict(const Eigen::MatrixXd& F, const Eigen::MatrixXd& Q)
   {
@@ -305,7 +305,7 @@ class ExtendedKalmanFilter
   }
 
   /**
-   * @brief Predict with a custom nonlinear state transition.
+   * @brief 使用自定义非线性状态转移预测。
    */
   Eigen::VectorXd Predict(const Eigen::MatrixXd& F, const Eigen::MatrixXd& Q,
                           std::function<Eigen::VectorXd(const Eigen::VectorXd&)> f)
@@ -316,7 +316,7 @@ class ExtendedKalmanFilter
   }
 
   /**
-   * @brief Update with a linear observation matrix.
+   * @brief 使用线性观测矩阵更新。
    */
   Eigen::VectorXd Update(
       const Eigen::VectorXd& z, const Eigen::MatrixXd& H,
@@ -332,7 +332,7 @@ class ExtendedKalmanFilter
   }
 
   /**
-   * @brief Update with a custom nonlinear observation function.
+   * @brief 使用自定义非线性观测函数更新。
    */
   Eigen::VectorXd Update(
       const Eigen::VectorXd& z, const Eigen::MatrixXd& H,
