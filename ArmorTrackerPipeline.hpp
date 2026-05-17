@@ -23,6 +23,29 @@ armor_tracker_detail::Config ArmorTracker<CameraInfoV>::BuildTrackerConfig() con
   config.min_detect_count = cfg_.tracker.min_detect_count;
   config.max_temp_lost_count = cfg_.tracker.max_temp_lost_count;
   config.outpost_max_temp_lost_count = cfg_.tracker.outpost_max_temp_lost_count;
+  config.target_select.observed_count_weight =
+      cfg_.tracker.target_select.observed_count_weight;
+  config.target_select.distance_weight =
+      cfg_.tracker.target_select.distance_weight;
+  config.target_select.area_weight = cfg_.tracker.target_select.area_weight;
+  config.target_select.spin_weight = cfg_.tracker.target_select.spin_weight;
+  config.target_select.angle_weight = cfg_.tracker.target_select.angle_weight;
+  config.target_select.max_distance_m =
+      cfg_.tracker.target_select.max_distance_m;
+  config.target_select.distance_span_m =
+      cfg_.tracker.target_select.distance_span_m;
+  config.target_select.area_norm_px = cfg_.tracker.target_select.area_norm_px;
+  config.target_select.observed_count_norm =
+      cfg_.tracker.target_select.observed_count_norm;
+  config.target_select.max_spin_rad_s =
+      cfg_.tracker.target_select.max_spin_rad_s;
+  config.target_select.max_angle_norm =
+      cfg_.tracker.target_select.max_angle_norm;
+  config.target_select.detecting_scale =
+      cfg_.tracker.target_select.detecting_scale;
+  config.target_select.temp_lost_scale =
+      cfg_.tracker.target_select.temp_lost_scale;
+  config.target_select.switch_margin = cfg_.tracker.target_select.switch_margin;
   config.camera_matrix = {
       kCameraInfo.camera_matrix[0], kCameraInfo.camera_matrix[1],
       kCameraInfo.camera_matrix[2], kCameraInfo.camera_matrix[3],
@@ -127,6 +150,35 @@ int ArmorTracker<CameraInfoV>::CommandFun(ArmorTracker<CameraInfoV>* self,
                          self->cfg_.tracker.max_temp_lost_count);
     TRACKER_STDIO_PRINTF("    outpost_max_temp_lost_count: %d\r\n",
                          self->cfg_.tracker.outpost_max_temp_lost_count);
+    TRACKER_STDIO_PRINT("    target_select:\r\n");
+    TRACKER_STDIO_PRINTF("      observed_count_weight: %f\r\n",
+                         self->cfg_.tracker.target_select.observed_count_weight);
+    TRACKER_STDIO_PRINTF("      distance_weight: %f\r\n",
+                         self->cfg_.tracker.target_select.distance_weight);
+    TRACKER_STDIO_PRINTF("      area_weight: %f\r\n",
+                         self->cfg_.tracker.target_select.area_weight);
+    TRACKER_STDIO_PRINTF("      spin_weight: %f\r\n",
+                         self->cfg_.tracker.target_select.spin_weight);
+    TRACKER_STDIO_PRINTF("      angle_weight: %f\r\n",
+                         self->cfg_.tracker.target_select.angle_weight);
+    TRACKER_STDIO_PRINTF("      max_distance_m: %f\r\n",
+                         self->cfg_.tracker.target_select.max_distance_m);
+    TRACKER_STDIO_PRINTF("      distance_span_m: %f\r\n",
+                         self->cfg_.tracker.target_select.distance_span_m);
+    TRACKER_STDIO_PRINTF("      area_norm_px: %f\r\n",
+                         self->cfg_.tracker.target_select.area_norm_px);
+    TRACKER_STDIO_PRINTF("      observed_count_norm: %f\r\n",
+                         self->cfg_.tracker.target_select.observed_count_norm);
+    TRACKER_STDIO_PRINTF("      max_spin_rad_s: %f\r\n",
+                         self->cfg_.tracker.target_select.max_spin_rad_s);
+    TRACKER_STDIO_PRINTF("      max_angle_norm: %f\r\n",
+                         self->cfg_.tracker.target_select.max_angle_norm);
+    TRACKER_STDIO_PRINTF("      detecting_scale: %f\r\n",
+                         self->cfg_.tracker.target_select.detecting_scale);
+    TRACKER_STDIO_PRINTF("      temp_lost_scale: %f\r\n",
+                         self->cfg_.tracker.target_select.temp_lost_scale);
+    TRACKER_STDIO_PRINTF("      switch_margin: %f\r\n",
+                         self->cfg_.tracker.target_select.switch_margin);
     TRACKER_STDIO_PRINT("  extrinsic:\r\n");
     TRACKER_STDIO_PRINT("    camera_mount_to_body:\r\n");
     TRACKER_STDIO_PRINT("      rotation:\r\n");
