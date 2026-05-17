@@ -45,6 +45,18 @@ struct CaseSpec
   Camera camera{};
 };
 
+struct SingleSpec
+{
+  std::string dataset{"single"};
+  fs::path detector;
+  fs::path out;
+  fs::path preview_out;
+  fs::path imu;
+  int color{-1};
+  int number{-1};
+  Camera camera{};
+};
+
 struct QuatRow
 {
   double w{1.0};
@@ -316,6 +328,78 @@ std::vector<CaseSpec> read_cases(const fs::path& path)
   return cases;
 }
 
+bool parse_single_args(int argc, char** argv, SingleSpec& spec)
+{
+  if (argc < 4 || std::string(argv[1]) != "--single")
+  {
+    return false;
+  }
+  spec.detector = argv[2];
+  spec.out = argv[3];
+  for (int i = 4; i < argc; ++i)
+  {
+    const std::string arg = argv[i];
+    auto need_value = [&](const char* name) -> const char*
+    {
+      if (i + 1 >= argc)
+      {
+        throw std::runtime_error(std::string("missing value for ") + name);
+      }
+      return argv[++i];
+    };
+    if (arg == "--dataset")
+    {
+      spec.dataset = need_value("--dataset");
+    }
+    else if (arg == "--color")
+    {
+      spec.color = std::stoi(need_value("--color"));
+    }
+    else if (arg == "--number")
+    {
+      spec.number = std::stoi(need_value("--number"));
+    }
+    else if (arg == "--fx")
+    {
+      spec.camera.fx = std::stod(need_value("--fx"));
+    }
+    else if (arg == "--fy")
+    {
+      spec.camera.fy = std::stod(need_value("--fy"));
+    }
+    else if (arg == "--cx")
+    {
+      spec.camera.cx = std::stod(need_value("--cx"));
+    }
+    else if (arg == "--cy")
+    {
+      spec.camera.cy = std::stod(need_value("--cy"));
+    }
+    else if (arg == "--imu")
+    {
+      spec.imu = need_value("--imu");
+    }
+    else if (arg == "--preview-out")
+    {
+      spec.preview_out = need_value("--preview-out");
+    }
+    else
+    {
+      throw std::runtime_error("unknown arg: " + arg);
+    }
+  }
+  if (spec.detector.empty() || spec.out.empty())
+  {
+    throw std::runtime_error("single mode requires detector and out paths");
+  }
+  if (!std::isfinite(spec.camera.fx) || !std::isfinite(spec.camera.fy) ||
+      !std::isfinite(spec.camera.cx) || !std::isfinite(spec.camera.cy))
+  {
+    throw std::runtime_error("single mode requires fx fy cx cy");
+  }
+  return true;
+}
+
 bool valid_detector_row(const Row& row, int color, int number)
 {
   if (as_int(row, "color", -1) != color)
@@ -354,13 +438,149 @@ armor_tracker_detail::InputArmor make_input(const Row& row)
   return input;
 }
 
+void write_preview_header(std::ofstream& out)
+{
+  out << "dataset\timage_timestamp_us\tstate\tselected_face\t"
+         "outpost_height_phase\tface_id\tface_x\tface_y\tface_z\tface_yaw\t"
+         "uv0_x\tuv0_y\tuv1_x\tuv1_y\tuv2_x\tuv2_y\tuv3_x\tuv3_y\n";
+}
+
+void write_preview_rows(std::ofstream& out,
+                        armor_tracker_detail::TrackerCore& tracker,
+                        const std::string& dataset, uint64_t timestamp_us,
+                        const armor_tracker_detail::Output& output)
+{
+  for (const auto& track : output.tracks)
+  {
+    if (!track.selected)
+    {
+      continue;
+    }
+    for (int face = 0; face < static_cast<int>(track.faces_world.size()); ++face)
+    {
+      const Eigen::Vector4d xyza =
+          track.faces_world[static_cast<std::size_t>(face)];
+      const auto corners = tracker.ReprojectPreviewArmorFace(
+          xyza.head<3>(), xyza[3], track.armor_type, track.tag_id);
+      if (corners.size() != 4U)
+      {
+        continue;
+      }
+      out << dataset << '\t' << timestamp_us << '\t' << output.state << '\t'
+          << output.selected_face << '\t' << output.outpost_height_phase
+          << '\t' << face << '\t' << xyza.x() << '\t' << xyza.y() << '\t'
+          << xyza.z() << '\t' << xyza[3];
+      for (const auto& corner : corners)
+      {
+        out << '\t' << corner.x << '\t' << corner.y;
+      }
+      out << '\n';
+    }
+  }
+}
+
 }  // namespace
 
 int main(int argc, char** argv)
 {
+  SingleSpec single_spec;
+  if (parse_single_args(argc, argv, single_spec))
+  {
+    if (!single_spec.out.parent_path().empty())
+    {
+      fs::create_directories(single_spec.out.parent_path());
+    }
+    std::ofstream out(single_spec.out);
+    out << std::setprecision(17);
+    out << "dataset\timage_timestamp_us\tsource\tcenter_x\tcenter_y\tcenter_z\t"
+           "vel_x\tvel_y\tvel_z\tyaw\tv_yaw\tarmor_x\tarmor_y\tarmor_z\t"
+           "armor_yaw\tselected_face\toutpost_height_phase\tjumped\t"
+           "radius_even\tradius_odd\tdz\n";
+    std::ofstream preview_out;
+    if (!single_spec.preview_out.empty())
+    {
+      if (!single_spec.preview_out.parent_path().empty())
+      {
+        fs::create_directories(single_spec.preview_out.parent_path());
+      }
+      preview_out.open(single_spec.preview_out);
+      preview_out << std::setprecision(17);
+      write_preview_header(preview_out);
+    }
+
+    armor_tracker_detail::Config config;
+    config.require_target_tag = true;
+    config.target_tag_id = single_spec.number;
+    config.min_detect_count = 2;
+    config.max_temp_lost_count = 15;
+    config.outpost_max_temp_lost_count = 75;
+    config.camera_matrix = {single_spec.camera.fx, 0.0, single_spec.camera.cx,
+                            0.0, single_spec.camera.fy, single_spec.camera.cy,
+                            0.0, 0.0, 1.0};
+    armor_tracker_detail::TrackerCore tracker(config);
+    const auto imu = read_imu_quats(single_spec.imu);
+    std::map<uint64_t, std::vector<armor_tracker_detail::InputArmor>> frames;
+    std::map<uint64_t, QuatRow> inline_imu;
+    for (const auto& row : read_tsv(single_spec.detector))
+    {
+      if (!valid_detector_row(row, single_spec.color, single_spec.number))
+      {
+        continue;
+      }
+      const auto timestamp_us = as_u64(row, "image_timestamp_us");
+      frames[timestamp_us].push_back(make_input(row));
+      if (std::isfinite(as_double(row, "imu_qw", NAN)))
+      {
+        inline_imu[timestamp_us] = {as_double(row, "imu_qw", 1.0),
+                                   as_double(row, "imu_qx", 0.0),
+                                   as_double(row, "imu_qy", 0.0),
+                                   as_double(row, "imu_qz", 0.0)};
+      }
+    }
+    for (const auto& [timestamp_us, inputs] : frames)
+    {
+      QuatRow quat{};
+      if (const auto inline_it = inline_imu.find(timestamp_us);
+          inline_it != inline_imu.end())
+      {
+        quat = inline_it->second;
+      }
+      else if (const auto q = find_causal_quat(imu, timestamp_us))
+      {
+        quat = *q;
+      }
+      const armor_tracker_detail::Output output = tracker.Step(
+          timestamp_us, Eigen::Quaterniond(quat.w, quat.x, quat.y, quat.z),
+          inputs);
+      if (!output.has_target)
+      {
+        continue;
+      }
+      out << single_spec.dataset << '\t' << timestamp_us << "\traw_corner_cabi_"
+          << output.state << '\t' << output.center.x() << '\t'
+          << output.center.y() << '\t' << output.center.z() << '\t'
+          << output.velocity.x() << '\t' << output.velocity.y() << '\t'
+          << output.velocity.z() << '\t' << output.yaw << '\t'
+          << output.vyaw << '\t' << output.armor.x() << '\t'
+          << output.armor.y() << '\t' << output.armor.z() << '\t'
+          << output.armor_yaw << '\t' << output.selected_face << '\t'
+          << output.outpost_height_phase << '\t'
+          << (output.jumped ? 1 : 0) << '\t' << output.radius_even << '\t'
+          << output.radius_odd << '\t' << output.dz << '\n';
+      if (preview_out)
+      {
+        write_preview_rows(preview_out, tracker, single_spec.dataset,
+                           timestamp_us, output);
+      }
+    }
+    return 0;
+  }
+
   if (argc != 3)
   {
-    std::cerr << "usage: " << argv[0] << " <cases.tsv> <out.tsv>\n";
+    std::cerr << "usage:\n  " << argv[0]
+              << " <cases.tsv> <out.tsv>\n  " << argv[0]
+              << " --single <detector.tsv> <out.tsv> --number N --color N --fx F --fy F --cx F --cy F [--dataset name] [--imu imu.csv] [--preview-out preview.tsv]\n";
     return 2;
   }
   const fs::path cases_path(argv[1]);
@@ -370,7 +590,8 @@ int main(int argc, char** argv)
   out << std::setprecision(17);
   out << "dataset\timage_timestamp_us\tsource\tcenter_x\tcenter_y\tcenter_z\t"
          "vel_x\tvel_y\tvel_z\tyaw\tv_yaw\tarmor_x\tarmor_y\tarmor_z\t"
-         "armor_yaw\tselected_face\tjumped\tradius_even\tradius_odd\tdz\n";
+         "armor_yaw\tselected_face\toutpost_height_phase\tjumped\t"
+         "radius_even\tradius_odd\tdz\n";
 
   for (const CaseSpec& spec : read_cases(cases_path))
   {
@@ -416,6 +637,7 @@ int main(int argc, char** argv)
           << output.vyaw << '\t' << output.armor.x() << '\t'
           << output.armor.y() << '\t' << output.armor.z() << '\t'
           << output.armor_yaw << '\t' << output.selected_face << '\t'
+          << output.outpost_height_phase << '\t'
           << (output.jumped ? 1 : 0) << '\t' << output.radius_even << '\t'
           << output.radius_odd << '\t' << output.dz << '\n';
     }
