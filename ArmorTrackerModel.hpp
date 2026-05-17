@@ -227,30 +227,11 @@ inline ArmorPriority PriorityFromName(ArmorName name)
  */
 struct Config
 {
-  struct TargetSelectConfig
-  {
-    double observed_count_weight = 1.6;
-    double distance_weight = 2.0;
-    double area_weight = 1.2;
-    double spin_weight = 0.8;
-    double angle_weight = 2.0;
-    double max_distance_m = 8.0;
-    double distance_span_m = 7.5;
-    double area_norm_px = 6000.0;
-    double observed_count_norm = 4.0;
-    double max_spin_rad_s = 8.0;
-    double max_angle_norm = 0.5;
-    double detecting_scale = 0.55;
-    double temp_lost_scale = 0.35;
-    double switch_margin = 0.25;
-  };
-
   bool require_target_tag = false;
   int target_tag_id = -1;
   int min_detect_count = 2;
   int max_temp_lost_count = 15;
   int outpost_max_temp_lost_count = 75;
-  TargetSelectConfig target_select{};
   std::array<double, 9> camera_matrix{
       1164.3428599490444, 0.0, 366.6782312546237,
       0.0, 1164.335053894998, 270.30936434613865,
@@ -1113,7 +1094,6 @@ class Tracker
         min_detect_count_(config.min_detect_count),
         outpost_max_temp_lost_count_(config.outpost_max_temp_lost_count),
         normal_temp_lost_count_(config.max_temp_lost_count),
-        target_select_(config.target_select),
         state_("lost")
   {
     for (std::size_t i = 0; i < tracks_.size(); ++i)
@@ -1234,7 +1214,6 @@ class Tracker
   int min_detect_count_;
   int outpost_max_temp_lost_count_;
   int normal_temp_lost_count_;
-  Config::TargetSelectConfig target_select_;
   std::string state_;
   std::array<TrackSlot, kTrackSlotCount> tracks_{};
   int selected_index_ = -1;
@@ -1416,14 +1395,13 @@ class Tracker
       slot.outpost_center_hint = slot.target.CenterWorldForOutput();
       slot.outpost_center_hint_valid = true;
     }
-    slot.score = ScoreSlot(slot, target_select_);
+    slot.score = ScoreSlot(slot);
   }
 
   /**
    * @brief 计算一个槽位的当前目标选择分数。
    */
-  static double ScoreSlot(const TrackSlot& slot,
-                          const Config::TargetSelectConfig& cfg)
+  static double ScoreSlot(const TrackSlot& slot)
   {
     if (!slot.initialized || slot.state == "lost")
     {
@@ -1432,32 +1410,24 @@ class Tracker
 
     const Eigen::VectorXd x = slot.target.EkfX();
     const double distance = std::sqrt(x[0] * x[0] + x[2] * x[2] + x[4] * x[4]);
-    const double distance_span = std::max(cfg.distance_span_m, 1e-6);
-    const double area_norm = std::max(cfg.area_norm_px, 1e-6);
-    const double count_norm = std::max(cfg.observed_count_norm, 1e-6);
-    const double spin_norm = std::max(cfg.max_spin_rad_s, 1e-6);
-    const double angle_norm = std::max(cfg.max_angle_norm, 1e-6);
-    const double distance_score =
-        Clamp01((cfg.max_distance_m - distance) / distance_span);
-    const double area_score = Clamp01(slot.hittable_area / area_norm);
-    const double count_score = Clamp01(slot.observed_count_lpf / count_norm);
-    const double spin_score = Clamp01(1.0 - std::abs(x[7]) / spin_norm);
-    const double angle_score = Clamp01(1.0 - slot.gimbal_angle_error / angle_norm);
+    const double distance_score = Clamp01((8.0 - distance) / 7.5);
+    const double area_score = Clamp01(slot.hittable_area / 6000.0);
+    const double count_score = Clamp01(slot.observed_count_lpf / 4.0);
+    const double spin_score = Clamp01(1.0 - std::abs(x[7]) / 8.0);
+    const double angle_score = Clamp01(1.0 - slot.gimbal_angle_error / 0.5);
 
     double state_scale = 1.0;
     if (slot.state == "detecting")
     {
-      state_scale = cfg.detecting_scale;
+      state_scale = 0.55;
     }
     else if (slot.state == "temp_lost")
     {
-      state_scale = cfg.temp_lost_scale;
+      state_scale = 0.35;
     }
 
-    return state_scale *
-           (cfg.observed_count_weight * count_score +
-            cfg.distance_weight * distance_score + cfg.area_weight * area_score +
-            cfg.spin_weight * spin_score + cfg.angle_weight * angle_score);
+    return state_scale * (2.0 * count_score + 1.2 * distance_score +
+                          1.5 * area_score + spin_score + angle_score);
   }
 
   /**
@@ -1496,10 +1466,11 @@ class Tracker
         selected_index_ < static_cast<int>(tracks_.size()) &&
         Selectable(tracks_[static_cast<std::size_t>(selected_index_)]))
     {
+      constexpr double kSwitchMargin = 0.25;
       const auto& selected = tracks_[static_cast<std::size_t>(selected_index_)];
       if (best_index != selected_index_ &&
           tracks_[static_cast<std::size_t>(best_index)].score <=
-              selected.score + target_select_.switch_margin)
+              selected.score + kSwitchMargin)
       {
         return selected_index_;
       }
