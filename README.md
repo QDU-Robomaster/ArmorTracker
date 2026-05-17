@@ -60,9 +60,22 @@ tracker 内部按装甲板编号维护多套车辆 EKF 状态，同一 slot 丢�
 
 单车过滤回归使用 `tools/tracker_replay/armor_tracker_replay.cpp` 对固定数据集重放；多车目标选择
 需要使用不按编号过滤的 replay，确认同帧多编号输入会独立更新各 slot 并只输出当前选中的目标。
+BSP / Webots 调试时可额外通过环境变量 `XR_TRACKER_DETECTOR_RECORD=<path>` 录制
+detector TSV，然后用 `armor_tracker_replay.cpp --single` 对同一份 detector 结果反复回放，
+避免每次都重新跑整套仿真。
 BSP 验证需要生成当前 `cfg.tracker` / `cfg.preview` 结构对应的 `User/xrobot_main.hpp` 后再构建
 Linux 和 Webots 目标。
 
 坐标语义回归需要至少覆盖 `tools/coordinate_semantics_check.cpp`：
 `host/gimbal_quat` 已经是公开本体系 `B` 的姿态，Tracker 只能归一化后直接转矩阵；
 任何额外的固定 basis 旋转都会让 roll/pitch 反号，并污染输出目标高度。
+
+## 前哨站
+
+前哨站按三块小装甲板建模，半径固定为 `0.2765m`，相邻装甲板高度差固定为
+`0.102m`。tracker 会根据换面时的高度关系维护 `outpost_height_phase`，并在
+`tracker/target_frame` 中发布给后级 Aimer 展开三块不同高度的装甲板。普通四面车体
+仍然使用原有奇偶高度差 `dz`，不走前哨站高度相位逻辑。
+
+前哨站塔心在惯性系中视为固定，tracker 不允许侧面 PnP 把中心速度积分出来；yaw 采用固定
+转速模型和低频相位校正。preview 仍然走统一的装甲板重投影路径，不包含 Webots 专用图像坐标分支。

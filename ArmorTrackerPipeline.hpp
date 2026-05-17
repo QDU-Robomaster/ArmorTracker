@@ -9,10 +9,130 @@
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <fstream>
+#include <iomanip>
+#include <mutex>
 #include <string>
 #include <vector>
 
 #include <opencv2/imgproc.hpp>
+
+namespace
+{
+class DetectorRecordWriter
+{
+ public:
+  static DetectorRecordWriter& Instance()
+  {
+    static DetectorRecordWriter instance;
+    return instance;
+  }
+
+  void WriteRow(uint64_t image_timestamp_us, const ArmorDetectorResult& armor)
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    EnsureOpenLocked();
+    if (!enabled_)
+    {
+      return;
+    }
+    WriteHeaderLocked();
+    WriteDetectorFieldsLocked(image_timestamp_us, armor);
+    out_ << "\t1\t0\t0\t0\n";
+  }
+
+  template <typename ImuStamped>
+  void WriteRow(uint64_t image_timestamp_us, const ArmorDetectorResult& armor,
+                const ImuStamped* imu)
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    EnsureOpenLocked();
+    if (!enabled_)
+    {
+      return;
+    }
+    WriteHeaderLocked();
+    WriteDetectorFieldsLocked(image_timestamp_us, armor);
+    if (imu != nullptr)
+    {
+      out_ << '\t' << std::setprecision(17) << imu->rotation_wxyz[0] << '\t'
+           << std::setprecision(17) << imu->rotation_wxyz[1] << '\t'
+           << std::setprecision(17) << imu->rotation_wxyz[2] << '\t'
+           << std::setprecision(17) << imu->rotation_wxyz[3];
+    }
+    else
+    {
+      out_ << "\t1\t0\t0\t0";
+    }
+    out_ << '\n';
+  }
+
+ private:
+  void WriteDetectorFieldsLocked(uint64_t image_timestamp_us,
+                                 const ArmorDetectorResult& armor)
+  {
+    out_ << image_timestamp_us << '\t'
+         << static_cast<int>(armor.color) << '\t'
+         << static_cast<int>(armor.number) << '\t'
+         << static_cast<int>(armor.type) << '\t'
+         << std::setprecision(10) << armor.confidence << '\t'
+         << std::setprecision(10) << armor.center_norm.x << '\t'
+         << std::setprecision(10) << armor.center_norm.y << '\t'
+         << armor.box.x << '\t' << armor.box.y << '\t'
+         << armor.box.width << '\t' << armor.box.height << '\t'
+         << std::setprecision(10) << armor.points[0].x << '\t'
+         << std::setprecision(10) << armor.points[0].y << '\t'
+         << std::setprecision(10) << armor.points[1].x << '\t'
+         << std::setprecision(10) << armor.points[1].y << '\t'
+         << std::setprecision(10) << armor.points[2].x << '\t'
+         << std::setprecision(10) << armor.points[2].y << '\t'
+         << std::setprecision(10) << armor.points[3].x << '\t'
+         << std::setprecision(10) << armor.points[3].y;
+  }
+
+  void EnsureOpenLocked()
+  {
+    if (opened_)
+    {
+      return;
+    }
+    opened_ = true;
+    const char* path_env = std::getenv("XR_TRACKER_DETECTOR_RECORD");
+    if (path_env == nullptr || *path_env == '\0')
+    {
+      return;
+    }
+    out_.open(path_env, std::ios::out | std::ios::trunc);
+    if (!out_)
+    {
+      XR_LOG_ERROR("ArmorTracker detector record open failed: %s", path_env);
+      return;
+    }
+    enabled_ = true;
+    XR_LOG_PASS("ArmorTracker detector record enabled: %s", path_env);
+  }
+
+  void WriteHeaderLocked()
+  {
+    if (header_written_)
+    {
+      return;
+    }
+    out_ << "image_timestamp_us\tcolor\tnumber\ttype\tconfidence\t"
+            "center_norm_x\tcenter_norm_y\tbox_x\tbox_y\tbox_w\tbox_h\t"
+            "p0_x\tp0_y\tp1_x\tp1_y\tp2_x\tp2_y\tp3_x\tp3_y\t"
+            "imu_qw\timu_qx\timu_qy\timu_qz\n";
+    header_written_ = true;
+  }
+
+  bool opened_ = false;
+  bool enabled_ = false;
+  bool header_written_ = false;
+  std::mutex mutex_{};
+  std::ofstream out_{};
+};
+}  // namespace
 
 template <CameraTypes::CameraInfo CameraInfoV>
 armor_tracker_detail::Config ArmorTracker<CameraInfoV>::BuildTrackerConfig() const
@@ -236,6 +356,8 @@ void ArmorTracker<CameraInfoV>::ArmorsCallback(
   inputs.reserve(detector_armors.size());
   for (const auto& armor : detector_armors)
   {
+    DetectorRecordWriter::Instance().WriteRow(
+        image_timestamp_us, armor, source_frame.imu);
     armor_tracker_detail::InputArmor input{};
     input.tag_id = static_cast<int>(armor.number);
     input.armor_type = static_cast<int>(armor.type);
@@ -276,6 +398,7 @@ void ArmorTracker<CameraInfoV>::ArmorsCallback(
     target_msg.radius_2 = output.radius_odd;
     target_msg.dz = output.dz;
     target_msg.tracked_face_index = output.selected_face;
+    target_msg.outpost_height_phase = output.outpost_height_phase;
     target_msg.face_switch_observed = output.jumped;
   }
   else
@@ -311,6 +434,43 @@ void ArmorTracker<CameraInfoV>::ArmorsCallback(
     target_frame_packet_.output_to_camera_translation[static_cast<std::size_t>(
         row)] = t_output_to_camera(row);
   }
+
+#ifdef XR_TRACKER_TRUTH_TRACE
+  for (std::size_t det_i = 0; det_i < output.detections.size(); ++det_i)
+  {
+    const auto& det = output.detections[det_i];
+    XR_LOG_INFO(
+        "TRK_DET ts=%llu i=%u tag=%d type=%d conf=%.3f cx=%.1f cy=%.1f x=%.5f y=%.5f z=%.5f yaw=%.6f uv0=%.1f,%.1f uv1=%.1f,%.1f uv2=%.1f,%.1f uv3=%.1f,%.1f",
+        static_cast<unsigned long long>(image_timestamp_us),
+        static_cast<unsigned>(det_i), det.tag_id, det.armor_type,
+        det.confidence, det.center.x, det.center.y, det.xyz_world.x(),
+        det.xyz_world.y(), det.xyz_world.z(), det.yaw_world,
+        det.corners[0].x, det.corners[0].y, det.corners[1].x,
+        det.corners[1].y, det.corners[2].x, det.corners[2].y,
+        det.corners[3].x, det.corners[3].y);
+  }
+
+  if (output.has_target && target_msg.id == ArmorNumber::OUTPOST)
+  {
+    XR_LOG_INFO(
+        "TRK_OUTPOST ts=%llu tracking=%d n=%d face=%d hphase=%d cx=%.5f cy=%.5f cz=%.5f yaw=%.6f vyaw=%.6f r1=%.5f r2=%.5f dz=%.5f",
+        static_cast<unsigned long long>(image_timestamp_us),
+        target_msg.tracking ? 1 : 0, target_msg.armors_num,
+        target_msg.tracked_face_index, target_msg.outpost_height_phase,
+        target_msg.position.x(), target_msg.position.y(), target_msg.position.z(),
+        target_msg.yaw, target_msg.v_yaw, target_msg.radius_1,
+        target_msg.radius_2, target_msg.dz);
+    for (std::size_t trace_i = 0; trace_i < output.faces_world.size(); ++trace_i)
+    {
+      const auto& trace_face = output.faces_world[trace_i];
+      XR_LOG_INFO(
+          "TRK_FACE ts=%llu i=%u x=%.5f y=%.5f z=%.5f yaw=%.6f",
+          static_cast<unsigned long long>(image_timestamp_us),
+          static_cast<unsigned>(trace_i), trace_face.x(), trace_face.y(),
+          trace_face.z(), trace_face.w());
+    }
+  }
+#endif
 
   TargetFrameMessage target_frame_msg = &target_frame_packet_;
   target_frame_topic_.Publish(target_frame_msg, publish_timestamp);
@@ -430,12 +590,24 @@ void ArmorTracker<CameraInfoV>::SubmitPreview(
       }
 
       const auto corners =
-          tracker_.ReprojectArmorFace(center_world, yaw, track.armor_type,
-                                      track.tag_id);
+          tracker_.ReprojectPreviewArmorFace(center_world, yaw,
+                                             track.armor_type, track.tag_id);
       if (corners.size() != 4U)
       {
         continue;
       }
+#ifdef XR_TRACKER_TRUTH_TRACE
+      if (track.tag_id == static_cast<int>(ArmorNumber::OUTPOST))
+      {
+        XR_LOG_INFO(
+            "TRK_PREVIEW ts=%llu i=%d world_x=%.5f world_y=%.5f world_z=%.5f ekf_yaw=%.6f preview_yaw=%.6f uv0=%.1f,%.1f uv1=%.1f,%.1f uv2=%.1f,%.1f uv3=%.1f,%.1f",
+            static_cast<unsigned long long>(image_frame.timestamp_us), i,
+            center_world.x(), center_world.y(), center_world.z(), yaw,
+            yaw, corners[0].x, corners[0].y, corners[1].x,
+            corners[1].y, corners[2].x, corners[2].y, corners[3].x,
+            corners[3].y);
+      }
+#endif
       cv::Point2f center_uv(0.0F, 0.0F);
       bool valid = true;
       for (std::size_t corner = 0; corner < corners.size(); ++corner)
@@ -454,6 +626,14 @@ void ArmorTracker<CameraInfoV>::SubmitPreview(
       overlay.faces[static_cast<std::size_t>(i)].valid = true;
     }
 
+    cv::Point2f projected_center(0.0F, 0.0F);
+    if (track.center_world.allFinite() &&
+        tracker_.ReprojectWorldPoint(track.center_world, projected_center))
+    {
+      overlay.center_uv = to_point(projected_center);
+      overlay.center_valid = true;
+    }
+
     cv::Point2d center_sum(0.0, 0.0);
     int valid_face_count = 0;
     for (int i = 0; i < overlay.face_count; ++i)
@@ -467,7 +647,7 @@ void ArmorTracker<CameraInfoV>::SubmitPreview(
       center_sum.y += face.center_uv.y;
       ++valid_face_count;
     }
-    if (valid_face_count > 0)
+    if (!overlay.center_valid && valid_face_count > 0)
     {
       overlay.center_uv =
           cv::Point(static_cast<int>(std::lround(
@@ -475,6 +655,9 @@ void ArmorTracker<CameraInfoV>::SubmitPreview(
                     static_cast<int>(std::lround(
                         center_sum.y / static_cast<double>(valid_face_count))));
       overlay.center_valid = true;
+    }
+    if (overlay.center_valid && valid_face_count > 0)
+    {
       track_overlays.push_back(overlay);
     }
   }
@@ -635,6 +818,7 @@ void ArmorTracker<CameraInfoV>::SubmitPreview(
             std::string("tracker ") +
             (target_msg.tracking ? "TRACK" : "NO_TARGET") + " id=" + id_name +
             " face=" + std::to_string(target_msg.tracked_face_index) +
+            " hphase=" + std::to_string(target_msg.outpost_height_phase) +
             " det=" + std::to_string(detector_armors.size()) +
             " tracks=" + std::to_string(track_overlays.size());
         cv::putText(canvas, header, cv::Point(12, 28),
