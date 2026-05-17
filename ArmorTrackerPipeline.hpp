@@ -276,7 +276,6 @@ void ArmorTracker<CameraInfoV>::ArmorsCallback(
     target_msg.radius_2 = output.radius_odd;
     target_msg.dz = output.dz;
     target_msg.tracked_face_index = output.selected_face;
-    target_msg.outpost_height_phase = output.outpost_height_phase;
     target_msg.face_switch_observed = output.jumped;
   }
   else
@@ -431,8 +430,8 @@ void ArmorTracker<CameraInfoV>::SubmitPreview(
       }
 
       const auto corners =
-          tracker_.ReprojectPreviewArmorFace(center_world, yaw,
-                                             track.armor_type, track.tag_id);
+          tracker_.ReprojectArmorFace(center_world, yaw, track.armor_type,
+                                      track.tag_id);
       if (corners.size() != 4U)
       {
         continue;

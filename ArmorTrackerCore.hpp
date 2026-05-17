@@ -72,7 +72,6 @@ struct Output
   int selected_armor_type = 0;
   int armors_num = 0;
   int selected_face = -1;
-  int outpost_height_phase = 0;
   bool jumped = false;
   Eigen::Vector3d center = Eigen::Vector3d::Zero();
   Eigen::Vector3d velocity = Eigen::Vector3d::Zero();
@@ -285,20 +284,19 @@ class TrackerCore
     out.selected_tag_id = ModelNameToDetectorNumber(target.name);
     out.selected_armor_type = target.armor_type == ArmorType::BIG ? 1 : 0;
     out.selected_face = target.last_id;
-    out.outpost_height_phase = target.OutpostHeightPhase();
     out.jumped = target.jumped;
     const Eigen::VectorXd x = target.EkfX();
     out.radius_even = x[8];
     out.radius_odd = x[8] + x[9];
-    out.faces_world = target.ArmorXyzaListForOutput();
+    out.faces_world = target.ArmorXyzaList();
     out.armors_num = static_cast<int>(out.faces_world.size());
-    out.center_world = target.CenterWorldForOutput();
+    out.center_world = {x[0], x[2], x[4]};
     out.yaw_world = LimitRad(x[6]);
     out.center = R_world_to_output * out.center_world;
-    out.velocity = R_world_to_output * target.VelocityWorldForOutput();
+    out.velocity = R_world_to_output * Eigen::Vector3d(x[1], x[3], x[5]);
     out.yaw = WorldYawToOutputYaw(out.yaw_world, output_yaw_world);
     out.vyaw = x[7];
-    out.dz = target.DzForOutput();
+    out.dz = x[10];
     if (target.last_id >= 0 &&
         target.last_id < static_cast<int>(out.faces_world.size()))
     {
@@ -330,22 +328,6 @@ class TrackerCore
                                    ArmorNameFromDetectorNumber(tag_id));
   }
 
-  /**
-   * @brief Reproject one armor face for preview drawing.
-   */
-  std::vector<cv::Point2f> ReprojectPreviewArmorFace(
-      const Eigen::Vector3d& center_world, double yaw_world, int armor_type,
-      int tag_id) const
-  {
-    if (!solver_)
-    {
-      return {};
-    }
-    const ArmorType type = armor_type == 1 ? ArmorType::BIG : ArmorType::SMALL;
-    return solver_->ReprojectPreviewArmor(center_world, yaw_world, type,
-                                          ArmorNameFromDetectorNumber(tag_id));
-  }
-
  private:
   Config config_{};
   std::unique_ptr<Solver> solver_{};
@@ -370,17 +352,17 @@ class TrackerCore
     out.armor_type = target.armor_type == ArmorType::BIG ? 1 : 0;
     out.selected_face = target.last_id;
     const Eigen::VectorXd x = target.EkfX();
-    out.center_world = target.CenterWorldForOutput();
+    out.center_world = {x[0], x[2], x[4]};
     out.yaw_world = LimitRad(x[6]);
     out.radius_even = x[8];
     out.radius_odd = x[8] + x[9];
-    out.faces_world = target.ArmorXyzaListForOutput();
+    out.faces_world = target.ArmorXyzaList();
     out.armors_num = static_cast<int>(out.faces_world.size());
     out.center = R_world_to_output * out.center_world;
-    out.velocity = R_world_to_output * target.VelocityWorldForOutput();
+    out.velocity = R_world_to_output * Eigen::Vector3d(x[1], x[3], x[5]);
     out.yaw = WorldYawToOutputYaw(out.yaw_world, output_yaw_world);
     out.vyaw = x[7];
-    out.dz = target.DzForOutput();
+    out.dz = x[10];
     return out;
   }
 
