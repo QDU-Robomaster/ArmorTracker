@@ -106,13 +106,13 @@ inline int PositiveMod(int value, int mod)
 
 inline double OutpostArmorHeightOffset(int face_id, int height_phase)
 {
-  // 本地面按 yaw 递增展开；前哨站实物在该顺序下是中、低、高。
+  // 本地面按 yaw 递增展开；前哨站实物在该顺序下是中、高、低。
   switch (PositiveMod(face_id + height_phase, 3))
   {
     case 1:
-      return -kOutpostArmorHeightStep;
-    case 2:
       return kOutpostArmorHeightStep;
+    case 2:
+      return -kOutpostArmorHeightStep;
     case 0:
     default:
       return 0.0;
