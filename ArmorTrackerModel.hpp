@@ -97,6 +97,12 @@ inline constexpr double kOutpostArmorHeightStep = 0.102;
 inline constexpr double kOutpostArmorRadius = 0.2680137228;
 inline constexpr double kOutpostArmorTilt = 15.0 * kPi / 180.0;
 inline constexpr double kOutpostLightbarWidth = 0.135;
+inline constexpr double kOutpostVisibleFaceWidth = 0.120;
+inline constexpr double kOutpostVisibleFaceHeight = 0.105;
+inline constexpr double kOutpostVisibleFaceLocalY = -0.009;
+inline constexpr double kOutpostVisibleFaceLocalZ = -0.0008;
+inline constexpr double kOutpostVisibleFaceXOffset = 0.008486277200519598;
+inline constexpr double kOutpostVisibleFaceZOffset = -0.003102112066953941;
 
 inline int PositiveMod(int value, int mod)
 {
@@ -441,10 +447,40 @@ class Solver
       const Eigen::Vector3d& xyz_in_world, double yaw, ArmorType type,
       ArmorName name) const
   {
+    if (name == ArmorName::OUTPOST)
+    {
+      const double preview_yaw = LimitRad(yaw + kPi);
+      return ReprojectArmorObjectPoints(xyz_in_world, preview_yaw,
+                                        -kOutpostArmorTilt,
+                                        OutpostVisibleFacePointsMirroredX());
+    }
     return ReprojectArmor(xyz_in_world, yaw, type, name);
   }
 
  private:
+  std::vector<cv::Point2f> ReprojectArmorObjectPoints(
+      const Eigen::Vector3d& xyz_in_world, double yaw, double tilt,
+      const std::vector<cv::Point3f>& object_points) const
+  {
+    const Eigen::Matrix3d R_armor2world = ArmorRotationFromYaw(yaw, tilt);
+    const Eigen::Vector3d& t_armor2world = xyz_in_world;
+    Eigen::Matrix3d R_armor2camera =
+        R_camera_to_body_.transpose() * R_body_to_world_.transpose() *
+        R_armor2world;
+    Eigen::Vector3d t_armor2camera =
+        R_camera_to_body_.transpose() *
+        (R_body_to_world_.transpose() * t_armor2world - t_camera_to_body_);
+
+    cv::Vec3d rvec;
+    cv::Rodrigues(Mat3dToCv(R_armor2camera), rvec);
+    cv::Vec3d tvec(t_armor2camera[0], t_armor2camera[1], t_armor2camera[2]);
+
+    std::vector<cv::Point2f> image_points;
+    cv::projectPoints(object_points, rvec, tvec, camera_matrix_, distort_coeffs_,
+                      image_points);
+    return image_points;
+  }
+
   cv::Mat camera_matrix_;
   cv::Mat distort_coeffs_;
   Eigen::Matrix3d R_camera_to_body_;
@@ -487,6 +523,23 @@ class Solver
         {0, -kOutpostLightbarWidth / 2.0, kLightbarLength / 2.0},
         {0, -kOutpostLightbarWidth / 2.0, -kLightbarLength / 2.0},
         {0, kOutpostLightbarWidth / 2.0, -kLightbarLength / 2.0}};
+    return points;
+  }
+
+  /**
+   * @brief Return outpost visible sticker points with preview horizontal axis flipped.
+   */
+  static const std::vector<cv::Point3f>& OutpostVisibleFacePointsMirroredX()
+  {
+    static const std::vector<cv::Point3f> points{
+        {kOutpostVisibleFaceXOffset, kOutpostVisibleFaceWidth / 2.0,
+         kOutpostVisibleFaceZOffset - kOutpostVisibleFaceHeight / 2.0},
+        {kOutpostVisibleFaceXOffset, -kOutpostVisibleFaceWidth / 2.0,
+         kOutpostVisibleFaceZOffset - kOutpostVisibleFaceHeight / 2.0},
+        {kOutpostVisibleFaceXOffset, -kOutpostVisibleFaceWidth / 2.0,
+         kOutpostVisibleFaceZOffset + kOutpostVisibleFaceHeight / 2.0},
+        {kOutpostVisibleFaceXOffset, kOutpostVisibleFaceWidth / 2.0,
+         kOutpostVisibleFaceZOffset + kOutpostVisibleFaceHeight / 2.0}};
     return points;
   }
 
