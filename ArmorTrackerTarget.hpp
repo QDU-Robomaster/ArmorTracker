@@ -37,5 +37,6 @@ struct ArmorTrackerTarget
   double radius_2{};                       ///< 奇数面装甲半径，单位 m。
   double dz{};                             ///< 奇偶装甲面高度差，单位 m。
   int tracked_face_index{0};               ///< 当前 EKF 绑定的本地装甲面索引。
+  int outpost_height_phase{0};
   bool face_switch_observed{false};        ///< 跟踪期间是否观测到换面。
 };
