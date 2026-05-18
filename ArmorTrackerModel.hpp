@@ -92,13 +92,21 @@ inline int TrackSlotIndex(ArmorName name)
   return index >= 0 && index < static_cast<int>(kTrackSlotCount) ? index : -1;
 }
 
+/// 前哨站相邻两块装甲板的中心高度差，单位 m。
 inline constexpr double outpost_height_step_m = 0.102;
+/// 前哨站转盘半径，单位 m。
 inline constexpr double outpost_radius_m = 0.2680137228;
+/// 前哨站装甲板固定安装倾角，单位 rad。
 inline constexpr double outpost_tilt_rad = 15.0 * kPi / 180.0;
+/// 前哨站 PnP 使用的灯条间距，单位 m。
 inline constexpr double outpost_lightbar_width_m = 0.135;
+/// Webots 可见贴纸宽度，单位 m。
 inline constexpr double outpost_visible_face_width_m = 0.120;
+/// Webots 可见贴纸高度，单位 m。
 inline constexpr double outpost_visible_face_height_m = 0.105;
+/// Webots 可见贴纸相对装甲板中心的法向偏移，单位 m。
 inline constexpr double outpost_visible_face_x_offset_m = 0.008486277200519598;
+/// Webots 可见贴纸相对装甲板中心的高度偏移，单位 m。
 inline constexpr double outpost_visible_face_z_offset_m = -0.003102112066953941;
 
 inline int PositiveMod(int value, int mod)
@@ -446,6 +454,8 @@ class Solver
   {
     if (name == ArmorName::OUTPOST)
     {
+      // preview 使用 Webots 可见贴纸几何，而不是 PnP 灯条面。
+      // 这里额外转 half-turn，把本地面朝向对回当前 Webots 贴纸朝向。
       const double preview_yaw = LimitRad(yaw + kPi);
       return ReprojectArmorObjectPoints(xyz_in_world, preview_yaw,
                                         -outpost_tilt_rad,
@@ -454,7 +464,10 @@ class Solver
     return ReprojectArmor(xyz_in_world, yaw, type, name);
   }
 
- private:
+private:
+  /**
+   * @brief 用给定几何模板重投影装甲板四角。
+   */
   std::vector<cv::Point2f> ReprojectArmorObjectPoints(
       const Eigen::Vector3d& xyz_in_world, double yaw, double tilt,
       const std::vector<cv::Point3f>& object_points) const
@@ -524,7 +537,7 @@ class Solver
   }
 
   /**
-   * @brief Return outpost visible sticker points with preview horizontal axis flipped.
+   * @brief 返回前哨站可见贴纸四角，水平顺序按当前 preview 约定镜像。
    */
   static const std::vector<cv::Point3f>& OutpostVisibleFacePointsMirroredX()
   {
@@ -1009,6 +1022,7 @@ class Target
     auto delta_angle = LimitRad(armor.ypr_in_world[0] - center_yaw);
     const double side_view = std::abs(delta_angle);
     const bool side_observation = side_view > 0.55;
+    // 侧面 PnP 的平移最不稳定，只信它的角度，不让它拖走塔心。
     const bool lock_outpost_center = UseOutpostHeightModel() && side_observation;
     Eigen::VectorXd R_dig(4);
     if (name == ArmorName::OUTPOST)
@@ -1050,6 +1064,7 @@ class Target
     ekf_.Update(z, H, R, h, z_subtract);
     if (UseOutpostHeightModel() && !side_observation)
     {
+      // 正面/斜前面观测可信时，直接把塔心回锚到该装甲板反推的位置。
       const double angle = LimitRad(ekf_.x[6] + id * 2.0 * kPi / armor_num_);
       const double r = ekf_.x[8];
       ekf_.x[0] = armor.xyz_in_world.x() - r * std::sin(angle);
@@ -1062,6 +1077,7 @@ class Target
     }
     if (lock_outpost_center)
     {
+      // 侧面观测只更新相位和 yaw，不更新塔心 xyz。
       ekf_.x[0] = center_x_before;
       ekf_.x[1] = 0.0;
       ekf_.x[2] = center_y_before;
@@ -1338,7 +1354,7 @@ class Tracker
       return true;
     }
     // 前哨站单面/侧面 PnP 平移噪声明显，短窗 NIS 失败不能直接清空
-    // 固定塔心和高度相位；否则会在换面附近误重建为另一个 height phase。
+    // 固定塔心和高度相位；否则会在换面附近误重建到别的 phase。
     if (slot.target.name == ArmorName::OUTPOST)
     {
       return false;
@@ -1347,7 +1363,7 @@ class Tracker
   }
 
   /**
-   * @brief 用上一次稳定中心给前哨站重建目标时选择初始高度相位。
+   * @brief 用上一次稳定塔心高度，为前哨站初始化选择最接近的高度相位。
    */
   static std::pair<int, bool> ChooseOutpostInitialHeightPhase(
       const TrackSlot& slot, const Armor& armor)
