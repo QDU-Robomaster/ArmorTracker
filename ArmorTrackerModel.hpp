@@ -879,16 +879,12 @@ class Target
   {
     int best_id = 0;
     double best_error = std::numeric_limits<double>::infinity();
-    const Eigen::Vector3d center_world{ekf_.x[0], ekf_.x[2], ekf_.x[4]};
-    const double observed_face_yaw =
-        OutpostObservedFaceYaw(armor, center_world);
-
     for (const auto& [xyza, candidate_id] : xyza_i_list)
     {
       const Eigen::Vector3d ypd = XyzToYpd(xyza.head(3));
       double error =
-          std::abs(LimitRad(observed_face_yaw - xyza[3])) +
-          0.25 * std::abs(LimitRad(armor.ypd_in_world[0] - ypd[0]));
+          std::abs(LimitRad(armor.ypr_in_world[0] - xyza[3])) +
+          std::abs(LimitRad(armor.ypd_in_world[0] - ypd[0]));
       if (outpost_height_phase_valid_)
       {
         error += 2.0 * std::abs(armor.xyz_in_world.z() - xyza[2]);
@@ -1001,9 +997,7 @@ class Target
     auto center_yaw = BearingYaw(armor.xyz_in_world);
     const Eigen::Vector3d center_before{center_x_before, center_y_before,
                                         center_z_before};
-    const double observed_armor_yaw =
-        UseOutpostHeightModel() ? OutpostObservedFaceYaw(armor, center_before)
-                                : armor.ypr_in_world[0];
+    const double observed_armor_yaw = armor.ypr_in_world[0];
     auto delta_angle = LimitRad(observed_armor_yaw - center_yaw);
     const double side_view = std::abs(delta_angle);
     const bool side_observation = side_view > 0.55;
