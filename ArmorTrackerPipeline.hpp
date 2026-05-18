@@ -328,6 +328,7 @@ void ArmorTracker<CameraInfoV>::ArmorsCallback(
     target_msg.radius_2 = output.radius_odd;
     target_msg.dz = output.dz;
     target_msg.tracked_face_index = output.selected_face;
+    target_msg.outpost_height_phase = output.outpost_height_phase;
     target_msg.face_switch_observed = output.jumped;
   }
   else
@@ -363,6 +364,7 @@ void ArmorTracker<CameraInfoV>::ArmorsCallback(
     target_frame_packet_.output_to_camera_translation[static_cast<std::size_t>(
         row)] = t_output_to_camera(row);
   }
+
 
   TargetFrameMessage target_frame_msg = &target_frame_packet_;
   target_frame_topic_.Publish(target_frame_msg, publish_timestamp);
@@ -482,8 +484,8 @@ void ArmorTracker<CameraInfoV>::SubmitPreview(
       }
 
       const auto corners =
-          tracker_.ReprojectArmorFace(center_world, yaw, track.armor_type,
-                                      track.tag_id);
+          tracker_.ReprojectPreviewArmorFace(center_world, yaw,
+                                             track.armor_type, track.tag_id);
       if (corners.size() != 4U)
       {
         continue;

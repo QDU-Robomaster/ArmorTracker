@@ -92,6 +92,36 @@ inline int TrackSlotIndex(ArmorName name)
   return index >= 0 && index < static_cast<int>(kTrackSlotCount) ? index : -1;
 }
 
+// Outpost adjacent armor height difference in meters.
+inline constexpr double kOutpostArmorHeightStep = 0.102;
+inline constexpr double kOutpostArmorRadius = 0.2765;
+inline constexpr double kOutpostArmorTilt = 15.0 * kPi / 180.0;
+
+inline int PositiveMod(int value, int mod)
+{
+  const int result = value % mod;
+  return result < 0 ? result + mod : result;
+}
+
+inline double OutpostArmorHeightOffset(int face_id, int height_phase)
+{
+  switch (PositiveMod(face_id + height_phase, 3))
+  {
+    case 1:
+      return kOutpostArmorHeightStep;
+    case 2:
+      return -kOutpostArmorHeightStep;
+    case 0:
+    default:
+      return 0.0;
+  }
+}
+
+inline int SignNonZero(double value)
+{
+  return value > 0.0 ? 1 : -1;
+}
+
 /**
  * @brief Target selection priority for a detected armor.
  */
@@ -394,7 +424,7 @@ class Solver
                                           ArmorName name) const
   {
     const auto tilt =
-        name == ArmorName::OUTPOST ? -15.0 * kPi / 180.0 : 15.0 * kPi / 180.0;
+        name == ArmorName::OUTPOST ? kOutpostArmorTilt : 15.0 * kPi / 180.0;
     const Eigen::Matrix3d R_armor2world = ArmorRotationFromYaw(yaw, tilt);
 
     const Eigen::Vector3d& t_armor2world = xyz_in_world;
@@ -415,6 +445,16 @@ class Solver
     cv::projectPoints(object_points, rvec, tvec, camera_matrix_, distort_coeffs_,
                       image_points);
     return image_points;
+  }
+
+  /**
+   * @brief Project a preview face without changing the PnP/yaw fitting model.
+   */
+  std::vector<cv::Point2f> ReprojectPreviewArmor(
+      const Eigen::Vector3d& xyz_in_world, double yaw, ArmorType type,
+      ArmorName name) const
+  {
+    return ReprojectArmor(xyz_in_world, yaw, type, name);
   }
 
  private:
@@ -450,7 +490,7 @@ class Solver
     return points;
   }
 
-  /**
+/**
    * @brief Refine armor yaw by minimizing reprojection error.
    */
   void OptimizeYaw(Armor& armor) const
@@ -507,6 +547,14 @@ class Target
   int last_id{};
 
   /**
+   * @brief 闂傚倸鍊风粈渚€骞栭位鍥敃閿曗偓閻ょ偓绻濇繝鍌滃闁藉啰鍠栭弻鏇熺箾閸喖澹勫┑鐐叉▕娴滄粓宕橀埀顒€顪冮妶鍡楃仴鐟滄壆鍋涙晥婵°倕鎳忛埛鎴︽偡濞嗗繐顏╅柛鏂诲€濋弻娑㈡偄闁垮浠撮悹渚灦閺屾稑鈽夊Ο鍏兼喖闂佺粯鎸诲ú鐔煎蓟閻旂厧绠氱憸蹇涙晬瀹ュ洠鍋撳☉娆戠疄婵﹥妞藉畷鐑筋敇閻斿摜褰у┑鐘愁問閸ｏ綁藟閹捐绀嗛柟鐑橆殔閻撴稑霉閿濆懎绾ч柣搴☆煼濮婅櫣鎲撮崟顐ゎ槰濠电偛顦伴惄顖炲箯韫囨洍鍋撻敐搴℃灍闁绘挻鐟╅弻銈夊捶椤撶儐鏆悷婊勫Ω閸愶絾鏂€闂佺偨鍎村▍鏇㈠箹閹扮増顥嗗璺侯煬閻斿棝鎮规潪鎷岊劅闁稿孩鍔曢埞鎴︻敍濮樼厧娈堕梺閫炲苯澧紒鐘茬Ч瀹曟洘娼忛埡鍌氬簥闂佸湱鍎ゅ濠氭儗閸℃鐔嗛悹杞拌閻掗箖鏌嶈閸撴氨鏁幒妤嬬稏婵犻潧顑愰弫鍥煟濮楀棗浜濋柨娑橆槺缁辨捇宕掑▎鎴濆濡炪們鍔岄幊姗€鐛繝鍐╁劅闁靛鍎欓妷鈺傜厵闁绘垶蓱閳锋帡鏌ｉ鐔烘噰闁诡喖缍婇獮渚€骞掗幋婵愮€寸紓鍌氬€哥粔鎾儗閸岀偛绠栨俊銈傚亾闁崇粯鎹囧畷褰掝敊閻ｅ奔绨梻鍌欒兌椤牓顢栭崱娑樼闁归棿绀侀悡鈥愁熆閼搁潧濮囩紒鐘差煼閺岀喐锛愭担鍝勫缂佹鍨剁换婵嬫偨闂堟稐鎴烽梺闈涙椤戝洤危閹版澘鍗抽柕蹇曞Х閻ゅ懎鈹戞幊閸婃洟骞婃惔鈽嗗晠婵犻潧娲㈡禍婊堟煛瀹ュ啫濡块柍顖涙礃缁绘盯宕奸悢鎼炰虎濠?   */
+  int OutpostHeightPhase() const { return outpost_height_phase_; }
+
+  /**
+   * @brief 闂傚倸鍊风粈渚€骞栭位鍥敃閿曗偓閻ょ偓绻濇繝鍌滃闁藉啰鍠栭弻鏇熺箾閸喖澹勫┑鐐叉▕娴滄粓宕橀埀顒€顪冮妶鍡楃仴鐟滄壆鍋涙晥婵°倕鎳忛埛鎴︽偡濞嗗繐顏╅柛鏂诲€濋弻娑㈡偄闁垮浠撮悹渚灦閺屾稑鈽夊Ο鍏兼喖闂佺粯鎸诲ú鐔煎蓟閻旂厧绠氱憸蹇涙晬瀹ュ洠鍋撳☉娆戠疄婵﹥妞藉畷鐑筋敇閻斿摜褰у┑鐘愁問閸ｏ綁藟閹捐绀嗛柟鐑橆殔閻撴稑霉閿濆懎绾ч柣搴☆煼濮婅櫣鎲撮崟顐ゎ槰濠电偛顦伴惄顖炲箯韫囨洍鍋撻敐搴℃灍闁绘挻鐟╅弻銈夊捶椤撶儐鏆悷婊勫Ω閸愶絾鏂€闂佺偨鍎村▍鏇㈠箹閹扮増顥嗗璺侯煬閻斿棝鎮规潪鎷岊劅闁稿孩鍔曢埞鎴︻敍濮樼厧娈堕梺閫炲苯澧紒鐘茬Ч瀹曟洟宕￠悙宥嗙☉閳诲酣骞嬮悩鍐叉珮闂傚倸鍊搁崐椋庣矆娓氣偓楠炲鏁撻悩鍐蹭簻濡炪倖甯掗崐缁樼▔瀹ュ鐓欓弶鍫濆⒔閻ｈ京绱掗埀顒勫礋椤栨稓鍙嗗┑鐐村灦閿氭い蹇ｅ亞閻ヮ亪骞嗚閸嬨垽鏌ｉ幙鍐ㄤ喊鐎规洖鐖兼俊鎼佹晜缂併垺袨闂傚倷绀侀幖顐⑽涘☉娆戠闁逞屽墴閺岀喖顢欓悡搴⑿╅梺瀹狀嚙濮橈妇绮诲☉銏犵妞ゆ牗鐭竟鏇㈡⒑闂堚晛鐦滈柛姗€绠栭幆宀勫醇閵夛箑鈧敻姊婚崼鐔衡姇闁规彃鎲℃穱濠囶敃椤愩垻浠搁梺鍝勮閸旀垵顕ｉ鈧畷鍫曗€栭鑺ュ磳闁诡喗顭堢粻娑㈠箻閹碱厽锛嗛柣搴㈩問閸犳牠鎮ユ總绋挎槬闁斥晛鍟刊鎾煟閻斿憡绶插ù婊冪埣濮?   */
+  bool OutpostHeightPhaseValid() const { return outpost_height_phase_valid_; }
+
+  /**
    * @brief Construct an empty target state.
    */
   Target() = default;
@@ -515,23 +563,39 @@ class Target
    * @brief Initialize a target from the first selected armor observation.
    */
   Target(const Armor& armor, std::chrono::steady_clock::time_point t,
-         double radius, int armor_num, const Eigen::VectorXd& P0_dig)
+         double radius, int armor_num, const Eigen::VectorXd& P0_dig,
+         int outpost_initial_id = 0, int outpost_height_phase = 0,
+         bool outpost_height_phase_valid = false,
+         Eigen::Vector3d outpost_center_hint = Eigen::Vector3d::Zero(),
+         bool outpost_center_hint_valid = false)
       : name(armor.name),
         armor_type(armor.type),
         priority(armor.priority),
         jumped(false),
-        last_id(0),
+        last_id(std::clamp(outpost_initial_id, 0, std::max(0, armor_num - 1))),
         armor_num_(armor_num),
         update_count_(0),
         is_converged_(false),
-        t_(t)
+        t_(t),
+        outpost_height_phase_(outpost_height_phase),
+        outpost_height_phase_valid_(outpost_height_phase_valid)
   {
     const auto r = radius;
     const Eigen::VectorXd& xyz = armor.xyz_in_world;
     const Eigen::VectorXd& ypr = armor.ypr_in_world;
-    const auto center_x = xyz[0] - r * std::sin(ypr[0]);
-    const auto center_y = xyz[1] + r * std::cos(ypr[0]);
-    const auto center_z = xyz[2];
+    auto center_x = xyz[0] - r * std::sin(ypr[0]);
+    auto center_y = xyz[1] + r * std::cos(ypr[0]);
+    auto center_z = xyz[2];
+    if (name == ArmorName::OUTPOST && armor_num == 3)
+    {
+      center_z -= OutpostArmorHeightOffset(last_id, outpost_height_phase_);
+      if (outpost_center_hint_valid)
+      {
+        center_x = outpost_center_hint.x();
+        center_y = outpost_center_hint.y();
+        center_z = outpost_center_hint.z();
+      }
+    }
 
     Eigen::VectorXd x0(11);
     x0 << center_x, 0.0, center_y, 0.0, center_z, 0.0, ypr[0], 0.0, r,
@@ -546,6 +610,11 @@ class Target
       return c;
     };
     ekf_ = ExtendedKalmanFilter(x0, P0, x_add);
+    if (UseOutpostHeightModel())
+    {
+      outpost_observed_z_[static_cast<std::size_t>(last_id)] = xyz[2];
+      outpost_observed_z_valid_[static_cast<std::size_t>(last_id)] = true;
+    }
   }
 
   /**
@@ -573,8 +642,8 @@ class Target
     double v2;
     if (name == ArmorName::OUTPOST)
     {
-      v1 = 10.0;
-      v2 = 0.1;
+      v1 = 0.05;
+      v2 = 0.5;
     }
     else
     {
@@ -615,6 +684,7 @@ class Target
       ekf_.x[7] = ekf_.x[7] > 0.0 ? 2.51 : -2.51;
     }
     ekf_.Predict(F, Q, f);
+    ClampOutpostCenterVelocity();
   }
 
   /**
@@ -642,17 +712,24 @@ class Target
 
     const int candidate_count =
         std::min(3, static_cast<int>(xyza_i_list.size()));
-    for (int i = 0; i < candidate_count; ++i)
+    if (UseOutpostHeightModel())
     {
-      const auto& xyza = xyza_i_list[i].first;
-      Eigen::Vector3d ypd = XyzToYpd(xyza.head(3));
-      auto angle_error =
-          std::abs(LimitRad(armor.ypr_in_world[0] - xyza[3])) +
-          std::abs(LimitRad(armor.ypd_in_world[0] - ypd[0]));
-      if (std::abs(angle_error) < std::abs(min_angle_error))
+      id = MatchOutpostArmor(armor, xyza_i_list);
+    }
+    else
+    {
+      for (int i = 0; i < candidate_count; ++i)
       {
-        id = xyza_i_list[i].second;
-        min_angle_error = angle_error;
+        const auto& xyza = xyza_i_list[i].first;
+        Eigen::Vector3d ypd = XyzToYpd(xyza.head(3));
+        auto angle_error =
+            std::abs(LimitRad(armor.ypr_in_world[0] - xyza[3])) +
+            std::abs(LimitRad(armor.ypd_in_world[0] - ypd[0]));
+        if (std::abs(angle_error) < std::abs(min_angle_error))
+        {
+          id = xyza_i_list[i].second;
+          min_angle_error = angle_error;
+        }
       }
     }
 
@@ -660,9 +737,11 @@ class Target
     {
       jumped = true;
     }
+    UpdateOutpostHeightPhase(armor, id);
     last_id = id;
     ++update_count_;
     UpdateYpda(armor, id);
+    ClampOutpostCenterVelocity();
   }
 
   /**
@@ -689,6 +768,55 @@ class Target
       list.push_back({xyz[0], xyz[1], xyz[2], angle});
     }
     return list;
+  }
+
+  /**
+   * @brief 闂傚倸鍊风粈渚€骞栭位鍥敃閿曗偓閻ょ偓绻濇繝鍌滃闁藉啰鍠栭弻鏇熺箾閸喖澹勫┑鐐叉▕娴滄粓宕橀埀顒€顪冮妶鍡樺暗闁稿鍠栭幃锟犲箣閿旇В鎷虹紓鍌欑劍閵嗙偤骞嬮敐鍐ф睏闂佸憡鍔﹂崳顖滅礊閺嶎厽鐓ユ繝闈涙－濡插綊鏌ｉ幘瀛樼闁哄瞼鍠栭獮鍡氼槾闁挎稑绉堕埀顒佺⊕缁诲牆顫忓ú顏勬嵍妞ゆ挾鍠愰悵顏呯節濞堝灝娅嶆い銉︽崌瀹曟岸骞掑Δ鈧悡娑樏归敐鍛骇闁诲骸顭烽弻鐔兼嚌閻楀牆娑х紓浣瑰絻濞硷繝鐛径鎰櫆闁瑰瓨甯炵粻姘舵⒑闂堟稓澧曢柟鍐查叄閸┾偓妞ゆ巻鍋撶紓宥咃躬瀵偆鈧綆鍠楅悡鐔煎箹濞ｎ剙鈧倕顭囬幇顑芥斀闁绘劘顕滈煬顒侇殽閻愬弶顥㈢€规洜鍠栭、娑樷槈閹烘挸顏搁梻鍌欑缂嶅﹪宕戞繝鍥х獥婵﹩鍓涢幗銉╂⒒閸屾艾鈧绮堟笟鈧獮澶愭晸閻樺啿娈為梺璇″灱閻忔劙鎮烽幍顔芥疂闂侀€涚祷濞呮洟鎮樻笟鈧娲偡闁箑娈舵繝娈垮枤閺佽鐣烽鐐茬闁挎梻鏅崢鍗炩攽閻愭潙鐏ョ€规洦鍓熼幃姗€鏁撻悩宕囧幐闂佺硶鍓濋崝鏇㈡倶閺屻儲鐓涢悘鐐殿焾婢ц尙鈧灚婢樼€氼參骞嗛弮鍫濈伋闁告劖鐣妷褏纾介柛灞剧懅缁愭梹銇勯妶鍛偓鍨暦閿濆绀冮柕濞у嫭顔曟繝鐢靛仜濡瑩骞愰崨濠傤嚤闁绘绮悡鏇㈡煛閸ャ儱濡煎ù婊勭箖閵囧嫰骞橀崜浣哥缂備胶绮粙鎺戭焽韫囨稑绀堢憸蹇氭懌濠电姷鏁搁崑鐐躲亹閸愵亝宕叉慨妞诲亾鐎规洘妞介崺鈧?   */
+  std::vector<Eigen::Vector4d> ArmorXyzaListForOutput() const
+  {
+    if (!UseOutpostHeightModel())
+    {
+      return ArmorXyzaList();
+    }
+
+    std::vector<Eigen::Vector4d> list;
+    list.reserve(static_cast<std::size_t>(armor_num_));
+    const double center_z = CenterWorldForOutput().z();
+    for (int i = 0; i < armor_num_; ++i)
+    {
+      auto angle = LimitRad(ekf_.x[6] + i * 2.0 * kPi / armor_num_);
+      Eigen::Vector3d xyz = HArmorXyz(ekf_.x, i);
+      xyz.z() = center_z + OutpostArmorHeightOffset(i, outpost_height_phase_);
+      list.push_back({xyz[0], xyz[1], xyz[2], angle});
+    }
+    return list;
+  }
+
+  /**
+   * @brief 闂傚倸鍊风粈渚€骞栭位鍥敃閿曗偓閻ょ偓绻濇繝鍌滃闁藉啰鍠栭弻鏇熺箾閸喖澹勫┑鐐叉▕娴滄粓宕橀埀顒€顪冮妶鍡樺暗闁哥姴瀛╃粋鎺懨洪鍛嫼闂傚倸鐗婃笟妤呮倿妤ｅ啯鐓曞┑鐘插枤濞堟粓鏌熼搹顐ょ畺闁靛牞缍佸畷姗€濡歌閻涙捇姊绘担绋款棌闁稿妫濆畷浼村箛椤旇崵鍓ㄥ銈嗘尪閸ㄦ椽鎮￠弴銏＄厪闁割偅绻堥妤冣偓娈垮櫘閸ｏ綁寮婚悢纰辨晬婵﹩鍓氬▓濠氭倵鐟欏嫭绀堥柛鐘崇墵閵嗕礁顫滈埀顒勫箖閵忋倖鎯為柣鐔稿閸婄偤姊婚崒姘偓椋庣矆娓氣偓楠炴牠顢曢妶鍥╃厠闂佸搫顦伴崵姘洪鍛珳婵犮垼娉涢鍛枔濮椻偓濮婅櫣娑甸崨顔兼锭缂備焦褰冨锟犲箖閸ф鐒垫い鎺戝閳锋垿鏌涘☉姗堝伐濠殿啫鍥ㄧ厾闂傚牊绋撶粔铏光偓?   */
+  Eigen::Vector3d CenterWorldForOutput() const
+  {
+    Eigen::Vector3d center{ekf_.x[0], ekf_.x[2], ekf_.x[4]};
+    return center;
+  }
+
+  /**
+   * @brief 闂傚倸鍊风粈渚€骞栭位鍥敃閿曗偓閻ょ偓绻濇繝鍌滃闁藉啰鍠栭弻鏇熺箾閸喖澹勫┑鐐叉▕娴滄粓宕橀埀顒€顪冮妶鍡樺暗闁哥姴瀛╃粋鎺懨洪鍛嫼闂傚倸鐗婃笟妤呮倿妤ｅ啯鐓曞┑鐘插枤濞堟粓鏌熼搹顐ょ畺闁靛牞缍佸畷姗€濡歌閻涙捇姊绘担绋款棌闁稿妫濆畷浼村箛椤旇崵鍓ㄥ銈嗘尪閸ㄦ椽鎮￠弴銏＄厪闁割偅绻堥妤冣偓娈垮櫘閸ｏ綁寮婚悢纰辨晬婵﹩鍓氬▓濠氭倵鐟欏嫭绀堥柛鐘崇墵閵嗕礁顫滈埀顒勫箖閵忋倖鎯為柣鐔稿閸婄偤姊婚崒姘偓椋庣矆娓氣偓楠炴牠顢曢妶鍥╃厠闂佸搫顦伴崵姘洪宥嗘櫍闂侀潧绻掓慨鐑藉礉閿曗偓椤啴濡堕崱妤冪懆闂佺锕ラ幃鍌氼嚕閸涘﹥鍎熼柕濠忕畱閳ь剛鏁婚幃宄扳枎韫囨搩浠奸梺宕囩帛濞叉牠鍩?   */
+  Eigen::Vector3d VelocityWorldForOutput() const
+  {
+    Eigen::Vector3d velocity{ekf_.x[1], ekf_.x[3], ekf_.x[5]};
+    if (UseOutpostHeightModel())
+    {
+      velocity.z() = 0.0;
+    }
+    return velocity;
+  }
+
+  /**
+   * @brief 闂傚倸鍊风粈渚€骞栭位鍥敃閿曗偓閻ょ偓绻濇繝鍌滃闁藉啰鍠栭弻鏇熺箾閸喖澹勫┑鐐叉▕娴滄粓宕橀埀顒勬⒑闂堟侗鐓┑鈥虫川缁棃宕奸弴鐔叉嫼闁荤喐鐟ョ€氼剟宕濋妶澶嬬厱闁绘棃顥撴禒銏㈡偖濞嗗浚鐔嗛悹楦挎閻忚京鐥幑鎰棄闂囧鏌ㄥ┑鍡樺櫤閻犳劧绻濋弻鐔煎礂閸涙澘鍘＄紓浣介哺鐢帟鐏冮梺閫炲苯澧存鐐诧攻閹棃濡搁妷搴涘劦閺岀喖鎮滃鍡樼暥婵炵鍋愭繛鈧柡灞炬礃瀵板嫬鈽夊鍡樺枠闂備礁鎼Λ娑欐叏閸偆鈹嶅┑鐘叉搐鍥撮梺鍛婁緱閸樻悂宕戦幘骞夸汗闁圭儤鎸诲▍鏃堟⒒娴ｇ瓔鍤欐慨姗堢畵閿濈偞寰勭€ｎ剛顔曟繝鐢靛Т閸婂寮抽敃鍌涚叆婵犻潧妫Σ鍝ョ棯閹冩倯缂佺粯鐩獮瀣倷閸偄娅楁俊鐐€栭弻銊х矓閻熼偊娼?   */
+  double DzForOutput() const
+  {
+    return UseOutpostHeightModel() ? kOutpostArmorHeightStep : ekf_.x[10];
   }
 
   /**
@@ -723,18 +851,169 @@ class Target
   bool is_converged_ = false;
   ExtendedKalmanFilter ekf_;
   std::chrono::steady_clock::time_point t_{};
+  int outpost_height_phase_ = 0;
+  bool outpost_height_phase_valid_ = false;
+  std::array<double, 3> outpost_observed_z_{};
+  std::array<bool, 3> outpost_observed_z_valid_{};
+
+  bool UseOutpostHeightModel() const
+  {
+    return name == ArmorName::OUTPOST && armor_num_ == 3;
+  }
+
+  double OutpostObservedFaceYaw(
+      const Armor& armor, const Eigen::Vector3d& center_world) const
+  {
+    Eigen::Vector3d armor_to_center = center_world - armor.xyz_in_world;
+    armor_to_center.z() = 0.0;
+    if (armor_to_center.head<2>().norm() < 1e-6)
+    {
+      return LimitRad(armor.ypr_in_world[0]);
+    }
+    return LimitRad(BearingYaw(armor_to_center));
+  }
+
+  int MatchOutpostArmor(
+      const Armor& armor,
+      const std::vector<std::pair<Eigen::Vector4d, int>>& xyza_i_list) const
+  {
+    int best_id = 0;
+    double best_error = std::numeric_limits<double>::infinity();
+    for (const auto& [xyza, candidate_id] : xyza_i_list)
+    {
+      const Eigen::Vector3d ypd = XyzToYpd(xyza.head(3));
+      double error =
+          std::abs(LimitRad(armor.ypr_in_world[0] - xyza[3])) +
+          std::abs(LimitRad(armor.ypd_in_world[0] - ypd[0]));
+      if (outpost_height_phase_valid_)
+      {
+        error += 2.0 * std::abs(armor.xyz_in_world.z() - xyza[2]);
+      }
+      if (error < best_error)
+      {
+        best_error = error;
+        best_id = candidate_id;
+      }
+    }
+
+    return best_id;
+  }
+
+  void ClampOutpostCenterVelocity()
+  {
+    if (!UseOutpostHeightModel())
+    {
+      return;
+    }
+
+    ekf_.x[1] = 0.0;
+    ekf_.x[3] = 0.0;
+    ekf_.x[5] = 0.0;
+  }
+
+  void UpdateOutpostHeightPhase(const Armor& armor, int id)
+  {
+    if (!UseOutpostHeightModel() || id < 0 || id >= 3)
+    {
+      return;
+    }
+
+    if (outpost_height_phase_valid_)
+    {
+      return;
+    }
+
+    const bool has_previous =
+        last_id >= 0 && last_id < 3 &&
+        outpost_observed_z_valid_[static_cast<std::size_t>(last_id)];
+    const double previous_z =
+        has_previous ? outpost_observed_z_[static_cast<std::size_t>(last_id)]
+                     : 0.0;
+
+    if (id != last_id && has_previous)
+    {
+      constexpr double kHeightRelationThreshold = 0.04;
+      constexpr double kTwoHeightStepTolerance = 0.05;
+      const double measured_delta = armor.xyz_in_world.z() - previous_z;
+      const double measured_delta_abs = std::abs(measured_delta);
+      const bool is_two_step =
+          std::abs(measured_delta_abs - 2.0 * kOutpostArmorHeightStep) <=
+          kTwoHeightStepTolerance;
+      if (measured_delta_abs >= kHeightRelationThreshold && is_two_step)
+      {
+        const int measured_sign = SignNonZero(measured_delta);
+        for (int phase = 0; phase < 3; ++phase)
+        {
+          const double candidate_delta =
+              OutpostArmorHeightOffset(id, phase) -
+              OutpostArmorHeightOffset(last_id, phase);
+          const bool candidate_is_two_step =
+              std::abs(std::abs(candidate_delta) -
+                       2.0 * kOutpostArmorHeightStep) <= 1e-6;
+          if (candidate_is_two_step &&
+              SignNonZero(candidate_delta) == measured_sign)
+          {
+            if (phase != outpost_height_phase_)
+            {
+              outpost_height_phase_ = phase;
+              ekf_.x[4] =
+                  armor.xyz_in_world.z() -
+                  OutpostArmorHeightOffset(id, outpost_height_phase_);
+              ekf_.x[5] = 0.0;
+            }
+            outpost_height_phase_valid_ = true;
+            break;
+          }
+        }
+      }
+    }
+
+    constexpr double kZUpdateAlpha = 0.35;
+    auto& observed_z = outpost_observed_z_[static_cast<std::size_t>(id)];
+    auto& observed_valid =
+        outpost_observed_z_valid_[static_cast<std::size_t>(id)];
+    if (observed_valid)
+    {
+      observed_z =
+          (1.0 - kZUpdateAlpha) * observed_z + kZUpdateAlpha * armor.xyz_in_world.z();
+    }
+    else
+    {
+      observed_z = armor.xyz_in_world.z();
+      observed_valid = true;
+    }
+  }
 
   /**
    * @brief Update EKF with yaw, elevation, distance, and armor yaw measurement.
    */
   void UpdateYpda(const Armor& armor, int id)
   {
+    const double center_x_before = ekf_.x[0];
+    const double center_y_before = ekf_.x[2];
+    const double center_z_before = ekf_.x[4];
+
     Eigen::MatrixXd H = HJacobian(ekf_.x, id);
     auto center_yaw = BearingYaw(armor.xyz_in_world);
-    auto delta_angle = LimitRad(armor.ypr_in_world[0] - center_yaw);
+    const Eigen::Vector3d center_before{center_x_before, center_y_before,
+                                        center_z_before};
+    const double observed_armor_yaw = armor.ypr_in_world[0];
+    auto delta_angle = LimitRad(observed_armor_yaw - center_yaw);
+    const double side_view = std::abs(delta_angle);
+    const bool side_observation = side_view > 0.55;
     Eigen::VectorXd R_dig(4);
-    R_dig << 4e-3, 4e-3, std::log(std::abs(delta_angle) + 1.0) + 1.0,
-        std::log(std::abs(armor.ypd_in_world[2]) + 1.0) / 200.0 + 9e-2;
+    if (name == ArmorName::OUTPOST)
+    {
+      const double ypd_noise =
+          side_observation ? 25.0 : 0.02 + 0.2 * side_view;
+      const double distance_noise = side_observation ? 400.0 : 2.0;
+      R_dig << ypd_noise, ypd_noise, distance_noise, 3e-2;
+    }
+    else
+    {
+      R_dig << 4e-3, 4e-3, std::log(std::abs(delta_angle) + 1.0) + 1.0,
+          std::log(std::abs(armor.ypd_in_world[2]) + 1.0) / 200.0 + 9e-2;
+    }
     Eigen::MatrixXd R = R_dig.asDiagonal();
 
     auto h = [&](const Eigen::VectorXd& x) -> Eigen::Vector4d
@@ -755,10 +1034,18 @@ class Target
     };
 
     const Eigen::VectorXd& ypd = armor.ypd_in_world;
-    const Eigen::VectorXd& ypr = armor.ypr_in_world;
     Eigen::VectorXd z(4);
-    z << ypd[0], ypd[1], ypd[2], ypr[0];
+    z << ypd[0], ypd[1], ypd[2], observed_armor_yaw;
     ekf_.Update(z, H, R, h, z_subtract);
+    if (UseOutpostHeightModel())
+    {
+      ekf_.x[0] = center_x_before;
+      ekf_.x[1] = 0.0;
+      ekf_.x[2] = center_y_before;
+      ekf_.x[3] = 0.0;
+      ekf_.x[4] = center_z_before;
+      ekf_.x[5] = 0.0;
+    }
   }
 
   /**
@@ -772,6 +1059,10 @@ class Target
     auto armor_x = x[0] + r * std::sin(angle);
     auto armor_y = x[2] - r * std::cos(angle);
     auto armor_z = use_l_h ? x[4] + x[10] : x[4];
+    if (UseOutpostHeightModel())
+    {
+      armor_z = x[4] + OutpostArmorHeightOffset(id, outpost_height_phase_);
+    }
     return {armor_x, armor_y, armor_z};
   }
 
@@ -942,6 +1233,8 @@ class Tracker
     double gimbal_angle_error{1.0};
     bool has_timestamp{false};
     std::chrono::steady_clock::time_point last_timestamp{};
+    bool outpost_center_hint_valid{false};
+    Eigen::Vector3d outpost_center_hint{Eigen::Vector3d::Zero()};
   };
 
   Solver& solver_;
@@ -1015,10 +1308,75 @@ class Tracker
    */
   static bool TargetHealthFailed(const TrackSlot& slot)
   {
-    return slot.initialized &&
-           (slot.target.Diverged() || RecentNisFailed(slot));
+    if (!slot.initialized)
+    {
+      return false;
+    }
+    if (slot.target.Diverged())
+    {
+      return true;
+    }
+    // Outpost keeps the fixed tower center and height phase across short NIS failures; otherwise side PnP noise can rebuild it with a wrong phase.
+    if (slot.target.name == ArmorName::OUTPOST)
+    {
+      return false;
+    }
+    return RecentNisFailed(slot);
   }
-
+  /**
+   * @brief Choose the initial outpost face id from the retained center hint.
+   */
+  static int ChooseOutpostInitialFaceId(const TrackSlot& slot, const Armor& armor)
+  {
+    if (!slot.outpost_center_hint_valid)
+    {
+      return 0;
+    }
+    Eigen::Vector3d armor_to_center = slot.outpost_center_hint - armor.xyz_in_world;
+    armor_to_center.z() = 0.0;
+    if (armor_to_center.head<2>().norm() < 1e-6)
+    {
+      return 0;
+    }
+    const double observed_face_yaw = BearingYaw(armor_to_center);
+    int best_id = 0;
+    double best_error = std::numeric_limits<double>::infinity();
+    for (int id = 0; id < 3; ++id)
+    {
+      const double candidate_yaw =
+          LimitRad(armor.ypr_in_world[0] + id * 2.0 * kPi / 3.0);
+      const double error = std::abs(LimitRad(observed_face_yaw - candidate_yaw));
+      if (error < best_error)
+      {
+        best_error = error;
+        best_id = id;
+      }
+    }
+    return best_id;
+  }
+  static std::pair<int, bool> ChooseOutpostInitialHeightPhase(
+      const TrackSlot& slot, const Armor& armor, int initial_id)
+  {
+    if (!slot.outpost_center_hint_valid)
+    {
+      return {0, true};
+    }
+    int best_phase = 0;
+    double best_error = std::numeric_limits<double>::infinity();
+    for (int phase = 0; phase < 3; ++phase)
+    {
+      const double center_z =
+          armor.xyz_in_world.z() - OutpostArmorHeightOffset(initial_id, phase);
+      const double error = std::abs(center_z - slot.outpost_center_hint.z());
+      if (error < best_error)
+      {
+        best_error = error;
+        best_phase = phase;
+      }
+    }
+    constexpr double kCenterHintGate = 0.06;
+    return {best_phase, best_error <= kCenterHintGate};
+  }
   /**
    * @brief Clear the retained target state after an EKF health failure.
    *
@@ -1083,6 +1441,12 @@ class Tracker
     if (slot.state != "lost" && TargetHealthFailed(slot))
     {
       ResetTargetSlot(slot);
+    }
+    if (slot.initialized && slot.state != "lost" &&
+        slot.target.name == ArmorName::OUTPOST)
+    {
+      slot.outpost_center_hint = slot.target.CenterWorldForOutput();
+      slot.outpost_center_hint_valid = true;
     }
     slot.score = ScoreSlot(slot, target_select_);
   }
@@ -1281,7 +1645,14 @@ class Tracker
     else if (armor.name == ArmorName::OUTPOST)
     {
       P0_dig << 1, 64, 1, 64, 1, 81, 0.4, 100, 1e-4, 0, 0;
-      slot.target = Target(armor, t, 0.2765, 3, P0_dig);
+      const int initial_id = ChooseOutpostInitialFaceId(slot, armor);
+      const auto [height_phase, height_phase_valid] =
+          ChooseOutpostInitialHeightPhase(slot, armor, initial_id);
+      slot.target = Target(armor, t, kOutpostArmorRadius, 3, P0_dig, initial_id,
+                           height_phase, height_phase_valid,
+                           slot.outpost_center_hint,
+                           height_phase_valid &&
+                               slot.outpost_center_hint_valid);
     }
     else if (armor.name == ArmorName::BASE)
     {
