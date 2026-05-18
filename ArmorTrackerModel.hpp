@@ -92,6 +92,49 @@ inline int TrackSlotIndex(ArmorName name)
   return index >= 0 && index < static_cast<int>(kTrackSlotCount) ? index : -1;
 }
 
+/// 前哨站相邻两块装甲板的中心高度差，单位 m。
+inline constexpr double outpost_height_step_m = 0.102;
+/// 前哨站转盘半径，单位 m。
+inline constexpr double outpost_radius_m = 0.2680137228;
+/// 前哨站装甲板固定安装倾角，单位 rad。
+inline constexpr double outpost_tilt_rad = 15.0 * kPi / 180.0;
+/// 前哨站 PnP 使用的灯条间距，单位 m。
+inline constexpr double outpost_lightbar_width_m = 0.135;
+/// Webots 可见贴纸宽度，单位 m。
+inline constexpr double outpost_visible_face_width_m = 0.120;
+/// Webots 可见贴纸高度，单位 m。
+inline constexpr double outpost_visible_face_height_m = 0.105;
+/// Webots 可见贴纸相对装甲板中心的法向偏移，单位 m。
+inline constexpr double outpost_visible_face_x_offset_m = 0.008486277200519598;
+/// Webots 可见贴纸相对装甲板中心的高度偏移，单位 m。
+inline constexpr double outpost_visible_face_z_offset_m = -0.003102112066953941;
+
+inline int PositiveMod(int value, int mod)
+{
+  const int result = value % mod;
+  return result < 0 ? result + mod : result;
+}
+
+inline double OutpostArmorHeightOffset(int face_id, int height_phase)
+{
+  // 本地面按 yaw 递增顺序展开为中、高、低。
+  switch (PositiveMod(face_id + height_phase, 3))
+  {
+    case 1:
+      return outpost_height_step_m;
+    case 2:
+      return -outpost_height_step_m;
+    case 0:
+    default:
+      return 0.0;
+  }
+}
+
+inline int SignNonZero(double value)
+{
+  return value > 0.0 ? 1 : -1;
+}
+
 /**
  * @brief Target selection priority for a detected armor.
  */
@@ -337,7 +380,9 @@ class Solver
   void Solve(Armor& armor) const
   {
     const auto& object_points =
-        armor.type == ArmorType::BIG ? BigArmorPoints() : SmallArmorPoints();
+        armor.name == ArmorName::OUTPOST ? OutpostPnpPoints()
+        : armor.type == ArmorType::BIG    ? BigArmorPoints()
+                                          : SmallArmorPoints();
     cv::Vec3d rvec;
     cv::Vec3d tvec;
     cv::solvePnP(object_points, armor.points, camera_matrix_, distort_coeffs_,
@@ -375,7 +420,7 @@ class Solver
                                           ArmorName name) const
   {
     const auto tilt =
-        name == ArmorName::OUTPOST ? -15.0 * kPi / 180.0 : 15.0 * kPi / 180.0;
+        name == ArmorName::OUTPOST ? outpost_tilt_rad : 15.0 * kPi / 180.0;
     const Eigen::Matrix3d R_armor2world = ArmorRotationFromYaw(yaw, tilt);
 
     const Eigen::Vector3d& t_armor2world = xyz_in_world;
@@ -392,13 +437,60 @@ class Solver
 
     std::vector<cv::Point2f> image_points;
     const auto& object_points =
-        type == ArmorType::BIG ? BigArmorPoints() : SmallArmorPoints();
+        name == ArmorName::OUTPOST ? OutpostPnpPoints()
+        : type == ArmorType::BIG    ? BigArmorPoints()
+                                  : SmallArmorPoints();
     cv::projectPoints(object_points, rvec, tvec, camera_matrix_, distort_coeffs_,
                       image_points);
     return image_points;
   }
 
- private:
+  /**
+   * @brief Project a preview face without changing the PnP/yaw fitting model.
+   */
+  std::vector<cv::Point2f> ReprojectPreviewArmor(
+      const Eigen::Vector3d& xyz_in_world, double yaw, ArmorType type,
+      ArmorName name) const
+  {
+    if (name == ArmorName::OUTPOST)
+    {
+      // preview 使用 Webots 可见贴纸几何，而不是 PnP 灯条面。
+      // 这里额外转 half-turn，把本地面朝向对回当前 Webots 贴纸朝向。
+      const double preview_yaw = LimitRad(yaw + kPi);
+      return ReprojectArmorObjectPoints(xyz_in_world, preview_yaw,
+                                        -outpost_tilt_rad,
+                                        OutpostVisibleFacePointsMirroredX());
+    }
+    return ReprojectArmor(xyz_in_world, yaw, type, name);
+  }
+
+private:
+  /**
+   * @brief 用给定几何模板重投影装甲板四角。
+   */
+  std::vector<cv::Point2f> ReprojectArmorObjectPoints(
+      const Eigen::Vector3d& xyz_in_world, double yaw, double tilt,
+      const std::vector<cv::Point3f>& object_points) const
+  {
+    const Eigen::Matrix3d R_armor2world = ArmorRotationFromYaw(yaw, tilt);
+    const Eigen::Vector3d& t_armor2world = xyz_in_world;
+    Eigen::Matrix3d R_armor2camera =
+        R_camera_to_body_.transpose() * R_body_to_world_.transpose() *
+        R_armor2world;
+    Eigen::Vector3d t_armor2camera =
+        R_camera_to_body_.transpose() *
+        (R_body_to_world_.transpose() * t_armor2world - t_camera_to_body_);
+
+    cv::Vec3d rvec;
+    cv::Rodrigues(Mat3dToCv(R_armor2camera), rvec);
+    cv::Vec3d tvec(t_armor2camera[0], t_armor2camera[1], t_armor2camera[2]);
+
+    std::vector<cv::Point2f> image_points;
+    cv::projectPoints(object_points, rvec, tvec, camera_matrix_, distort_coeffs_,
+                      image_points);
+    return image_points;
+  }
+
   cv::Mat camera_matrix_;
   cv::Mat distort_coeffs_;
   Eigen::Matrix3d R_camera_to_body_;
@@ -428,6 +520,36 @@ class Solver
         {0, -kSmallArmorWidth / 2.0, kLightbarLength / 2.0},
         {0, -kSmallArmorWidth / 2.0, -kLightbarLength / 2.0},
         {0, kSmallArmorWidth / 2.0, -kLightbarLength / 2.0}};
+    return points;
+  }
+
+  /**
+   * @brief Return object points for outpost armor PnP.
+   */
+  static const std::vector<cv::Point3f>& OutpostPnpPoints()
+  {
+    static const std::vector<cv::Point3f> points{
+        {0, outpost_lightbar_width_m / 2.0, kLightbarLength / 2.0},
+        {0, -outpost_lightbar_width_m / 2.0, kLightbarLength / 2.0},
+        {0, -outpost_lightbar_width_m / 2.0, -kLightbarLength / 2.0},
+        {0, outpost_lightbar_width_m / 2.0, -kLightbarLength / 2.0}};
+    return points;
+  }
+
+  /**
+   * @brief 返回前哨站可见贴纸四角，水平顺序按当前 preview 约定镜像。
+   */
+  static const std::vector<cv::Point3f>& OutpostVisibleFacePointsMirroredX()
+  {
+    static const std::vector<cv::Point3f> points{
+        {outpost_visible_face_x_offset_m, outpost_visible_face_width_m / 2.0,
+         outpost_visible_face_z_offset_m - outpost_visible_face_height_m / 2.0},
+        {outpost_visible_face_x_offset_m, -outpost_visible_face_width_m / 2.0,
+         outpost_visible_face_z_offset_m - outpost_visible_face_height_m / 2.0},
+        {outpost_visible_face_x_offset_m, -outpost_visible_face_width_m / 2.0,
+         outpost_visible_face_z_offset_m + outpost_visible_face_height_m / 2.0},
+        {outpost_visible_face_x_offset_m, outpost_visible_face_width_m / 2.0,
+         outpost_visible_face_z_offset_m + outpost_visible_face_height_m / 2.0}};
     return points;
   }
 
@@ -488,6 +610,16 @@ class Target
   int last_id{};
 
   /**
+   * @brief 返回当前前哨站高度相位，供下游展开三块装甲。
+   */
+  int OutpostHeightPhase() const { return outpost_height_phase_; }
+
+  /**
+   * @brief 返回当前前哨站高度相位是否已经由观测约束过。
+   */
+  bool OutpostHeightPhaseValid() const { return outpost_height_phase_valid_; }
+
+  /**
    * @brief Construct an empty target state.
    */
   Target() = default;
@@ -496,7 +628,10 @@ class Target
    * @brief Initialize a target from the first selected armor observation.
    */
   Target(const Armor& armor, std::chrono::steady_clock::time_point t,
-         double radius, int armor_num, const Eigen::VectorXd& P0_dig)
+         double radius, int armor_num, const Eigen::VectorXd& P0_dig,
+         int outpost_height_phase = 0, bool outpost_height_phase_valid = false,
+         Eigen::Vector3d outpost_center_hint = Eigen::Vector3d::Zero(),
+         bool outpost_center_hint_valid = false)
       : name(armor.name),
         armor_type(armor.type),
         priority(armor.priority),
@@ -505,14 +640,26 @@ class Target
         armor_num_(armor_num),
         update_count_(0),
         is_converged_(false),
-        t_(t)
+        t_(t),
+        outpost_height_phase_(outpost_height_phase),
+        outpost_height_phase_valid_(outpost_height_phase_valid)
   {
     const auto r = radius;
     const Eigen::VectorXd& xyz = armor.xyz_in_world;
     const Eigen::VectorXd& ypr = armor.ypr_in_world;
-    const auto center_x = xyz[0] - r * std::sin(ypr[0]);
-    const auto center_y = xyz[1] + r * std::cos(ypr[0]);
-    const auto center_z = xyz[2];
+    auto center_x = xyz[0] - r * std::sin(ypr[0]);
+    auto center_y = xyz[1] + r * std::cos(ypr[0]);
+    auto center_z = xyz[2];
+    if (name == ArmorName::OUTPOST && armor_num == 3)
+    {
+      center_z -= OutpostArmorHeightOffset(last_id, outpost_height_phase_);
+      if (outpost_center_hint_valid)
+      {
+        center_x = outpost_center_hint.x();
+        center_y = outpost_center_hint.y();
+        center_z = outpost_center_hint.z();
+      }
+    }
 
     Eigen::VectorXd x0(11);
     x0 << center_x, 0.0, center_y, 0.0, center_z, 0.0, ypr[0], 0.0, r,
@@ -527,6 +674,11 @@ class Target
       return c;
     };
     ekf_ = ExtendedKalmanFilter(x0, P0, x_add);
+    if (UseOutpostHeightModel())
+    {
+      outpost_observed_z_[0] = xyz[2];
+      outpost_observed_z_valid_[0] = true;
+    }
   }
 
   /**
@@ -554,8 +706,9 @@ class Target
     double v2;
     if (name == ArmorName::OUTPOST)
     {
-      v1 = 10.0;
-      v2 = 0.1;
+      // 前哨站本体固定，侧面 PnP 距离噪声较大；中心位置预测应强约束。
+      v1 = 0.05;
+      v2 = 0.5;
     }
     else
     {
@@ -596,6 +749,7 @@ class Target
       ekf_.x[7] = ekf_.x[7] > 0.0 ? 2.51 : -2.51;
     }
     ekf_.Predict(F, Q, f);
+    ClampOutpostCenterVelocity();
   }
 
   /**
@@ -630,6 +784,10 @@ class Target
       auto angle_error =
           std::abs(LimitRad(armor.ypr_in_world[0] - xyza[3])) +
           std::abs(LimitRad(armor.ypd_in_world[0] - ypd[0]));
+      if (UseOutpostHeightModel() && outpost_height_phase_valid_)
+      {
+        angle_error += 2.0 * std::abs(armor.xyz_in_world.z() - xyza[2]);
+      }
       if (std::abs(angle_error) < std::abs(min_angle_error))
       {
         id = xyza_i_list[i].second;
@@ -641,9 +799,11 @@ class Target
     {
       jumped = true;
     }
+    UpdateOutpostHeightPhase(armor, id);
     last_id = id;
     ++update_count_;
     UpdateYpda(armor, id);
+    ClampOutpostCenterVelocity();
   }
 
   /**
@@ -670,6 +830,59 @@ class Target
       list.push_back({xyz[0], xyz[1], xyz[2], angle});
     }
     return list;
+  }
+
+  /**
+   * @brief 返回叠加前哨站三高度相位后的装甲板输出几何。
+   */
+  std::vector<Eigen::Vector4d> ArmorXyzaListForOutput() const
+  {
+    if (!UseOutpostHeightModel())
+    {
+      return ArmorXyzaList();
+    }
+
+    std::vector<Eigen::Vector4d> list;
+    list.reserve(static_cast<std::size_t>(armor_num_));
+    const double center_z = CenterWorldForOutput().z();
+    for (int i = 0; i < armor_num_; ++i)
+    {
+      auto angle = LimitRad(ekf_.x[6] + i * 2.0 * kPi / armor_num_);
+      Eigen::Vector3d xyz = HArmorXyz(ekf_.x, i);
+      xyz.z() = center_z + OutpostArmorHeightOffset(i, outpost_height_phase_);
+      list.push_back({xyz[0], xyz[1], xyz[2], angle});
+    }
+    return list;
+  }
+
+  /**
+   * @brief 返回用于输出的目标中心。
+   */
+  Eigen::Vector3d CenterWorldForOutput() const
+  {
+    Eigen::Vector3d center{ekf_.x[0], ekf_.x[2], ekf_.x[4]};
+    return center;
+  }
+
+  /**
+   * @brief 返回用于输出的目标速度。
+   */
+  Eigen::Vector3d VelocityWorldForOutput() const
+  {
+    Eigen::Vector3d velocity{ekf_.x[1], ekf_.x[3], ekf_.x[5]};
+    if (UseOutpostHeightModel())
+    {
+      velocity.z() = 0.0;
+    }
+    return velocity;
+  }
+
+  /**
+   * @brief 返回输出给下游的高度参数。
+   */
+  double DzForOutput() const
+  {
+    return UseOutpostHeightModel() ? outpost_height_step_m : ekf_.x[10];
   }
 
   /**
@@ -704,18 +917,127 @@ class Target
   bool is_converged_ = false;
   ExtendedKalmanFilter ekf_;
   std::chrono::steady_clock::time_point t_{};
+  int outpost_height_phase_ = 0;
+  bool outpost_height_phase_valid_ = false;
+  std::array<double, 3> outpost_observed_z_{};
+  std::array<bool, 3> outpost_observed_z_valid_{};
+
+  bool UseOutpostHeightModel() const
+  {
+    return name == ArmorName::OUTPOST && armor_num_ == 3;
+  }
+
+  void ClampOutpostCenterVelocity()
+  {
+    if (!UseOutpostHeightModel())
+    {
+      return;
+    }
+
+    // 前哨站塔心在惯性系固定，侧面 PnP 不应给中心积分出平移速度。
+    ekf_.x[1] = 0.0;
+    ekf_.x[3] = 0.0;
+    ekf_.x[5] = 0.0;
+  }
+
+  void UpdateOutpostHeightPhase(const Armor& armor, int id)
+  {
+    if (!UseOutpostHeightModel() || id < 0 || id >= 3)
+    {
+      return;
+    }
+
+    const bool has_previous =
+        last_id >= 0 && last_id < 3 &&
+        outpost_observed_z_valid_[static_cast<std::size_t>(last_id)];
+    const double previous_z =
+        has_previous ? outpost_observed_z_[static_cast<std::size_t>(last_id)]
+                     : 0.0;
+
+    if (id != last_id && has_previous)
+    {
+      constexpr double kHeightRelationThreshold = 0.04;
+      constexpr double kTwoHeightStepTolerance = 0.05;
+      const double measured_delta = armor.xyz_in_world.z() - previous_z;
+      const double measured_delta_abs = std::abs(measured_delta);
+      const bool is_two_step =
+          std::abs(measured_delta_abs - 2.0 * outpost_height_step_m) <=
+          kTwoHeightStepTolerance;
+      if (measured_delta_abs >= kHeightRelationThreshold && is_two_step)
+      {
+        const int measured_sign = SignNonZero(measured_delta);
+        for (int phase = 0; phase < 3; ++phase)
+        {
+          const double candidate_delta =
+              OutpostArmorHeightOffset(id, phase) -
+              OutpostArmorHeightOffset(last_id, phase);
+          const bool candidate_is_two_step =
+              std::abs(std::abs(candidate_delta) -
+                       2.0 * outpost_height_step_m) <= 1e-6;
+          if (candidate_is_two_step &&
+              SignNonZero(candidate_delta) == measured_sign)
+          {
+            if (phase != outpost_height_phase_)
+            {
+              outpost_height_phase_ = phase;
+              ekf_.x[4] =
+                  armor.xyz_in_world.z() -
+                  OutpostArmorHeightOffset(id, outpost_height_phase_);
+              ekf_.x[5] = 0.0;
+            }
+            outpost_height_phase_valid_ = true;
+            break;
+          }
+        }
+      }
+    }
+
+    constexpr double kZUpdateAlpha = 0.35;
+    auto& observed_z = outpost_observed_z_[static_cast<std::size_t>(id)];
+    auto& observed_valid =
+        outpost_observed_z_valid_[static_cast<std::size_t>(id)];
+    if (observed_valid)
+    {
+      observed_z =
+          (1.0 - kZUpdateAlpha) * observed_z + kZUpdateAlpha * armor.xyz_in_world.z();
+    }
+    else
+    {
+      observed_z = armor.xyz_in_world.z();
+      observed_valid = true;
+    }
+  }
 
   /**
    * @brief Update EKF with yaw, elevation, distance, and armor yaw measurement.
    */
   void UpdateYpda(const Armor& armor, int id)
   {
+    const double center_x_before = ekf_.x[0];
+    const double center_y_before = ekf_.x[2];
+    const double center_z_before = ekf_.x[4];
+
     Eigen::MatrixXd H = HJacobian(ekf_.x, id);
     auto center_yaw = BearingYaw(armor.xyz_in_world);
     auto delta_angle = LimitRad(armor.ypr_in_world[0] - center_yaw);
+    const double side_view = std::abs(delta_angle);
+    const bool side_observation = side_view > 0.55;
+    // 侧面 PnP 的平移最不稳定，只信它的角度，不让它拖走塔心。
+    const bool lock_outpost_center = UseOutpostHeightModel() && side_observation;
     Eigen::VectorXd R_dig(4);
-    R_dig << 4e-3, 4e-3, std::log(std::abs(delta_angle) + 1.0) + 1.0,
-        std::log(std::abs(armor.ypd_in_world[2]) + 1.0) / 200.0 + 9e-2;
+    if (name == ArmorName::OUTPOST)
+    {
+      const double ypd_noise =
+          side_observation ? 25.0 : 0.02 + 0.2 * side_view;
+      const double distance_noise = side_observation ? 400.0 : 2.0;
+      // 前哨站侧面观测的 PnP 平移容易偏；侧面只保留 yaw 作为相位和角速度证据。
+      R_dig << ypd_noise, ypd_noise, distance_noise, 3e-2;
+    }
+    else
+    {
+      R_dig << 4e-3, 4e-3, std::log(std::abs(delta_angle) + 1.0) + 1.0,
+          std::log(std::abs(armor.ypd_in_world[2]) + 1.0) / 200.0 + 9e-2;
+    }
     Eigen::MatrixXd R = R_dig.asDiagonal();
 
     auto h = [&](const Eigen::VectorXd& x) -> Eigen::Vector4d
@@ -740,6 +1062,29 @@ class Target
     Eigen::VectorXd z(4);
     z << ypd[0], ypd[1], ypd[2], ypr[0];
     ekf_.Update(z, H, R, h, z_subtract);
+    if (UseOutpostHeightModel() && !side_observation)
+    {
+      // 正面/斜前面观测可信时，直接把塔心回锚到该装甲板反推的位置。
+      const double angle = LimitRad(ekf_.x[6] + id * 2.0 * kPi / armor_num_);
+      const double r = ekf_.x[8];
+      ekf_.x[0] = armor.xyz_in_world.x() - r * std::sin(angle);
+      ekf_.x[1] = 0.0;
+      ekf_.x[2] = armor.xyz_in_world.y() + r * std::cos(angle);
+      ekf_.x[3] = 0.0;
+      ekf_.x[4] = armor.xyz_in_world.z() -
+                  OutpostArmorHeightOffset(id, outpost_height_phase_);
+      ekf_.x[5] = 0.0;
+    }
+    if (lock_outpost_center)
+    {
+      // 侧面观测只更新相位和 yaw，不更新塔心 xyz。
+      ekf_.x[0] = center_x_before;
+      ekf_.x[1] = 0.0;
+      ekf_.x[2] = center_y_before;
+      ekf_.x[3] = 0.0;
+      ekf_.x[4] = center_z_before;
+      ekf_.x[5] = 0.0;
+    }
   }
 
   /**
@@ -753,6 +1098,10 @@ class Target
     auto armor_x = x[0] + r * std::sin(angle);
     auto armor_y = x[2] - r * std::cos(angle);
     auto armor_z = use_l_h ? x[4] + x[10] : x[4];
+    if (UseOutpostHeightModel())
+    {
+      armor_z = x[4] + OutpostArmorHeightOffset(id, outpost_height_phase_);
+    }
     return {armor_x, armor_y, armor_z};
   }
 
@@ -922,6 +1271,8 @@ class Tracker
     double gimbal_angle_error{1.0};
     bool has_timestamp{false};
     std::chrono::steady_clock::time_point last_timestamp{};
+    bool outpost_center_hint_valid{false};
+    Eigen::Vector3d outpost_center_hint{Eigen::Vector3d::Zero()};
   };
 
   Solver& solver_;
@@ -994,8 +1345,50 @@ class Tracker
    */
   static bool TargetHealthFailed(const TrackSlot& slot)
   {
-    return slot.initialized &&
-           (slot.target.Diverged() || RecentNisFailed(slot));
+    if (!slot.initialized)
+    {
+      return false;
+    }
+    if (slot.target.Diverged())
+    {
+      return true;
+    }
+    // 前哨站单面/侧面 PnP 平移噪声明显，短窗 NIS 失败不能直接清空
+    // 固定塔心和高度相位；否则会在换面附近误重建到别的 phase。
+    if (slot.target.name == ArmorName::OUTPOST)
+    {
+      return false;
+    }
+    return RecentNisFailed(slot);
+  }
+
+  /**
+   * @brief 用上一次稳定塔心高度，为前哨站初始化选择最接近的高度相位。
+   */
+  static std::pair<int, bool> ChooseOutpostInitialHeightPhase(
+      const TrackSlot& slot, const Armor& armor)
+  {
+    if (!slot.outpost_center_hint_valid)
+    {
+      return {0, false};
+    }
+
+    int best_phase = 0;
+    double best_error = std::numeric_limits<double>::infinity();
+    for (int phase = 0; phase < 3; ++phase)
+    {
+      const double center_z =
+          armor.xyz_in_world.z() - OutpostArmorHeightOffset(0, phase);
+      const double error = std::abs(center_z - slot.outpost_center_hint.z());
+      if (error < best_error)
+      {
+        best_error = error;
+        best_phase = phase;
+      }
+    }
+
+    constexpr double kCenterHintGate = 0.06;
+    return {best_phase, best_error <= kCenterHintGate};
   }
 
   /**
@@ -1062,6 +1455,12 @@ class Tracker
     if (slot.state != "lost" && TargetHealthFailed(slot))
     {
       ResetTargetSlot(slot);
+    }
+    if (slot.initialized && slot.state != "lost" &&
+        slot.target.name == ArmorName::OUTPOST)
+    {
+      slot.outpost_center_hint = slot.target.CenterWorldForOutput();
+      slot.outpost_center_hint_valid = true;
     }
     slot.score = ScoreSlot(slot);
   }
@@ -1252,7 +1651,12 @@ class Tracker
     else if (armor.name == ArmorName::OUTPOST)
     {
       P0_dig << 1, 64, 1, 64, 1, 81, 0.4, 100, 1e-4, 0, 0;
-      slot.target = Target(armor, t, 0.2765, 3, P0_dig);
+      const auto [height_phase, height_phase_valid] =
+          ChooseOutpostInitialHeightPhase(slot, armor);
+      slot.target = Target(armor, t, outpost_radius_m, 3, P0_dig, height_phase,
+                           height_phase_valid, slot.outpost_center_hint,
+                           height_phase_valid &&
+                               slot.outpost_center_hint_valid);
     }
     else if (armor.name == ArmorName::BASE)
     {
