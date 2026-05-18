@@ -92,10 +92,20 @@ inline int TrackSlotIndex(ArmorName name)
   return index >= 0 && index < static_cast<int>(kTrackSlotCount) ? index : -1;
 }
 
-// Outpost adjacent armor height difference in meters.
+/// 前哨站相邻两块装甲板的中心高度差，单位 m。
 inline constexpr double kOutpostArmorHeightStep = 0.102;
+/// 前哨站转盘半径，单位 m。
 inline constexpr double kOutpostArmorRadius = 0.2765;
+/// 前哨站装甲板固定安装倾角，单位 rad。
 inline constexpr double kOutpostArmorTilt = 15.0 * kPi / 180.0;
+/// Webots 可见贴纸宽度，单位 m。
+inline constexpr double kOutpostVisibleFaceWidth = 0.120;
+/// Webots 可见贴纸高度，单位 m。
+inline constexpr double kOutpostVisibleFaceHeight = 0.105;
+/// Webots 可见贴纸相对装甲板中心的法向偏移，单位 m。
+inline constexpr double kOutpostVisibleFaceXOffset = 0.008486277200519598;
+/// Webots 可见贴纸相对装甲板中心的高度偏移，单位 m。
+inline constexpr double kOutpostVisibleFaceZOffset = -0.003102112066953941;
 
 inline int PositiveMod(int value, int mod)
 {
@@ -105,6 +115,7 @@ inline int PositiveMod(int value, int mod)
 
 inline double OutpostArmorHeightOffset(int face_id, int height_phase)
 {
+  // 本地面按 yaw 递增顺序展开为中、高、低。
   switch (PositiveMod(face_id + height_phase, 3))
   {
     case 1:
@@ -447,7 +458,51 @@ class Solver
     return image_points;
   }
 
+  /**
+   * @brief 重投影 preview 用的装甲板可见贴纸四角。
+   */
+  std::vector<cv::Point2f> ReprojectPreviewArmor(
+      const Eigen::Vector3d& xyz_in_world, double yaw, ArmorType type,
+      ArmorName name) const
+  {
+    if (name == ArmorName::OUTPOST)
+    {
+      // preview 使用 Webots 可见贴纸几何，而不是 PnP 灯条面。
+      const double preview_yaw = LimitRad(yaw + kPi);
+      return ReprojectArmorObjectPoints(xyz_in_world, preview_yaw,
+                                        -kOutpostArmorTilt,
+                                        OutpostVisibleFacePointsMirroredX());
+    }
+    return ReprojectArmor(xyz_in_world, yaw, type, name);
+  }
+
  private:
+  /**
+   * @brief 用给定几何模板重投影装甲板四角。
+   */
+  std::vector<cv::Point2f> ReprojectArmorObjectPoints(
+      const Eigen::Vector3d& xyz_in_world, double yaw, double tilt,
+      const std::vector<cv::Point3f>& object_points) const
+  {
+    const Eigen::Matrix3d R_armor2world = ArmorRotationFromYaw(yaw, tilt);
+    const Eigen::Vector3d& t_armor2world = xyz_in_world;
+    Eigen::Matrix3d R_armor2camera =
+        R_camera_to_body_.transpose() * R_body_to_world_.transpose() *
+        R_armor2world;
+    Eigen::Vector3d t_armor2camera =
+        R_camera_to_body_.transpose() *
+        (R_body_to_world_.transpose() * t_armor2world - t_camera_to_body_);
+
+    cv::Vec3d rvec;
+    cv::Rodrigues(Mat3dToCv(R_armor2camera), rvec);
+    cv::Vec3d tvec(t_armor2camera[0], t_armor2camera[1], t_armor2camera[2]);
+
+    std::vector<cv::Point2f> image_points;
+    cv::projectPoints(object_points, rvec, tvec, camera_matrix_, distort_coeffs_,
+                      image_points);
+    return image_points;
+  }
+
   cv::Mat camera_matrix_;
   cv::Mat distort_coeffs_;
   Eigen::Matrix3d R_camera_to_body_;
@@ -480,7 +535,24 @@ class Solver
     return points;
   }
 
-/**
+  /**
+   * @brief 返回前哨站可见贴纸四角，水平顺序按当前 preview 约定镜像。
+   */
+  static const std::vector<cv::Point3f>& OutpostVisibleFacePointsMirroredX()
+  {
+    static const std::vector<cv::Point3f> points{
+        {kOutpostVisibleFaceXOffset, kOutpostVisibleFaceWidth / 2.0,
+         kOutpostVisibleFaceZOffset - kOutpostVisibleFaceHeight / 2.0},
+        {kOutpostVisibleFaceXOffset, -kOutpostVisibleFaceWidth / 2.0,
+         kOutpostVisibleFaceZOffset - kOutpostVisibleFaceHeight / 2.0},
+        {kOutpostVisibleFaceXOffset, -kOutpostVisibleFaceWidth / 2.0,
+         kOutpostVisibleFaceZOffset + kOutpostVisibleFaceHeight / 2.0},
+        {kOutpostVisibleFaceXOffset, kOutpostVisibleFaceWidth / 2.0,
+         kOutpostVisibleFaceZOffset + kOutpostVisibleFaceHeight / 2.0}};
+    return points;
+  }
+
+  /**
    * @brief Refine armor yaw by minimizing reprojection error.
    */
   void OptimizeYaw(Armor& armor) const
