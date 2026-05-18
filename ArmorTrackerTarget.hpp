@@ -35,7 +35,8 @@ struct ArmorTrackerTarget
   double v_yaw{};                          ///< 整车 yaw 角速度，单位 rad/s。
   double radius_1{};                       ///< 偶数面或默认装甲半径，单位 m。
   double radius_2{};                       ///< 奇数面装甲半径，单位 m。
-  double dz{};                             ///< 奇偶装甲面高度差，单位 m。
-  int tracked_face_index{0};               ///< 当前 EKF 绑定的本地装甲面索引。
+  double dz{};  ///< 四面目标为奇偶装甲高度差；前哨站为相邻高度差，单位 m。
+  int tracked_face_index{0};         ///< 当前 EKF 绑定的本地装甲面索引。
+  int outpost_height_phase{0};       ///< 前哨站本地面索引到高/中/低槽位的相位。
   bool face_switch_observed{false};        ///< 跟踪期间是否观测到换面。
 };
