@@ -92,17 +92,14 @@ inline int TrackSlotIndex(ArmorName name)
   return index >= 0 && index < static_cast<int>(kTrackSlotCount) ? index : -1;
 }
 
-// 前哨站三块装甲相邻高度差，单位 m。
-inline constexpr double kOutpostArmorHeightStep = 0.102;
-inline constexpr double kOutpostArmorRadius = 0.2680137228;
-inline constexpr double kOutpostArmorTilt = 15.0 * kPi / 180.0;
-inline constexpr double kOutpostLightbarWidth = 0.135;
-inline constexpr double kOutpostVisibleFaceWidth = 0.120;
-inline constexpr double kOutpostVisibleFaceHeight = 0.105;
-inline constexpr double kOutpostVisibleFaceLocalY = -0.009;
-inline constexpr double kOutpostVisibleFaceLocalZ = -0.0008;
-inline constexpr double kOutpostVisibleFaceXOffset = 0.008486277200519598;
-inline constexpr double kOutpostVisibleFaceZOffset = -0.003102112066953941;
+inline constexpr double outpost_height_step_m = 0.102;
+inline constexpr double outpost_radius_m = 0.2680137228;
+inline constexpr double outpost_tilt_rad = 15.0 * kPi / 180.0;
+inline constexpr double outpost_lightbar_width_m = 0.135;
+inline constexpr double outpost_visible_face_width_m = 0.120;
+inline constexpr double outpost_visible_face_height_m = 0.105;
+inline constexpr double outpost_visible_face_x_offset_m = 0.008486277200519598;
+inline constexpr double outpost_visible_face_z_offset_m = -0.003102112066953941;
 
 inline int PositiveMod(int value, int mod)
 {
@@ -112,13 +109,13 @@ inline int PositiveMod(int value, int mod)
 
 inline double OutpostArmorHeightOffset(int face_id, int height_phase)
 {
-  // 本地面按 yaw 递增展开；前哨站实物在该顺序下是中、高、低。
+  // 本地面按 yaw 递增顺序展开为中、高、低。
   switch (PositiveMod(face_id + height_phase, 3))
   {
     case 1:
-      return kOutpostArmorHeightStep;
+      return outpost_height_step_m;
     case 2:
-      return -kOutpostArmorHeightStep;
+      return -outpost_height_step_m;
     case 0:
     default:
       return 0.0;
@@ -415,7 +412,7 @@ class Solver
                                           ArmorName name) const
   {
     const auto tilt =
-        name == ArmorName::OUTPOST ? kOutpostArmorTilt : 15.0 * kPi / 180.0;
+        name == ArmorName::OUTPOST ? outpost_tilt_rad : 15.0 * kPi / 180.0;
     const Eigen::Matrix3d R_armor2world = ArmorRotationFromYaw(yaw, tilt);
 
     const Eigen::Vector3d& t_armor2world = xyz_in_world;
@@ -451,7 +448,7 @@ class Solver
     {
       const double preview_yaw = LimitRad(yaw + kPi);
       return ReprojectArmorObjectPoints(xyz_in_world, preview_yaw,
-                                        -kOutpostArmorTilt,
+                                        -outpost_tilt_rad,
                                         OutpostVisibleFacePointsMirroredX());
     }
     return ReprojectArmor(xyz_in_world, yaw, type, name);
@@ -519,10 +516,10 @@ class Solver
   static const std::vector<cv::Point3f>& OutpostPnpPoints()
   {
     static const std::vector<cv::Point3f> points{
-        {0, kOutpostLightbarWidth / 2.0, kLightbarLength / 2.0},
-        {0, -kOutpostLightbarWidth / 2.0, kLightbarLength / 2.0},
-        {0, -kOutpostLightbarWidth / 2.0, -kLightbarLength / 2.0},
-        {0, kOutpostLightbarWidth / 2.0, -kLightbarLength / 2.0}};
+        {0, outpost_lightbar_width_m / 2.0, kLightbarLength / 2.0},
+        {0, -outpost_lightbar_width_m / 2.0, kLightbarLength / 2.0},
+        {0, -outpost_lightbar_width_m / 2.0, -kLightbarLength / 2.0},
+        {0, outpost_lightbar_width_m / 2.0, -kLightbarLength / 2.0}};
     return points;
   }
 
@@ -532,14 +529,14 @@ class Solver
   static const std::vector<cv::Point3f>& OutpostVisibleFacePointsMirroredX()
   {
     static const std::vector<cv::Point3f> points{
-        {kOutpostVisibleFaceXOffset, kOutpostVisibleFaceWidth / 2.0,
-         kOutpostVisibleFaceZOffset - kOutpostVisibleFaceHeight / 2.0},
-        {kOutpostVisibleFaceXOffset, -kOutpostVisibleFaceWidth / 2.0,
-         kOutpostVisibleFaceZOffset - kOutpostVisibleFaceHeight / 2.0},
-        {kOutpostVisibleFaceXOffset, -kOutpostVisibleFaceWidth / 2.0,
-         kOutpostVisibleFaceZOffset + kOutpostVisibleFaceHeight / 2.0},
-        {kOutpostVisibleFaceXOffset, kOutpostVisibleFaceWidth / 2.0,
-         kOutpostVisibleFaceZOffset + kOutpostVisibleFaceHeight / 2.0}};
+        {outpost_visible_face_x_offset_m, outpost_visible_face_width_m / 2.0,
+         outpost_visible_face_z_offset_m - outpost_visible_face_height_m / 2.0},
+        {outpost_visible_face_x_offset_m, -outpost_visible_face_width_m / 2.0,
+         outpost_visible_face_z_offset_m - outpost_visible_face_height_m / 2.0},
+        {outpost_visible_face_x_offset_m, -outpost_visible_face_width_m / 2.0,
+         outpost_visible_face_z_offset_m + outpost_visible_face_height_m / 2.0},
+        {outpost_visible_face_x_offset_m, outpost_visible_face_width_m / 2.0,
+         outpost_visible_face_z_offset_m + outpost_visible_face_height_m / 2.0}};
     return points;
   }
 
@@ -872,7 +869,7 @@ class Target
    */
   double DzForOutput() const
   {
-    return UseOutpostHeightModel() ? kOutpostArmorHeightStep : ekf_.x[10];
+    return UseOutpostHeightModel() ? outpost_height_step_m : ekf_.x[10];
   }
 
   /**
@@ -951,7 +948,7 @@ class Target
       const double measured_delta = armor.xyz_in_world.z() - previous_z;
       const double measured_delta_abs = std::abs(measured_delta);
       const bool is_two_step =
-          std::abs(measured_delta_abs - 2.0 * kOutpostArmorHeightStep) <=
+          std::abs(measured_delta_abs - 2.0 * outpost_height_step_m) <=
           kTwoHeightStepTolerance;
       if (measured_delta_abs >= kHeightRelationThreshold && is_two_step)
       {
@@ -963,7 +960,7 @@ class Target
               OutpostArmorHeightOffset(last_id, phase);
           const bool candidate_is_two_step =
               std::abs(std::abs(candidate_delta) -
-                       2.0 * kOutpostArmorHeightStep) <= 1e-6;
+                       2.0 * outpost_height_step_m) <= 1e-6;
           if (candidate_is_two_step &&
               SignNonZero(candidate_delta) == measured_sign)
           {
@@ -1640,7 +1637,7 @@ class Tracker
       P0_dig << 1, 64, 1, 64, 1, 81, 0.4, 100, 1e-4, 0, 0;
       const auto [height_phase, height_phase_valid] =
           ChooseOutpostInitialHeightPhase(slot, armor);
-      slot.target = Target(armor, t, kOutpostArmorRadius, 3, P0_dig, height_phase,
+      slot.target = Target(armor, t, outpost_radius_m, 3, P0_dig, height_phase,
                            height_phase_valid, slot.outpost_center_hint,
                            height_phase_valid &&
                                slot.outpost_center_hint_valid);
