@@ -21,6 +21,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: Modules/${{ env.XR_MODULE_NAME }}
+          ref: ${{ github.head_ref || github.ref_name }}
 
       - name: Create main.cpp
         run: |
@@ -47,6 +48,15 @@ jobs:
           set(CMAKE_CXX_STANDARD_REQUIRED ON)
           add_executable(xr_test main.cpp)
           set(XROBOT_MODULES_DIR ${CMAKE_CURRENT_SOURCE_DIR}/Modules/)
+          file(GLOB XR_MODULE_CHILDREN RELATIVE ${CMAKE_CURRENT_SOURCE_DIR}/Modules
+               ${CMAKE_CURRENT_SOURCE_DIR}/Modules/*)
+          set(XR_MODULE_INCLUDE_DIRS "")
+          foreach(child IN LISTS XR_MODULE_CHILDREN)
+            if(IS_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/Modules/${child}")
+              list(APPEND XR_MODULE_INCLUDE_DIRS
+                   "${CMAKE_CURRENT_SOURCE_DIR}/Modules/${child}")
+            endif()
+          endforeach()
           set(WEBOTS_HOME /usr/local/webots)
           set(LIBXR_PRINT_INTEGER_ENABLE_64BIT ON CACHE BOOL "" FORCE)
           set(LIBXR_PRINT_FLOAT_ENABLE_DOUBLE ON CACHE BOOL "" FORCE)
@@ -58,6 +68,7 @@ jobs:
             xr_test
             PUBLIC $<TARGET_PROPERTY:xr,INTERFACE_INCLUDE_DIRECTORIES>
                    ${CMAKE_SOURCE_DIR}/User
+                   ${XR_MODULE_INCLUDE_DIRS}
           )
           target_link_libraries(xr_test PUBLIC xr)
           EOF
@@ -96,6 +107,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: Modules/${{ env.XR_MODULE_NAME }}
+          ref: ${{ github.head_ref || github.ref_name }}
 
       - name: Create FakeCamera test fixture
         run: |
