@@ -71,6 +71,7 @@ ArmorTracker<CameraInfoV>::ArmorTracker(LibXR::HardwareContainer& hw,
   tracker_.Configure(BuildTrackerConfig());
   preview_.Start(cfg_.preview);
   hw.template FindOrExit<LibXR::RamFS>({"ramfs"})->Add(cmd_file_);
+  std::thread(TrackerWorkerThreadFun, this).detach();
   SubscribeDetectorTopic();
 }
 
@@ -82,11 +83,6 @@ void ArmorTracker<CameraInfoV>::SubscribeDetectorTopic()
   auto armors_cb = LibXR::Topic::Callback::Create(
       [](bool, ArmorTracker* self, LibXR::RawData& data)
       {
-        if (self->params_is_changed_)
-        {
-          self->SetConfig(self->cfg_);
-          self->params_is_changed_ = false;
-        }
         if constexpr (std::is_pointer<DetectionMessage>::value)
         {
           auto* message_addr = reinterpret_cast<DetectionMessage*>(data.addr_);
@@ -110,6 +106,41 @@ void ArmorTracker<CameraInfoV>::SubscribeDetectorTopic()
 template <CameraTypes::CameraInfo CameraInfoV>
 void ArmorTracker<CameraInfoV>::OnMonitor()
 {
+  const uint64_t enqueued = enqueued_frame_count_.load(std::memory_order_relaxed);
+  const uint64_t overwritten =
+      overwritten_frame_count_.load(std::memory_order_relaxed);
+  const uint64_t processed =
+      processed_frame_count_.load(std::memory_order_relaxed);
+  const uint64_t process_time_us =
+      process_time_us_accum_.load(std::memory_order_relaxed);
+
+  const uint64_t enqueue_delta = enqueued - last_monitor_enqueued_;
+  const uint64_t overwrite_delta = overwritten - last_monitor_overwritten_;
+  const uint64_t processed_delta = processed - last_monitor_processed_;
+  const uint64_t process_time_delta_us =
+      process_time_us - last_monitor_process_time_us_;
+  bool pending_ready = false;
+  {
+    std::lock_guard<std::mutex> lock(pending_frame_mutex_);
+    pending_ready = pending_frame_ready_;
+  }
+
+  last_monitor_enqueued_ = enqueued;
+  last_monitor_overwritten_ = overwritten;
+  last_monitor_processed_ = processed;
+  last_monitor_process_time_us_ = process_time_us;
+
+  const double avg_process_ms =
+      processed_delta == 0
+          ? 0.0
+          : static_cast<double>(process_time_delta_us) /
+                static_cast<double>(processed_delta) / 1000.0;
+  XR_LOG_INFO(
+      "ArmorTracker monitor enqueue=%llu overwrite=%llu processed=%llu avg_process_ms=%.3f pending=%d",
+      static_cast<unsigned long long>(enqueue_delta),
+      static_cast<unsigned long long>(overwrite_delta),
+      static_cast<unsigned long long>(processed_delta), avg_process_ms,
+      pending_ready ? 1 : 0);
 }
 
 template <CameraTypes::CameraInfo CameraInfoV>
@@ -283,7 +314,84 @@ void ArmorTracker<CameraInfoV>::ArmorsCallback(
     return;
   }
 
-  const ArmorDetectorResults& detector_armors = *detections_ptr;
+  PendingDetectionFrame pending_frame{};
+  pending_frame.image_timestamp_us = image_timestamp_us;
+  pending_frame.image_frame = *source_frame.image_frame;
+  pending_frame.imu = *source_frame.imu;
+  pending_frame.detections = *detections_ptr;
+  pending_frame.valid = true;
+  enqueued_frame_count_.fetch_add(1, std::memory_order_relaxed);
+
+  bool need_post = false;
+  {
+    std::lock_guard<std::mutex> lock(pending_frame_mutex_);
+    if (pending_frame_ready_)
+    {
+      overwritten_frame_count_.fetch_add(1, std::memory_order_relaxed);
+    }
+    pending_frame_ = std::move(pending_frame);
+    need_post = !pending_frame_ready_;
+    pending_frame_ready_ = true;
+  }
+  if (need_post)
+  {
+    pending_frame_sem_.Post();
+  }
+}
+
+template <CameraTypes::CameraInfo CameraInfoV>
+void ArmorTracker<CameraInfoV>::TrackerWorkerThreadFun(ArmorTracker* self)
+{
+  XR_LOG_INFO("ArmorTracker worker started");
+  while (true)
+  {
+    if (self->pending_frame_sem_.Wait(UINT32_MAX) != LibXR::ErrorCode::OK)
+    {
+      continue;
+    }
+
+    while (true)
+    {
+      PendingDetectionFrame frame{};
+      {
+        std::lock_guard<std::mutex> lock(self->pending_frame_mutex_);
+        if (!self->pending_frame_ready_)
+        {
+          break;
+        }
+        frame = std::move(self->pending_frame_);
+        self->pending_frame_ = PendingDetectionFrame{};
+        self->pending_frame_ready_ = false;
+      }
+
+      if (!frame.valid)
+      {
+        continue;
+      }
+
+      if (self->params_is_changed_)
+      {
+        self->SetConfig(self->cfg_);
+        self->params_is_changed_ = false;
+      }
+
+      self->ProcessPendingDetectionFrame(frame);
+    }
+  }
+}
+
+template <CameraTypes::CameraInfo CameraInfoV>
+void ArmorTracker<CameraInfoV>::ProcessPendingDetectionFrame(
+    const PendingDetectionFrame& frame)
+{
+  const auto process_start = std::chrono::steady_clock::now();
+  ArmorDetectionsSourceFrame<CameraInfoV> source_frame{};
+  source_frame.image_timestamp_us = frame.image_timestamp_us;
+  source_frame.image_frame = &frame.image_frame;
+  source_frame.imu = &frame.imu;
+
+  const uint64_t image_timestamp_us = source_frame.image_timestamp_us;
+  const ArmorDetectorResults& detector_armors = frame.detections;
   std::vector<armor_tracker_detail::InputArmor> inputs;
   inputs.reserve(detector_armors.size());
   for (const auto& armor : detector_armors)
@@ -298,9 +406,10 @@ void ArmorTracker<CameraInfoV>::ArmorsCallback(
     inputs.push_back(input);
   }
 
-  Eigen::Quaterniond q_body_to_world(
-      source_frame.imu->rotation_wxyz[0], source_frame.imu->rotation_wxyz[1],
-      source_frame.imu->rotation_wxyz[2], source_frame.imu->rotation_wxyz[3]);
+  Eigen::Quaterniond q_body_to_world(source_frame.imu->rotation_wxyz[0],
+                                     source_frame.imu->rotation_wxyz[1],
+                                     source_frame.imu->rotation_wxyz[2],
+                                     source_frame.imu->rotation_wxyz[3]);
   if (!std::isfinite(q_body_to_world.norm()) ||
       q_body_to_world.norm() < 1e-9)
   {
@@ -368,6 +477,14 @@ void ArmorTracker<CameraInfoV>::ArmorsCallback(
   TargetFrameMessage target_frame_msg = &target_frame_packet_;
   target_frame_topic_.Publish(target_frame_msg, publish_timestamp);
   SubmitPreview(*source_frame.image_frame, detector_armors, target_msg, output);
+
+  const auto process_finish = std::chrono::steady_clock::now();
+  const auto process_us = static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::microseconds>(process_finish -
+                                                            process_start)
+          .count());
+  processed_frame_count_.fetch_add(1, std::memory_order_relaxed);
+  process_time_us_accum_.fetch_add(process_us, std::memory_order_relaxed);
 }
 
 template <CameraTypes::CameraInfo CameraInfoV>
@@ -436,7 +553,6 @@ void ArmorTracker<CameraInfoV>::SubmitPreview(
   struct ArmorOverlay
   {
     bool valid = false;
-    bool front_facing = false;
     cv::Point center_uv{};
     std::array<cv::Point, 4> corners_uv{};
   };
@@ -506,8 +622,6 @@ void ArmorTracker<CameraInfoV>::SubmitPreview(
       }
       overlay.faces[static_cast<std::size_t>(i)].center_uv = to_point(center_uv);
       overlay.faces[static_cast<std::size_t>(i)].valid = true;
-      overlay.faces[static_cast<std::size_t>(i)].front_facing =
-          tracker_.IsArmorFaceFrontFacing(center_world, yaw, track.tag_id);
     }
 
     cv::Point2d center_sum(0.0, 0.0);
@@ -555,6 +669,9 @@ void ArmorTracker<CameraInfoV>::SubmitPreview(
 
         for (const auto& track : track_overlays)
         {
+          const cv::Scalar face_color =
+              track.selected ? cv::Scalar(255, 160, 40)
+                             : cv::Scalar(210, 210, 120);
           const cv::Scalar body_color =
               track.selected ? cv::Scalar(40, 255, 40)
                              : cv::Scalar(80, 220, 255);
@@ -577,12 +694,6 @@ void ArmorTracker<CameraInfoV>::SubmitPreview(
             {
               continue;
             }
-            const cv::Scalar face_color =
-                face.front_facing
-                    ? (track.selected ? cv::Scalar(40, 255, 40)
-                                      : cv::Scalar(80, 210, 80))
-                    : (track.selected ? cv::Scalar(255, 80, 220)
-                                      : cv::Scalar(190, 120, 220));
             std::array<cv::Point, 4> corners_uv{};
             for (int corner_index = 0; corner_index < 4; ++corner_index)
             {
@@ -619,18 +730,9 @@ void ArmorTracker<CameraInfoV>::SubmitPreview(
             {
               continue;
             }
-            const auto& face = track.faces[static_cast<std::size_t>(i)];
-            const cv::Scalar face_color =
-                face.front_facing
-                    ? (track.selected ? cv::Scalar(40, 255, 40)
-                                      : cv::Scalar(80, 210, 80))
-                    : (track.selected ? cv::Scalar(255, 80, 220)
-                                      : cv::Scalar(190, 120, 220));
             cv::circle(canvas, armor_center_uv[static_cast<std::size_t>(i)], 4,
                        face_color, -1, cv::LINE_AA);
-            cv::putText(canvas,
-                        std::string(face.front_facing ? "F" : "B") +
-                            std::to_string(i),
+            cv::putText(canvas, "E" + std::to_string(i),
                         armor_center_uv[static_cast<std::size_t>(i)] +
                             cv::Point(6, 14),
                         cv::FONT_HERSHEY_SIMPLEX, 0.42, face_color, 1,
