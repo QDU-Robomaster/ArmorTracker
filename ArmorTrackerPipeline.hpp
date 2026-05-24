@@ -436,6 +436,7 @@ void ArmorTracker<CameraInfoV>::SubmitPreview(
   struct ArmorOverlay
   {
     bool valid = false;
+    bool front_facing = false;
     cv::Point center_uv{};
     std::array<cv::Point, 4> corners_uv{};
   };
@@ -505,6 +506,8 @@ void ArmorTracker<CameraInfoV>::SubmitPreview(
       }
       overlay.faces[static_cast<std::size_t>(i)].center_uv = to_point(center_uv);
       overlay.faces[static_cast<std::size_t>(i)].valid = true;
+      overlay.faces[static_cast<std::size_t>(i)].front_facing =
+          tracker_.IsArmorFaceFrontFacing(center_world, yaw, track.tag_id);
     }
 
     cv::Point2d center_sum(0.0, 0.0);
@@ -552,9 +555,6 @@ void ArmorTracker<CameraInfoV>::SubmitPreview(
 
         for (const auto& track : track_overlays)
         {
-          const cv::Scalar face_color =
-              track.selected ? cv::Scalar(255, 160, 40)
-                             : cv::Scalar(210, 210, 120);
           const cv::Scalar body_color =
               track.selected ? cv::Scalar(40, 255, 40)
                              : cv::Scalar(80, 220, 255);
@@ -577,6 +577,12 @@ void ArmorTracker<CameraInfoV>::SubmitPreview(
             {
               continue;
             }
+            const cv::Scalar face_color =
+                face.front_facing
+                    ? (track.selected ? cv::Scalar(40, 255, 40)
+                                      : cv::Scalar(80, 210, 80))
+                    : (track.selected ? cv::Scalar(255, 80, 220)
+                                      : cv::Scalar(190, 120, 220));
             std::array<cv::Point, 4> corners_uv{};
             for (int corner_index = 0; corner_index < 4; ++corner_index)
             {
@@ -613,9 +619,18 @@ void ArmorTracker<CameraInfoV>::SubmitPreview(
             {
               continue;
             }
+            const auto& face = track.faces[static_cast<std::size_t>(i)];
+            const cv::Scalar face_color =
+                face.front_facing
+                    ? (track.selected ? cv::Scalar(40, 255, 40)
+                                      : cv::Scalar(80, 210, 80))
+                    : (track.selected ? cv::Scalar(255, 80, 220)
+                                      : cv::Scalar(190, 120, 220));
             cv::circle(canvas, armor_center_uv[static_cast<std::size_t>(i)], 4,
                        face_color, -1, cv::LINE_AA);
-            cv::putText(canvas, "E" + std::to_string(i),
+            cv::putText(canvas,
+                        std::string(face.front_facing ? "F" : "B") +
+                            std::to_string(i),
                         armor_center_uv[static_cast<std::size_t>(i)] +
                             cv::Point(6, 14),
                         cv::FONT_HERSHEY_SIMPLEX, 0.42, face_color, 1,

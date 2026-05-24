@@ -294,6 +294,10 @@ class TrackerCore
     out.armors_num = static_cast<int>(out.faces_world.size());
     out.center_world = target.CenterWorldForOutput();
     out.yaw_world = LimitRad(x[6]);
+    if (target.name == ArmorName::OUTPOST && out.armors_num == 3)
+    {
+      out.yaw_world = LimitRad(out.yaw_world + kPi);
+    }
     out.center = R_world_to_output * out.center_world;
     out.velocity = R_world_to_output * target.VelocityWorldForOutput();
     out.yaw = WorldYawToOutputYaw(out.yaw_world, output_yaw_world);
@@ -328,6 +332,17 @@ class TrackerCore
     const ArmorType type = armor_type == 1 ? ArmorType::BIG : ArmorType::SMALL;
     return solver_->ReprojectArmor(center_world, yaw_world, type,
                                    ArmorNameFromDetectorNumber(tag_id));
+  }
+
+  bool IsArmorFaceFrontFacing(const Eigen::Vector3d& center_world,
+                              double yaw_world, int tag_id) const
+  {
+    if (!solver_)
+    {
+      return false;
+    }
+    return solver_->IsArmorFaceFrontFacing(center_world, yaw_world,
+                                           ArmorNameFromDetectorNumber(tag_id));
   }
 
  private:

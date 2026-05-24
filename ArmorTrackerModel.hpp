@@ -128,6 +128,11 @@ inline double OutpostArmorHeightOffset(int face_id, int height_phase)
   }
 }
 
+inline double OutpostObservedFaceYaw(double yaw)
+{
+  return LimitRad(yaw + kPi);
+}
+
 inline int SignNonZero(double value)
 {
   return value > 0.0 ? 1 : -1;
@@ -458,6 +463,18 @@ class Solver
     return image_points;
   }
 
+  bool IsArmorFaceFrontFacing(const Eigen::Vector3d& xyz_in_world, double yaw,
+                              ArmorName name) const
+  {
+    const auto tilt =
+        name == ArmorName::OUTPOST ? kOutpostArmorTilt : 15.0 * kPi / 180.0;
+    const Eigen::Matrix3d R_armor2world = ArmorRotationFromYaw(yaw, tilt);
+    const Eigen::Vector3d front_normal_world = -R_armor2world.col(0);
+    const Eigen::Vector3d camera_world = R_body_to_world_ * t_camera_to_body_;
+    const Eigen::Vector3d to_camera = camera_world - xyz_in_world;
+    return front_normal_world.dot(to_camera) > 0.0;
+  }
+
   /**
    * @brief 重投影 preview 用的装甲板可见贴纸四角。
    */
@@ -639,8 +656,12 @@ class Target
     const auto r = radius;
     const Eigen::VectorXd& xyz = armor.xyz_in_world;
     const Eigen::VectorXd& ypr = armor.ypr_in_world;
-    auto center_x = xyz[0] - r * std::sin(ypr[0]);
-    auto center_y = xyz[1] + r * std::cos(ypr[0]);
+    const double observed_face_yaw =
+        (name == ArmorName::OUTPOST && armor_num == 3)
+            ? OutpostObservedFaceYaw(ypr[0])
+            : ypr[0];
+    auto center_x = xyz[0] - r * std::sin(observed_face_yaw);
+    auto center_y = xyz[1] + r * std::cos(observed_face_yaw);
     auto center_z = xyz[2];
     if (name == ArmorName::OUTPOST && armor_num == 3)
     {
@@ -654,7 +675,8 @@ class Target
     }
 
     Eigen::VectorXd x0(11);
-    x0 << center_x, 0.0, center_y, 0.0, center_z, 0.0, ypr[0], 0.0, r,
+    x0 << center_x, 0.0, center_y, 0.0, center_z, 0.0, observed_face_yaw, 0.0,
+        r,
         0.0, 0.0;
     Eigen::MatrixXd P0 = P0_dig.asDiagonal();
 
@@ -838,7 +860,7 @@ class Target
     const double center_z = CenterWorldForOutput().z();
     for (int i = 0; i < armor_num_; ++i)
     {
-      auto angle = LimitRad(ekf_.x[6] + i * 2.0 * kPi / armor_num_);
+      auto angle = LimitRad(ekf_.x[6] + kPi + i * 2.0 * kPi / armor_num_);
       Eigen::Vector3d xyz = HArmorXyz(ekf_.x, i);
       xyz.z() = center_z + OutpostArmorHeightOffset(i, outpost_height_phase_);
       list.push_back({xyz[0], xyz[1], xyz[2], angle});
@@ -917,8 +939,9 @@ class Target
     for (const auto& [xyza, candidate_id] : xyza_i_list)
     {
       const Eigen::Vector3d ypd = XyzToYpd(xyza.head(3));
+      const double observed_face_yaw = OutpostObservedFaceYaw(armor.ypr_in_world[0]);
       double error =
-          std::abs(LimitRad(armor.ypr_in_world[0] - xyza[3])) +
+          std::abs(LimitRad(observed_face_yaw - xyza[3])) +
           std::abs(LimitRad(armor.ypd_in_world[0] - ypd[0]));
       if (outpost_height_phase_valid_)
       {
@@ -1027,12 +1050,16 @@ class Target
     const double center_x_before = ekf_.x[0];
     const double center_y_before = ekf_.x[2];
     const double center_z_before = ekf_.x[4];
+    constexpr double kOutpostCenterZFollowAlpha = 0.08;
+    constexpr double kOutpostCenterZFollowFacingAngle = 0.30;
 
     Eigen::MatrixXd H = HJacobian(ekf_.x, id);
     auto center_yaw = BearingYaw(armor.xyz_in_world);
     const Eigen::Vector3d center_before{center_x_before, center_y_before,
                                         center_z_before};
-    const double observed_armor_yaw = armor.ypr_in_world[0];
+    const double observed_armor_yaw =
+        UseOutpostHeightModel() ? OutpostObservedFaceYaw(armor.ypr_in_world[0])
+                                : armor.ypr_in_world[0];
     auto delta_angle = LimitRad(observed_armor_yaw - center_yaw);
     const double side_view = std::abs(delta_angle);
     const bool side_observation = side_view > 0.55;
@@ -1078,7 +1105,20 @@ class Target
       ekf_.x[1] = 0.0;
       ekf_.x[2] = center_y_before;
       ekf_.x[3] = 0.0;
-      ekf_.x[4] = center_z_before;
+      if (outpost_height_phase_valid_ && id >= 0 && id < 3 &&
+          side_view < kOutpostCenterZFollowFacingAngle)
+      {
+        const double observed_center_z =
+            armor.xyz_in_world.z() -
+            OutpostArmorHeightOffset(id, outpost_height_phase_);
+        ekf_.x[4] =
+            (1.0 - kOutpostCenterZFollowAlpha) * center_z_before +
+            kOutpostCenterZFollowAlpha * observed_center_z;
+      }
+      else
+      {
+        ekf_.x[4] = center_z_before;
+      }
       ekf_.x[5] = 0.0;
     }
   }
@@ -1374,12 +1414,13 @@ class Tracker
       return 0;
     }
     const double observed_face_yaw = BearingYaw(armor_to_center);
+    const double observed_armor_yaw = OutpostObservedFaceYaw(armor.ypr_in_world[0]);
     int best_id = 0;
     double best_error = std::numeric_limits<double>::infinity();
     for (int id = 0; id < 3; ++id)
     {
       const double candidate_yaw =
-          LimitRad(armor.ypr_in_world[0] + id * 2.0 * kPi / 3.0);
+          LimitRad(observed_armor_yaw + id * 2.0 * kPi / 3.0);
       const double error = std::abs(LimitRad(observed_face_yaw - candidate_yaw));
       if (error < best_error)
       {
@@ -1394,7 +1435,7 @@ class Tracker
   {
     if (!slot.outpost_center_hint_valid)
     {
-      return {0, true};
+      return {0, false};
     }
     int best_phase = 0;
     double best_error = std::numeric_limits<double>::infinity();
