@@ -71,9 +71,12 @@ depends:
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -90,6 +93,7 @@ depends:
 #include "libxr_time.hpp"
 #include "logger.hpp"
 #include "message.hpp"
+#include "semaphore.hpp"
 #include "timebase.hpp"
 
 #if defined(__has_include)
@@ -127,6 +131,7 @@ class ArmorTracker : public LibXR::Application
   using Base = typename FrameSync::Base;
   using CameraInfo = typename Base::CameraInfo;
   using ImageFrame = typename FrameSync::ImageFrame;
+  using ImuStamped = typename FrameSync::ImuStamped;
   using DetectionPacket = ArmorDetectionsFramePacket<CameraInfoV>;
   using DetectionMessage = ArmorDetectionsFrameMessage<CameraInfoV>;
   using DetectionMessageArg = typename std::conditional<
@@ -219,6 +224,21 @@ class ArmorTracker : public LibXR::Application
   using TargetFrameMessage = TargetFramePacket*;
 
   /**
+   * @brief tracker 异步 worker 使用的自有检测帧拷贝。
+   *
+   * detector callback 必须在返回前释放共享图像槽位，所以这里深拷贝图像、IMU 和
+   * 检测结果，再由独立线程继续运行 tracker / aimer 后级。
+   */
+  struct PendingDetectionFrame
+  {
+    uint64_t image_timestamp_us{0};
+    ImageFrame image_frame{};
+    ImuStamped imu{};
+    ArmorDetectorResults detections{};
+    bool valid{false};
+  };
+
+  /**
    * @brief Construct the module and subscribe to the detector topic.
    */
   explicit ArmorTracker(LibXR::HardwareContainer& hw, LibXR::ApplicationManager& app,
@@ -266,6 +286,16 @@ class ArmorTracker : public LibXR::Application
   void ArmorsCallback(DetectionMessageArg message);
 
   /**
+   * @brief 异步 worker 入口：等待 callback 拷贝完成的检测帧。
+   */
+  static void TrackerWorkerThreadFun(ArmorTracker* self);
+
+  /**
+   * @brief 在异步 worker 中处理一帧自有检测数据。
+   */
+  void ProcessPendingDetectionFrame(const PendingDetectionFrame& frame);
+
+  /**
    * @brief Resolve and subscribe to the detector frame topic.
    */
   void SubscribeDetectorTopic();
@@ -294,6 +324,18 @@ class ArmorTracker : public LibXR::Application
   std::atomic<bool> params_is_changed_{false};
   ArmorTrackerTarget target_frame_target_msg_{};
   TargetFramePacket target_frame_packet_{};
+  std::mutex pending_frame_mutex_{};
+  PendingDetectionFrame pending_frame_{};
+  bool pending_frame_ready_{false};
+  LibXR::Semaphore pending_frame_sem_{0};
+  std::atomic<uint64_t> enqueued_frame_count_{0};
+  std::atomic<uint64_t> overwritten_frame_count_{0};
+  std::atomic<uint64_t> processed_frame_count_{0};
+  std::atomic<uint64_t> process_time_us_accum_{0};
+  uint64_t last_monitor_enqueued_{0};
+  uint64_t last_monitor_overwritten_{0};
+  uint64_t last_monitor_processed_{0};
+  uint64_t last_monitor_process_time_us_{0};
   FrameSync& sync_;
 };
 
