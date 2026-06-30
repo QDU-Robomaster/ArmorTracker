@@ -317,7 +317,7 @@ class ArmorTracker : public LibXR::Application
   LibXR::Topic::Domain tracker_domain_ = LibXR::Topic::Domain("tracker");
   LibXR::Topic armors_topic_ = LibXR::Topic();
   LibXR::Topic target_frame_topic_ =
-      LibXR::Topic("target_frame", sizeof(TargetFrameMessage), &tracker_domain_);
+      LibXR::Topic::CreateTopic<TargetFrameMessage>("target_frame", &tracker_domain_);
 
   const char* name_ = "armor_tracker";
   LibXR::RamFS::File cmd_file_;
