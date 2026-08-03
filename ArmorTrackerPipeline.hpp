@@ -62,24 +62,38 @@ armor_tracker_detail::Config ArmorTracker<CameraInfoV>::BuildTrackerConfig() con
 template <CameraTypes::CameraInfo CameraInfoV>
 ArmorTracker<CameraInfoV>::ArmorTracker(LibXR::HardwareContainer& hw,
                                         LibXR::ApplicationManager&,
-                                        Config cfg, FrameSync& sync)
-    : cfg_(std::move(cfg)),
-      cmd_file_(LibXR::RamFS::CreateFile(name_, CommandFun, this)),
-      sync_(sync)
+                                        Config cfg, FrameSync* sync)
+    : cfg_(std::move(cfg)), sync_(sync)
 {
+  ASSERT(sync_ != nullptr);
+
+  armor_detector_domain_.emplace("armor_detector");
+  tracker_domain_.emplace("tracker");
+  target_frame_topic_ = LibXR::Topic::CreateTopic<TargetFrameMessage>(
+      "target_frame", &*tracker_domain_);
+  cmd_file_.emplace(LibXR::RamFS::CreateFile(name_, CommandFun, this));
+
   XR_LOG_INFO("Starting ArmorTracker");
   tracker_.Configure(BuildTrackerConfig());
   preview_.Start(cfg_.preview);
-  hw.template FindOrExit<LibXR::RamFS>({"ramfs"})->Add(cmd_file_);
+  hw.template FindOrExit<LibXR::RamFS>({"ramfs"})->Add(*cmd_file_);
   std::thread(TrackerWorkerThreadFun, this).detach();
   SubscribeDetectorTopic();
+}
+
+template <CameraTypes::CameraInfo CameraInfoV>
+ArmorTracker<CameraInfoV>::ArmorTracker(LibXR::HardwareContainer& hw,
+                                        LibXR::ApplicationManager& app,
+                                        Config cfg, FrameSync& sync)
+    : ArmorTracker(hw, app, std::move(cfg), &sync)
+{
 }
 
 template <CameraTypes::CameraInfo CameraInfoV>
 void ArmorTracker<CameraInfoV>::SubscribeDetectorTopic()
 {
   armors_topic_ = LibXR::Topic(LibXR::Topic::WaitTopic(
-      kDetectorTopicName, UINT32_MAX, &armor_detector_domain_));
+      kDetectorTopicName, UINT32_MAX, &*armor_detector_domain_));
   auto armors_cb = LibXR::Topic::Callback::Create(
       [](bool, ArmorTracker* self, LibXR::RawData& data)
       {

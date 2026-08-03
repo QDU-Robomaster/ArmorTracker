@@ -48,7 +48,7 @@ constructor_args:
       web_port: 8080
       web_stream_name: "armor_tracker"
       max_fps: 30.0
-  sync: '@camera_frame_sync'
+  sync: '@nullptr'
 template_args:
   - Info:
       width: 1280
@@ -75,6 +75,7 @@ depends:
 #include <cmath>
 #include <cstdint>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <type_traits>
@@ -241,8 +242,13 @@ class ArmorTracker : public LibXR::Application
   /**
    * @brief Construct the module and subscribe to the detector topic.
    */
-  explicit ArmorTracker(LibXR::HardwareContainer& hw, LibXR::ApplicationManager& app,
-                        Config cfg, FrameSync& sync);
+  explicit ArmorTracker(LibXR::HardwareContainer& hw,
+                        LibXR::ApplicationManager& app, Config cfg,
+                        FrameSync* sync);
+
+  explicit ArmorTracker(LibXR::HardwareContainer& hw,
+                        LibXR::ApplicationManager& app, Config cfg,
+                        FrameSync& sync);
 
   /**
    * @brief RamFS command entry used to show or update selected tracker params.
@@ -312,15 +318,13 @@ class ArmorTracker : public LibXR::Application
   armor_tracker_detail::TrackerCore tracker_{};
   VisionPreview preview_{};
 
-  LibXR::Topic::Domain armor_detector_domain_ =
-      LibXR::Topic::Domain("armor_detector");
-  LibXR::Topic::Domain tracker_domain_ = LibXR::Topic::Domain("tracker");
+  std::optional<LibXR::Topic::Domain> armor_detector_domain_{};
+  std::optional<LibXR::Topic::Domain> tracker_domain_{};
   LibXR::Topic armors_topic_ = LibXR::Topic();
-  LibXR::Topic target_frame_topic_ =
-      LibXR::Topic::CreateTopic<TargetFrameMessage>("target_frame", &tracker_domain_);
+  LibXR::Topic target_frame_topic_ = LibXR::Topic();
 
   const char* name_ = "armor_tracker";
-  LibXR::RamFS::File cmd_file_;
+  std::optional<LibXR::RamFS::File> cmd_file_{};
   std::atomic<bool> params_is_changed_{false};
   ArmorTrackerTarget target_frame_target_msg_{};
   TargetFramePacket target_frame_packet_{};
@@ -336,7 +340,7 @@ class ArmorTracker : public LibXR::Application
   uint64_t last_monitor_overwritten_{0};
   uint64_t last_monitor_processed_{0};
   uint64_t last_monitor_process_time_us_{0};
-  FrameSync& sync_;
+  FrameSync* sync_{nullptr};
 };
 
 /**
