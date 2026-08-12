@@ -109,6 +109,22 @@ jobs:
           path: Modules/${{ env.XR_MODULE_NAME }}
           ref: ${{ github.head_ref || github.ref_name }}
 
+      - name: Align coordinated dependency branches
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidate="${GITHUB_HEAD_REF:-${GITHUB_REF_NAME}}"
+          for module_dir in Modules/*; do
+            [[ -d "${module_dir}" ]] || continue
+            [[ "$(basename "${module_dir}")" == "${XR_MODULE_NAME}" ]] && continue
+            git -C "${module_dir}" rev-parse --git-dir >/dev/null 2>&1 || continue
+            if git -C "${module_dir}" ls-remote --exit-code --heads origin "refs/heads/${candidate}" >/dev/null 2>&1; then
+              git -C "${module_dir}" fetch --depth=1 origin "refs/heads/${candidate}"
+              git -C "${module_dir}" checkout --detach FETCH_HEAD
+              git -C "${module_dir}" submodule update --init --recursive --depth=1
+            fi
+          done
+
       - name: Create FakeCamera test fixture
         run: |
           mkdir -p Modules/FakeCamera
