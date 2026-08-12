@@ -9,13 +9,12 @@
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <opencv2/imgproc.hpp>
 #include <string>
 #include <vector>
 
-#include <opencv2/imgproc.hpp>
-
-template <CameraTypes::CameraInfo CameraInfoV>
-armor_tracker_detail::Config ArmorTracker<CameraInfoV>::BuildTrackerConfig() const
+template <CameraTypes::FrameLayout FrameLayoutV>
+armor_tracker_detail::Config ArmorTracker<FrameLayoutV>::BuildTrackerConfig() const
 {
   armor_tracker_detail::Config config{};
   config.require_target_tag = cfg_.tracker.require_target_tag;
@@ -25,52 +24,37 @@ armor_tracker_detail::Config ArmorTracker<CameraInfoV>::BuildTrackerConfig() con
   config.outpost_max_temp_lost_count = cfg_.tracker.outpost_max_temp_lost_count;
   config.target_select.observed_count_weight =
       cfg_.tracker.target_select.observed_count_weight;
-  config.target_select.distance_weight =
-      cfg_.tracker.target_select.distance_weight;
+  config.target_select.distance_weight = cfg_.tracker.target_select.distance_weight;
   config.target_select.area_weight = cfg_.tracker.target_select.area_weight;
   config.target_select.spin_weight = cfg_.tracker.target_select.spin_weight;
   config.target_select.angle_weight = cfg_.tracker.target_select.angle_weight;
-  config.target_select.max_distance_m =
-      cfg_.tracker.target_select.max_distance_m;
-  config.target_select.distance_span_m =
-      cfg_.tracker.target_select.distance_span_m;
+  config.target_select.max_distance_m = cfg_.tracker.target_select.max_distance_m;
+  config.target_select.distance_span_m = cfg_.tracker.target_select.distance_span_m;
   config.target_select.area_norm_px = cfg_.tracker.target_select.area_norm_px;
   config.target_select.observed_count_norm =
       cfg_.tracker.target_select.observed_count_norm;
-  config.target_select.max_spin_rad_s =
-      cfg_.tracker.target_select.max_spin_rad_s;
-  config.target_select.max_angle_norm =
-      cfg_.tracker.target_select.max_angle_norm;
-  config.target_select.detecting_scale =
-      cfg_.tracker.target_select.detecting_scale;
-  config.target_select.temp_lost_scale =
-      cfg_.tracker.target_select.temp_lost_scale;
+  config.target_select.max_spin_rad_s = cfg_.tracker.target_select.max_spin_rad_s;
+  config.target_select.max_angle_norm = cfg_.tracker.target_select.max_angle_norm;
+  config.target_select.detecting_scale = cfg_.tracker.target_select.detecting_scale;
+  config.target_select.temp_lost_scale = cfg_.tracker.target_select.temp_lost_scale;
   config.target_select.switch_margin = cfg_.tracker.target_select.switch_margin;
-  config.camera_matrix = {
-      kCameraInfo.camera_matrix[0], kCameraInfo.camera_matrix[1],
-      kCameraInfo.camera_matrix[2], kCameraInfo.camera_matrix[3],
-      kCameraInfo.camera_matrix[4], kCameraInfo.camera_matrix[5],
-      kCameraInfo.camera_matrix[6], kCameraInfo.camera_matrix[7],
-      kCameraInfo.camera_matrix[8]};
-  config.camera_mount_to_body_rotation =
-      cfg_.extrinsic.camera_mount_to_body.rotation;
+  config.camera_matrix = calibration_.camera_matrix;
+  config.camera_mount_to_body_rotation = cfg_.extrinsic.camera_mount_to_body.rotation;
   config.camera_mount_to_body_translation =
       cfg_.extrinsic.camera_mount_to_body.translation;
   return config;
 }
 
-template <CameraTypes::CameraInfo CameraInfoV>
-ArmorTracker<CameraInfoV>::ArmorTracker(LibXR::HardwareContainer& hw,
-                                        LibXR::ApplicationManager&,
-                                        Config cfg, FrameSync* sync)
-    : cfg_(std::move(cfg)), sync_(sync)
+template <CameraTypes::FrameLayout FrameLayoutV>
+ArmorTracker<FrameLayoutV>::ArmorTracker(LibXR::HardwareContainer& hw,
+                                         LibXR::ApplicationManager&, Config cfg,
+                                         FrameSync* sync)
+    : cfg_(std::move(cfg)), calibration_(CopyCalibration(sync))
 {
-  ASSERT(sync_ != nullptr);
-
   armor_detector_domain_.emplace("armor_detector");
   tracker_domain_.emplace("tracker");
-  target_frame_topic_ = LibXR::Topic::CreateTopic<TargetFrameMessage>(
-      "target_frame", &*tracker_domain_);
+  target_frame_topic_ =
+      LibXR::Topic::CreateTopic<TargetFrameMessage>("target_frame", &*tracker_domain_);
   cmd_file_.emplace(LibXR::RamFS::CreateFile(name_, CommandFun, this));
 
   XR_LOG_INFO("Starting ArmorTracker");
@@ -81,58 +65,37 @@ ArmorTracker<CameraInfoV>::ArmorTracker(LibXR::HardwareContainer& hw,
   SubscribeDetectorTopic();
 }
 
-template <CameraTypes::CameraInfo CameraInfoV>
-ArmorTracker<CameraInfoV>::ArmorTracker(LibXR::HardwareContainer& hw,
-                                        LibXR::ApplicationManager& app,
-                                        Config cfg, FrameSync& sync)
+template <CameraTypes::FrameLayout FrameLayoutV>
+ArmorTracker<FrameLayoutV>::ArmorTracker(LibXR::HardwareContainer& hw,
+                                         LibXR::ApplicationManager& app, Config cfg,
+                                         FrameSync& sync)
     : ArmorTracker(hw, app, std::move(cfg), &sync)
 {
 }
 
-template <CameraTypes::CameraInfo CameraInfoV>
-void ArmorTracker<CameraInfoV>::SubscribeDetectorTopic()
+template <CameraTypes::FrameLayout FrameLayoutV>
+void ArmorTracker<FrameLayoutV>::SubscribeDetectorTopic()
 {
-  armors_topic_ = LibXR::Topic(LibXR::Topic::WaitTopic(
-      kDetectorTopicName, UINT32_MAX, &*armor_detector_domain_));
+  armors_topic_ = LibXR::Topic(
+      LibXR::Topic::WaitTopic(kDetectorTopicName, UINT32_MAX, &*armor_detector_domain_));
   auto armors_cb = LibXR::Topic::Callback::Create(
-      [](bool, ArmorTracker* self, LibXR::RawData& data)
-      {
-        if constexpr (std::is_pointer<DetectionMessage>::value)
-        {
-          auto* message_addr = reinterpret_cast<DetectionMessage*>(data.addr_);
-          self->ArmorsCallback(message_addr != nullptr ? *message_addr : nullptr);
-        }
-        else
-        {
-          auto* message_addr = reinterpret_cast<DetectionMessage*>(data.addr_);
-          if (message_addr == nullptr)
-          {
-            XR_LOG_ERROR("ArmorTracker received empty detector message");
-            return;
-          }
-          self->ArmorsCallback(*message_addr);
-        }
-      },
-      this);
+      [](bool, ArmorTracker* self, const DetectionMessage& message)
+      { self->ArmorsCallback(message); }, this);
   armors_topic_.RegisterCallback(armors_cb);
 }
 
-template <CameraTypes::CameraInfo CameraInfoV>
-void ArmorTracker<CameraInfoV>::OnMonitor()
+template <CameraTypes::FrameLayout FrameLayoutV>
+void ArmorTracker<FrameLayoutV>::OnMonitor()
 {
   const uint64_t enqueued = enqueued_frame_count_.load(std::memory_order_relaxed);
-  const uint64_t overwritten =
-      overwritten_frame_count_.load(std::memory_order_relaxed);
-  const uint64_t processed =
-      processed_frame_count_.load(std::memory_order_relaxed);
-  const uint64_t process_time_us =
-      process_time_us_accum_.load(std::memory_order_relaxed);
+  const uint64_t overwritten = overwritten_frame_count_.load(std::memory_order_relaxed);
+  const uint64_t processed = processed_frame_count_.load(std::memory_order_relaxed);
+  const uint64_t process_time_us = process_time_us_accum_.load(std::memory_order_relaxed);
 
   const uint64_t enqueue_delta = enqueued - last_monitor_enqueued_;
   const uint64_t overwrite_delta = overwritten - last_monitor_overwritten_;
   const uint64_t processed_delta = processed - last_monitor_processed_;
-  const uint64_t process_time_delta_us =
-      process_time_us - last_monitor_process_time_us_;
+  const uint64_t process_time_delta_us = process_time_us - last_monitor_process_time_us_;
   bool pending_ready = false;
   {
     std::lock_guard<std::mutex> lock(pending_frame_mutex_);
@@ -144,21 +107,21 @@ void ArmorTracker<CameraInfoV>::OnMonitor()
   last_monitor_processed_ = processed;
   last_monitor_process_time_us_ = process_time_us;
 
-  const double avg_process_ms =
-      processed_delta == 0
-          ? 0.0
-          : static_cast<double>(process_time_delta_us) /
-                static_cast<double>(processed_delta) / 1000.0;
+  const double avg_process_ms = processed_delta == 0
+                                    ? 0.0
+                                    : static_cast<double>(process_time_delta_us) /
+                                          static_cast<double>(processed_delta) / 1000.0;
   XR_LOG_INFO(
-      "ArmorTracker monitor enqueue=%llu overwrite=%llu processed=%llu avg_process_ms=%.3f pending=%d",
+      "ArmorTracker monitor enqueue=%llu overwrite=%llu processed=%llu "
+      "avg_process_ms=%.3f pending=%d",
       static_cast<unsigned long long>(enqueue_delta),
       static_cast<unsigned long long>(overwrite_delta),
       static_cast<unsigned long long>(processed_delta), avg_process_ms,
       pending_ready ? 1 : 0);
 }
 
-template <CameraTypes::CameraInfo CameraInfoV>
-void ArmorTracker<CameraInfoV>::SetConfig(const Config& cfg)
+template <CameraTypes::FrameLayout FrameLayoutV>
+void ArmorTracker<FrameLayoutV>::SetConfig(const Config& cfg)
 {
   cfg_ = cfg;
   tracker_.Configure(BuildTrackerConfig());
@@ -166,9 +129,9 @@ void ArmorTracker<CameraInfoV>::SetConfig(const Config& cfg)
   preview_.Start(cfg_.preview);
 }
 
-template <CameraTypes::CameraInfo CameraInfoV>
-int ArmorTracker<CameraInfoV>::CommandFun(ArmorTracker<CameraInfoV>* self,
-                                          int argc, char** argv)
+template <CameraTypes::FrameLayout FrameLayoutV>
+int ArmorTracker<FrameLayoutV>::CommandFun(ArmorTracker<FrameLayoutV>* self, int argc,
+                                           char** argv)
 {
   if (argc == 1)
   {
@@ -187,8 +150,7 @@ int ArmorTracker<CameraInfoV>::CommandFun(ArmorTracker<CameraInfoV>* self,
     TRACKER_STDIO_PRINT("  tracker:\r\n");
     TRACKER_STDIO_PRINTF("    require_target_tag: %d\r\n",
                          self->cfg_.tracker.require_target_tag ? 1 : 0);
-    TRACKER_STDIO_PRINTF("    target_tag_id: %d\r\n",
-                         self->cfg_.tracker.target_tag_id);
+    TRACKER_STDIO_PRINTF("    target_tag_id: %d\r\n", self->cfg_.tracker.target_tag_id);
     TRACKER_STDIO_PRINTF("    min_detect_count: %d\r\n",
                          self->cfg_.tracker.min_detect_count);
     TRACKER_STDIO_PRINTF("    max_temp_lost_count: %d\r\n",
@@ -269,11 +231,11 @@ int ArmorTracker<CameraInfoV>::CommandFun(ArmorTracker<CameraInfoV>* self,
   return -1;
 }
 
-template <CameraTypes::CameraInfo CameraInfoV>
-void ArmorTracker<CameraInfoV>::ArmorsCallback(
-    typename ArmorTracker<CameraInfoV>::DetectionMessageArg message)
+template <CameraTypes::FrameLayout FrameLayoutV>
+void ArmorTracker<FrameLayoutV>::ArmorsCallback(
+    typename ArmorTracker<FrameLayoutV>::DetectionMessageArg message)
 {
-  const ArmorDetectionsSourceFrame<CameraInfoV>* source_frame_ptr = nullptr;
+  const ArmorDetectionsSourceFrame<FrameLayoutV>* source_frame_ptr = nullptr;
   const ArmorDetectorResults* detections_ptr = nullptr;
   uint64_t detections_timestamp_us = 0;
 
@@ -311,6 +273,22 @@ void ArmorTracker<CameraInfoV>::ArmorsCallback(
     XR_LOG_ERROR("ArmorTracker received detector packet without synced imu");
     return;
   }
+  const auto geometry_status =
+      armor_tracker_detail::CheckDetectorFrameGeometry<FrameLayoutV>(
+          calibration_, source_frame.geometry, source_frame.image_frame->geometry);
+  if (geometry_status == armor_tracker_detail::DetectorFrameGeometryStatus::INVALID)
+  {
+    XR_LOG_ERROR("ArmorTracker received invalid frame geometry epoch=%u",
+                 source_frame.geometry.epoch);
+    return;
+  }
+  if (geometry_status ==
+      armor_tracker_detail::DetectorFrameGeometryStatus::IMAGE_MISMATCH)
+  {
+    XR_LOG_ERROR("ArmorTracker detector packet geometry mismatch epoch=%u image=%u",
+                 source_frame.geometry.epoch, source_frame.image_frame->geometry.epoch);
+    return;
+  }
 
   const uint64_t image_timestamp_us = source_frame.image_timestamp_us;
   if (source_frame.image_frame->timestamp_us != image_timestamp_us)
@@ -328,12 +306,19 @@ void ArmorTracker<CameraInfoV>::ArmorsCallback(
     return;
   }
 
+  const auto copy_start = std::chrono::steady_clock::now();
+  AutoAimReplayBenchmark::RecordTrackerEnqueue(image_timestamp_us);
   PendingDetectionFrame pending_frame{};
   pending_frame.image_timestamp_us = image_timestamp_us;
+  pending_frame.geometry = source_frame.geometry;
   pending_frame.image_frame = *source_frame.image_frame;
   pending_frame.imu = *source_frame.imu;
   pending_frame.detections = *detections_ptr;
   pending_frame.valid = true;
+  const auto copy_finish = std::chrono::steady_clock::now();
+  AutoAimReplayBenchmark::RecordTrackerQueued(
+      image_timestamp_us,
+      std::chrono::duration<double, std::milli>(copy_finish - copy_start).count());
   enqueued_frame_count_.fetch_add(1, std::memory_order_relaxed);
 
   bool need_post = false;
@@ -342,6 +327,7 @@ void ArmorTracker<CameraInfoV>::ArmorsCallback(
     if (pending_frame_ready_)
     {
       overwritten_frame_count_.fetch_add(1, std::memory_order_relaxed);
+      AutoAimReplayBenchmark::RecordTrackerOverwrite();
     }
     pending_frame_ = std::move(pending_frame);
     need_post = !pending_frame_ready_;
@@ -353,8 +339,8 @@ void ArmorTracker<CameraInfoV>::ArmorsCallback(
   }
 }
 
-template <CameraTypes::CameraInfo CameraInfoV>
-void ArmorTracker<CameraInfoV>::TrackerWorkerThreadFun(ArmorTracker* self)
+template <CameraTypes::FrameLayout FrameLayoutV>
+void ArmorTracker<FrameLayoutV>::TrackerWorkerThreadFun(ArmorTracker* self)
 {
   XR_LOG_INFO("ArmorTracker worker started");
   while (true)
@@ -394,13 +380,15 @@ void ArmorTracker<CameraInfoV>::TrackerWorkerThreadFun(ArmorTracker* self)
   }
 }
 
-template <CameraTypes::CameraInfo CameraInfoV>
-void ArmorTracker<CameraInfoV>::ProcessPendingDetectionFrame(
+template <CameraTypes::FrameLayout FrameLayoutV>
+void ArmorTracker<FrameLayoutV>::ProcessPendingDetectionFrame(
     const PendingDetectionFrame& frame)
 {
   const auto process_start = std::chrono::steady_clock::now();
-  ArmorDetectionsSourceFrame<CameraInfoV> source_frame{};
+  AutoAimReplayBenchmark::RecordTrackerStart(frame.image_timestamp_us);
+  ArmorDetectionsSourceFrame<FrameLayoutV> source_frame{};
   source_frame.image_timestamp_us = frame.image_timestamp_us;
+  source_frame.geometry = frame.geometry;
   source_frame.image_frame = &frame.image_frame;
   source_frame.imu = &frame.imu;
 
@@ -410,22 +398,13 @@ void ArmorTracker<CameraInfoV>::ProcessPendingDetectionFrame(
   inputs.reserve(detector_armors.size());
   for (const auto& armor : detector_armors)
   {
-    armor_tracker_detail::InputArmor input{};
-    input.tag_id = static_cast<int>(armor.number);
-    input.armor_type = static_cast<int>(armor.type);
-    input.confidence = armor.confidence;
-    input.corners = armor.points;
-    input.center = armor.center;
-    input.center_norm = armor.center_norm;
-    inputs.push_back(input);
+    inputs.push_back(armor_tracker_detail::BuildTrackerInput(armor, frame.geometry));
   }
 
-  Eigen::Quaterniond q_body_to_world(source_frame.imu->rotation_wxyz[0],
-                                     source_frame.imu->rotation_wxyz[1],
-                                     source_frame.imu->rotation_wxyz[2],
-                                     source_frame.imu->rotation_wxyz[3]);
-  if (!std::isfinite(q_body_to_world.norm()) ||
-      q_body_to_world.norm() < 1e-9)
+  Eigen::Quaterniond q_body_to_world(
+      source_frame.imu->rotation_wxyz[0], source_frame.imu->rotation_wxyz[1],
+      source_frame.imu->rotation_wxyz[2], source_frame.imu->rotation_wxyz[3]);
+  if (!std::isfinite(q_body_to_world.norm()) || q_body_to_world.norm() < 1e-9)
   {
     q_body_to_world = Eigen::Quaterniond::Identity();
   }
@@ -440,8 +419,8 @@ void ArmorTracker<CameraInfoV>::ProcessPendingDetectionFrame(
   if (output.has_target)
   {
     target_msg.tracking = true;
-    target_msg.id = static_cast<ArmorNumber>(std::clamp(
-        output.selected_tag_id, 0, static_cast<int>(ArmorNumber::NEGATIVE)));
+    target_msg.id = static_cast<ArmorNumber>(
+        std::clamp(output.selected_tag_id, 0, static_cast<int>(ArmorNumber::NEGATIVE)));
     target_msg.armors_num = output.armors_num;
     target_msg.position = output.center;
     target_msg.velocity = output.velocity;
@@ -481,30 +460,43 @@ void ArmorTracker<CameraInfoV>::ProcessPendingDetectionFrame(
   {
     for (int col = 0; col < 3; ++col)
     {
-      target_frame_packet_.output_to_camera_rotation[static_cast<std::size_t>(
-          row * 3 + col)] = R_output_to_camera(row, col);
+      target_frame_packet_
+          .output_to_camera_rotation[static_cast<std::size_t>(row * 3 + col)] =
+          R_output_to_camera(row, col);
     }
-    target_frame_packet_.output_to_camera_translation[static_cast<std::size_t>(
-        row)] = t_output_to_camera(row);
+    target_frame_packet_.output_to_camera_translation[static_cast<std::size_t>(row)] =
+        t_output_to_camera(row);
   }
+
+  const auto tracker_compute_finish = std::chrono::steady_clock::now();
+  AutoAimReplayBenchmark::RecordTracker(
+      image_timestamp_us,
+      std::chrono::duration<double, std::milli>(tracker_compute_finish - process_start)
+          .count(),
+      target_msg.tracking, static_cast<int>(target_msg.id),
+      {target_msg.position.x(), target_msg.position.y(), target_msg.position.z()},
+      {target_msg.velocity.x(), target_msg.velocity.y(), target_msg.velocity.z()},
+      target_msg.yaw, target_msg.v_yaw, target_msg.radius_1, target_msg.radius_2,
+      target_msg.dz);
 
   TargetFrameMessage target_frame_msg = &target_frame_packet_;
   target_frame_topic_.Publish(target_frame_msg, publish_timestamp);
-  SubmitPreview(*source_frame.image_frame, detector_armors, target_msg, output);
+  SubmitPreview(*source_frame.image_frame, source_frame.geometry, detector_armors,
+                target_msg, output);
 
   const auto process_finish = std::chrono::steady_clock::now();
-  const auto process_us = static_cast<uint64_t>(
-      std::chrono::duration_cast<std::chrono::microseconds>(process_finish -
-                                                            process_start)
-          .count());
+  const auto process_us =
+      static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                process_finish - process_start)
+                                .count());
   processed_frame_count_.fetch_add(1, std::memory_order_relaxed);
   process_time_us_accum_.fetch_add(process_us, std::memory_order_relaxed);
 }
 
-template <CameraTypes::CameraInfo CameraInfoV>
-void ArmorTracker<CameraInfoV>::SubmitPreview(
-    const ImageFrame& image_frame, const ArmorDetectorResults& detector_armors,
-    const ArmorTrackerTarget& target_msg,
+template <CameraTypes::FrameLayout FrameLayoutV>
+void ArmorTracker<FrameLayoutV>::SubmitPreview(
+    const ImageFrame& image_frame, const FrameGeometry& geometry,
+    const ArmorDetectorResults& detector_armors, const ArmorTrackerTarget& target_msg,
     const armor_tracker_detail::Output& output)
 {
   if (!preview_.Running())
@@ -513,7 +505,7 @@ void ArmorTracker<CameraInfoV>::SubmitPreview(
   }
 
   int cv_type = -1;
-  switch (kCameraInfo.encoding)
+  switch (frame_layout.encoding)
   {
     case CameraTypes::Encoding::RGB8:
     case CameraTypes::Encoding::BGR8:
@@ -534,12 +526,11 @@ void ArmorTracker<CameraInfoV>::SubmitPreview(
     return;
   }
 
-  cv::Mat image(static_cast<int>(kCameraInfo.height),
-                static_cast<int>(kCameraInfo.width), cv_type,
-                const_cast<uint8_t*>(image_frame.data.data()),
-                static_cast<size_t>(kCameraInfo.step));
+  cv::Mat image(static_cast<int>(geometry.height), static_cast<int>(geometry.width),
+                cv_type, const_cast<uint8_t*>(image_frame.data.data()),
+                static_cast<size_t>(geometry.step));
   cv::Mat bgr_image;
-  switch (kCameraInfo.encoding)
+  switch (frame_layout.encoding)
   {
     case CameraTypes::Encoding::RGB8:
       cv::cvtColor(image, bgr_image, cv::COLOR_RGB2BGR);
@@ -583,10 +574,12 @@ void ArmorTracker<CameraInfoV>::SubmitPreview(
     std::array<ArmorOverlay, 4> faces{};
   };
 
-  const auto to_point = [](const cv::Point2f& point)
+  const auto to_point = [&geometry](const cv::Point2f& native_point)
   {
-    return cv::Point(static_cast<int>(std::lround(point.x)),
-                     static_cast<int>(std::lround(point.y)));
+    return cv::Point(static_cast<int>(std::lround(
+                         CameraTypes::NativeToFrameX(geometry, native_point.x))),
+                     static_cast<int>(std::lround(
+                         CameraTypes::NativeToFrameY(geometry, native_point.y))));
   };
 
   std::vector<TrackOverlay> track_overlays;
@@ -599,13 +592,11 @@ void ArmorTracker<CameraInfoV>::SubmitPreview(
     overlay.selected = track.selected;
     overlay.score = track.score;
     overlay.face_count = std::min(
-        4, std::min(track.armors_num,
-                    static_cast<int>(track.faces_world.size())));
+        4, std::min(track.armors_num, static_cast<int>(track.faces_world.size())));
 
     for (int i = 0; i < overlay.face_count; ++i)
     {
-      const Eigen::Vector4d face =
-          track.faces_world[static_cast<std::size_t>(i)];
+      const Eigen::Vector4d face = track.faces_world[static_cast<std::size_t>(i)];
       const Eigen::Vector3d center_world = face.head<3>();
       const double yaw = face[3];
       if (!center_world.allFinite() || !std::isfinite(yaw))
@@ -614,8 +605,7 @@ void ArmorTracker<CameraInfoV>::SubmitPreview(
       }
 
       const auto corners =
-          tracker_.ReprojectArmorFace(center_world, yaw, track.armor_type,
-                                      track.tag_id);
+          tracker_.ReprojectArmorFace(center_world, yaw, track.armor_type, track.tag_id);
       if (corners.size() != 4U)
       {
         continue;
@@ -624,8 +614,8 @@ void ArmorTracker<CameraInfoV>::SubmitPreview(
       bool valid = true;
       for (std::size_t corner = 0; corner < corners.size(); ++corner)
       {
-        valid = valid && std::isfinite(corners[corner].x) &&
-                std::isfinite(corners[corner].y);
+        valid =
+            valid && std::isfinite(corners[corner].x) && std::isfinite(corners[corner].y);
         center_uv += corners[corner] * 0.25F;
         overlay.faces[static_cast<std::size_t>(i)].corners_uv[corner] =
             to_point(corners[corner]);
@@ -653,11 +643,11 @@ void ArmorTracker<CameraInfoV>::SubmitPreview(
     }
     if (valid_face_count > 0)
     {
-      overlay.center_uv =
-          cv::Point(static_cast<int>(std::lround(
-                        center_sum.x / static_cast<double>(valid_face_count))),
-                    static_cast<int>(std::lround(
-                        center_sum.y / static_cast<double>(valid_face_count))));
+      overlay.center_uv = cv::Point(
+          static_cast<int>(
+              std::lround(center_sum.x / static_cast<double>(valid_face_count))),
+          static_cast<int>(
+              std::lround(center_sum.y / static_cast<double>(valid_face_count))));
       overlay.center_valid = true;
       track_overlays.push_back(overlay);
     }
@@ -665,30 +655,37 @@ void ArmorTracker<CameraInfoV>::SubmitPreview(
 
   preview_.Submit(
       bgr_image,
-      [detector_armors, target_msg, track_overlays](cv::Mat& canvas)
+      [detector_armors, target_msg, track_overlays, geometry](cv::Mat& canvas)
       {
+        const auto to_frame_point = [&geometry](const cv::Point2f& native_point)
+        {
+          return cv::Point2f(
+              static_cast<float>(CameraTypes::NativeToFrameX(geometry, native_point.x)),
+              static_cast<float>(CameraTypes::NativeToFrameY(geometry, native_point.y)));
+        };
         for (const auto& armor : detector_armors)
         {
           const cv::Scalar color =
-              armor.pnp_valid ? cv::Scalar(80, 220, 255)
-                              : cv::Scalar(120, 120, 120);
+              armor.pnp_valid ? cv::Scalar(80, 220, 255) : cv::Scalar(120, 120, 120);
+          std::array<cv::Point2f, 4> frame_points{};
           for (std::size_t i = 0; i < armor.points.size(); ++i)
           {
-            cv::line(canvas, armor.points[i],
-                     armor.points[(i + 1U) % armor.points.size()], color, 2,
-                     cv::LINE_AA);
+            frame_points[i] = to_frame_point(armor.points[i]);
           }
-          cv::circle(canvas, armor.center, 4, color, -1, cv::LINE_AA);
+          for (std::size_t i = 0; i < frame_points.size(); ++i)
+          {
+            cv::line(canvas, frame_points[i],
+                     frame_points[(i + 1U) % frame_points.size()], color, 2, cv::LINE_AA);
+          }
+          cv::circle(canvas, to_frame_point(armor.center), 4, color, -1, cv::LINE_AA);
         }
 
         for (const auto& track : track_overlays)
         {
           const cv::Scalar face_color =
-              track.selected ? cv::Scalar(255, 160, 40)
-                             : cv::Scalar(210, 210, 120);
+              track.selected ? cv::Scalar(255, 160, 40) : cv::Scalar(210, 210, 120);
           const cv::Scalar body_color =
-              track.selected ? cv::Scalar(40, 255, 40)
-                             : cv::Scalar(80, 220, 255);
+              track.selected ? cv::Scalar(40, 255, 40) : cv::Scalar(80, 220, 255);
           const int line_thickness = track.selected ? 2 : 1;
 
           std::array<cv::Point, 4> armor_center_uv{};
@@ -730,10 +727,9 @@ void ArmorTracker<CameraInfoV>::SubmitPreview(
               if (armor_center_valid[static_cast<std::size_t>(i)] &&
                   armor_center_valid[static_cast<std::size_t>(next)])
               {
-                cv::line(canvas,
-                         armor_center_uv[static_cast<std::size_t>(i)],
-                         armor_center_uv[static_cast<std::size_t>(next)],
-                         body_color, line_thickness, cv::LINE_AA);
+                cv::line(canvas, armor_center_uv[static_cast<std::size_t>(i)],
+                         armor_center_uv[static_cast<std::size_t>(next)], body_color,
+                         line_thickness, cv::LINE_AA);
               }
             }
           }
@@ -747,10 +743,8 @@ void ArmorTracker<CameraInfoV>::SubmitPreview(
             cv::circle(canvas, armor_center_uv[static_cast<std::size_t>(i)], 4,
                        face_color, -1, cv::LINE_AA);
             cv::putText(canvas, "E" + std::to_string(i),
-                        armor_center_uv[static_cast<std::size_t>(i)] +
-                            cv::Point(6, 14),
-                        cv::FONT_HERSHEY_SIMPLEX, 0.42, face_color, 1,
-                        cv::LINE_AA);
+                        armor_center_uv[static_cast<std::size_t>(i)] + cv::Point(6, 14),
+                        cv::FONT_HERSHEY_SIMPLEX, 0.42, face_color, 1, cv::LINE_AA);
           }
 
           cv::Point center_uv;
@@ -778,10 +772,9 @@ void ArmorTracker<CameraInfoV>::SubmitPreview(
             }
             if (count > 0)
             {
-              center_uv = cv::Point(static_cast<int>(std::lround(
-                                       average.x / static_cast<double>(count))),
-                                    static_cast<int>(std::lround(
-                                       average.y / static_cast<double>(count))));
+              center_uv = cv::Point(
+                  static_cast<int>(std::lround(average.x / static_cast<double>(count))),
+                  static_cast<int>(std::lround(average.y / static_cast<double>(count))));
               center_projected = true;
             }
           }
@@ -790,40 +783,34 @@ void ArmorTracker<CameraInfoV>::SubmitPreview(
             cv::circle(canvas, center_uv, track.selected ? 6 : 5, body_color, -1,
                        cv::LINE_AA);
             cv::drawMarker(canvas, center_uv, body_color, cv::MARKER_CROSS,
-                           track.selected ? 20 : 16, line_thickness,
-                           cv::LINE_AA);
+                           track.selected ? 20 : 16, line_thickness, cv::LINE_AA);
             char label[64];
-            std::snprintf(label, sizeof(label), "%s%d %.2f",
-                          track.selected ? "*" : "", track.tag_id, track.score);
+            std::snprintf(label, sizeof(label), "%s%d %.2f", track.selected ? "*" : "",
+                          track.tag_id, track.score);
             int baseline = 0;
-            const cv::Size label_size = cv::getTextSize(
-                label, cv::FONT_HERSHEY_SIMPLEX, 0.52, 1, &baseline);
+            const cv::Size label_size =
+                cv::getTextSize(label, cv::FONT_HERSHEY_SIMPLEX, 0.52, 1, &baseline);
             cv::Point label_pos = center_uv + cv::Point(8, -8);
-            label_pos.x =
-                std::clamp(label_pos.x, 2, canvas.cols - label_size.width - 2);
+            label_pos.x = std::clamp(label_pos.x, 2, canvas.cols - label_size.width - 2);
             label_pos.y = std::clamp(label_pos.y, label_size.height + 2,
                                      canvas.rows - baseline - 2);
-            cv::putText(canvas, label, label_pos, cv::FONT_HERSHEY_SIMPLEX,
-                        0.52, cv::Scalar(0, 0, 0), 3, cv::LINE_AA);
-            cv::putText(canvas, label, label_pos, cv::FONT_HERSHEY_SIMPLEX,
-                        0.52, body_color, 1, cv::LINE_AA);
+            cv::putText(canvas, label, label_pos, cv::FONT_HERSHEY_SIMPLEX, 0.52,
+                        cv::Scalar(0, 0, 0), 3, cv::LINE_AA);
+            cv::putText(canvas, label, label_pos, cv::FONT_HERSHEY_SIMPLEX, 0.52,
+                        body_color, 1, cv::LINE_AA);
           }
         }
 
         const auto id_index = static_cast<std::size_t>(target_msg.id);
-        const std::string id_name =
-            id_index < ARMOR_NUMBER_NAMES.size()
-                ? std::string(ARMOR_NUMBER_NAMES[id_index])
-                : std::string("invalid");
+        const std::string id_name = id_index < ARMOR_NUMBER_NAMES.size()
+                                        ? std::string(ARMOR_NUMBER_NAMES[id_index])
+                                        : std::string("invalid");
         const std::string header =
-            std::string("tracker ") +
-            (target_msg.tracking ? "TRACK" : "NO_TARGET") + " id=" + id_name +
-            " face=" + std::to_string(target_msg.tracked_face_index) +
+            std::string("tracker ") + (target_msg.tracking ? "TRACK" : "NO_TARGET") +
+            " id=" + id_name + " face=" + std::to_string(target_msg.tracked_face_index) +
             " det=" + std::to_string(detector_armors.size()) +
             " tracks=" + std::to_string(track_overlays.size());
-        cv::putText(canvas, header, cv::Point(12, 28),
-                    cv::FONT_HERSHEY_SIMPLEX, 0.75, cv::Scalar(40, 240, 40),
-                    2, cv::LINE_AA);
-
+        cv::putText(canvas, header, cv::Point(12, 28), cv::FONT_HERSHEY_SIMPLEX, 0.75,
+                    cv::Scalar(40, 240, 40), 2, cv::LINE_AA);
       });
 }
