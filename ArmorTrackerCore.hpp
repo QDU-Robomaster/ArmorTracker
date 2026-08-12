@@ -5,6 +5,8 @@
  * @brief Header-only facade that adapts detector armors into tracker outputs.
  */
 
+#include <Eigen/Dense>
+#include <Eigen/Geometry>
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -12,13 +14,10 @@
 #include <cstdint>
 #include <list>
 #include <memory>
-#include <string>
-#include <vector>
-
-#include <Eigen/Dense>
-#include <Eigen/Geometry>
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
+#include <string>
+#include <vector>
 
 #include "ArmorTrackerModel.hpp"
 
@@ -33,6 +32,8 @@ struct InputArmor
   int armor_type = 0;
   double confidence = 0.0;
   std::array<cv::Point2f, 4> corners{};
+  std::array<cv::Point2f, 4> frame_corners{};
+  bool frame_corners_valid = false;
   cv::Point2f center{};
   cv::Point2f center_norm{0.5F, 0.5F};
 };
@@ -128,12 +129,11 @@ inline double WorldYawToOutputYaw(double yaw_world, double output_yaw_world)
 /**
  * @brief Convert an inertial W-frame armor face pose into public output axes.
  */
-inline Eigen::Vector4d WorldFaceToOutputFace(
-    const Eigen::Vector4d& face_world, const Eigen::Matrix3d& R_world_to_output,
-    double output_yaw_world)
+inline Eigen::Vector4d WorldFaceToOutputFace(const Eigen::Vector4d& face_world,
+                                             const Eigen::Matrix3d& R_world_to_output,
+                                             double output_yaw_world)
 {
-  const Eigen::Vector3d position_output =
-      R_world_to_output * face_world.head<3>();
+  const Eigen::Vector3d position_output = R_world_to_output * face_world.head<3>();
   return {position_output.x(), position_output.y(), position_output.z(),
           WorldYawToOutputYaw(face_world[3], output_yaw_world)};
 }
@@ -184,6 +184,14 @@ inline Armor MakeTrackedArmor(const InputArmor& input)
   armor.type = DetectorTypeIsLarge(input) ? ArmorType::BIG : ArmorType::SMALL;
   armor.priority = PriorityFromName(armor.name);
   armor.center_norm = input.center_norm;
+  if (input.frame_corners_valid)
+  {
+    armor.selection_points.assign(input.frame_corners.begin(), input.frame_corners.end());
+  }
+  else
+  {
+    armor.selection_points = points;
+  }
   return armor;
 }
 
@@ -201,10 +209,7 @@ class TrackerCore
   /**
    * @brief Construct and configure the tracker core.
    */
-  explicit TrackerCore(const Config& config)
-  {
-    Configure(config);
-  }
+  explicit TrackerCore(const Config& config) { Configure(config); }
 
   /**
    * @brief Reset the core using a new configuration.
@@ -257,9 +262,9 @@ class TrackerCore
     }
     const uint64_t delta_us =
         timestamp_us >= base_timestamp_us_ ? timestamp_us - base_timestamp_us_ : 0;
-    const auto tp = base_tp_ + std::chrono::duration_cast<
-                                   std::chrono::steady_clock::duration>(
-                                   std::chrono::microseconds(delta_us));
+    const auto tp =
+        base_tp_ + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                       std::chrono::microseconds(delta_us));
     (void)tracker_->Track(armors, tp);
 
     Output out;
@@ -303,12 +308,11 @@ class TrackerCore
     out.yaw = WorldYawToOutputYaw(out.yaw_world, output_yaw_world);
     out.vyaw = x[7];
     out.dz = target.DzForOutput();
-    if (target.last_id >= 0 &&
-        target.last_id < static_cast<int>(out.faces_world.size()))
+    if (target.last_id >= 0 && target.last_id < static_cast<int>(out.faces_world.size()))
     {
-      const auto face = WorldFaceToOutputFace(
-          out.faces_world[static_cast<std::size_t>(target.last_id)],
-          R_world_to_output, output_yaw_world);
+      const auto face =
+          WorldFaceToOutputFace(out.faces_world[static_cast<std::size_t>(target.last_id)],
+                                R_world_to_output, output_yaw_world);
       out.armor = face.head<3>();
       out.armor_yaw = face[3];
     }
@@ -321,9 +325,9 @@ class TrackerCore
    * The solver pose is updated by Step() before preview submission, so this
    * keeps preview projection on the same geometry path as tracker yaw fitting.
    */
-  std::vector<cv::Point2f> ReprojectArmorFace(
-      const Eigen::Vector3d& center_world, double yaw_world, int armor_type,
-      int tag_id) const
+  std::vector<cv::Point2f> ReprojectArmorFace(const Eigen::Vector3d& center_world,
+                                              double yaw_world, int armor_type,
+                                              int tag_id) const
   {
     if (!solver_)
     {
@@ -334,8 +338,8 @@ class TrackerCore
                                    ArmorNameFromDetectorNumber(tag_id));
   }
 
-  bool IsArmorFaceFrontFacing(const Eigen::Vector3d& center_world,
-                              double yaw_world, int tag_id) const
+  bool IsArmorFaceFrontFacing(const Eigen::Vector3d& center_world, double yaw_world,
+                              int tag_id) const
   {
     if (!solver_)
     {

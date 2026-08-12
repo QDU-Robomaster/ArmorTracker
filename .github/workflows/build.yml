@@ -115,20 +115,25 @@ jobs:
           cat > Modules/FakeCamera/FakeCamera.hpp <<'EOF'
           #pragma once
 
+          #include <type_traits>
+
           /* === MODULE MANIFEST V2 ===
           module_description: Minimal CameraBase fixture for module CI
-          constructor_args: []
-          template_args:
-            - Info:
-                width: 1280
-                height: 720
-                step: 3840
-                encoding: CameraTypes::Encoding::BGR8
-                camera_matrix: [800.0, 0.0, 640.0, 0.0, 800.0, 360.0, 0.0, 0.0, 1.0]
+          constructor_args:
+            - calibration:
+                native_width: 1440
+                native_height: 1080
+                camera_matrix: [2328.6857198980888, 0.0, 733.35646250924742, 0.0, 2328.6701077899961, 540.61872869227727, 0.0, 0.0, 1.0]
                 distortion_model: CameraTypes::DistortionModel::PLUMB_BOB
-                distortion_coefficients: [0.0, 0.0, 0.0, 0.0, 0.0]
+                distortion_coefficients: [-0.091821039187099038, 0.46399073468302049, 0.0026098786426372819, 0.0009819586010405485, -0.47512788503104569]
                 rectification_matrix: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
-                projection_matrix: [800.0, 0.0, 640.0, 0.0, 0.0, 800.0, 360.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+                projection_matrix: [2328.6857198980888, 0.0, 733.35646250924742, 0.0, 0.0, 2328.6701077899961, 540.61872869227727, 0.0, 0.0, 0.0, 1.0, 0.0]
+          template_args:
+            - Layout:
+                width: 720
+                height: 540
+                step: 2160
+                encoding: CameraTypes::Encoding::BGR8
           required_hardware: []
           depends:
             - qdu-future/CameraBase
@@ -138,12 +143,37 @@ jobs:
           #include "app_framework.hpp"
           #include "libxr.hpp"
 
-          template <CameraTypes::CameraInfo CameraInfoV>
-          class FakeCamera : public CameraBase<CameraInfoV>, public LibXR::Application
+          template <CameraTypes::FrameLayout FrameLayoutV>
+          class FakeCamera : public CameraBase<FrameLayoutV>, public LibXR::Application
           {
            public:
-            explicit FakeCamera(LibXR::HardwareContainer &hw, LibXR::ApplicationManager &app)
-                : CameraBase<CameraInfoV>(hw, "fake_camera")
+            using Base = CameraBase<FrameLayoutV>;
+            using CameraCalibration = typename Base::CameraCalibration;
+            using FrameGeometry = typename Base::FrameGeometry;
+            using ImageFrame = typename Base::ImageFrame;
+
+            static inline constexpr FrameGeometry fixed_geometry{
+                .epoch = 1,
+                .width = FrameLayoutV.width,
+                .height = FrameLayoutV.height,
+                .step = FrameLayoutV.step,
+                .roi_offset_x_native = 0,
+                .roi_offset_y_native = 0,
+                .decimation_x = 2,
+                .decimation_y = 2,
+                .flags = CameraTypes::FRAME_GEOMETRY_NONE,
+                .reserved = 0,
+                .sample_phase_x_native = 0.0F,
+                .sample_phase_y_native = 0.0F,
+            };
+            static_assert(fixed_geometry.epoch != 0);
+            static_assert(std::is_same_v<decltype(&ImageFrame::geometry),
+                                         FrameGeometry ImageFrame::*>);
+
+            explicit FakeCamera(LibXR::HardwareContainer &hw,
+                                LibXR::ApplicationManager &app,
+                                CameraCalibration calibration)
+                : Base(hw, calibration, "fake_camera")
             {
               app.Register(*this);
             }
@@ -164,12 +194,61 @@ jobs:
           cat > User/xrobot.yaml <<'EOF'
           global_settings:
             monitor_sleep_ms: 1000
+
+          constexpr_namespace: ModuleCi
+
+          constexpr_includes:
+            - CameraBase.hpp
+
+          constexprs:
+            MainCameraCalibration:
+              type: CameraTypes::CameraCalibration
+              value:
+                native_width: 1440
+                native_height: 1080
+                camera_matrix: [2328.6857198980888, 0.0, 733.35646250924742, 0.0, 2328.6701077899961, 540.61872869227727, 0.0, 0.0, 1.0]
+                distortion_model: {expr: CameraTypes::DistortionModel::PLUMB_BOB}
+                distortion_coefficients: [-0.091821039187099038, 0.46399073468302049, 0.0026098786426372819, 0.0009819586010405485, -0.47512788503104569]
+                rectification_matrix: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+                projection_matrix: [2328.6857198980888, 0.0, 733.35646250924742, 0.0, 0.0, 2328.6701077899961, 540.61872869227727, 0.0, 0.0, 0.0, 1.0, 0.0]
+            MainFrameLayout:
+              type: CameraTypes::FrameLayout
+              value:
+                width: 720
+                height: 540
+                step: 2160
+                encoding: {expr: CameraTypes::Encoding::BGR8}
           modules: []
           EOF
           xrobot_add_mod BlinkLED --instance-id BlinkLED_0
           xrobot_add_mod FakeCamera --instance-id camera
           xrobot_add_mod CameraFrameSync --instance-id camera_frame_sync
           xrobot_add_mod ArmorTracker --instance-id ArmorTracker_0
+          python3 - <<'PY'
+          from pathlib import Path
+
+          import yaml
+
+          path = Path("User/xrobot.yaml")
+          config = yaml.safe_load(path.read_text(encoding="utf-8"))
+          geometry_modules = {"FakeCamera", "CameraFrameSync", "ArmorTracker"}
+          for module in config["modules"]:
+              if module["name"] in geometry_modules:
+                  module["template_args"] = {
+                      "Layout": {"constexpr": "MainFrameLayout"}
+                  }
+              if module["name"] == "FakeCamera":
+                  module["constructor_args"]["calibration"] = {
+                      "constexpr": "MainCameraCalibration"
+                  }
+              if module["name"] == "CameraFrameSync":
+                  module["constructor_args"]["camera"] = "@camera"
+              if module["name"] == "ArmorTracker":
+                  module["constructor_args"]["sync"] = "@camera_frame_sync"
+          path.write_text(
+              yaml.safe_dump(config, sort_keys=False), encoding="utf-8"
+          )
+          PY
           cat User/xrobot.yaml
 
       - name: Generate main
@@ -181,10 +260,17 @@ jobs:
           cd build
           cmake .. \
             -DOpenVINO_DIR=/opt/intel/openvino_2025.4.0/runtime/cmake \
+            -DBUILD_TESTING=ON \
             -DLIBXR_PRINT_INTEGER_ENABLE_64BIT=ON \
             -DLIBXR_PRINT_FLOAT_ENABLE_DOUBLE=ON \
             -DLIBXR_PRINT_ENABLE_POINTER=ON
           make
+
+      - name: Run geometry tests
+        run: >-
+          ctest --test-dir build/libxr --output-on-failure
+          --no-tests=error
+          -R '^armor_tracker_frame_geometry_test$'
 
       - name: Run coordinate semantics check
         run: |
@@ -197,7 +283,7 @@ jobs:
           ./build/coordinate_semantics_check
 
       - name: Create Tag via GitHub API
-        if: ${{ success() && github.event_name != 'pull_request' }}
+        if: ${{ success() && github.event_name != 'pull_request' && github.ref == 'refs/heads/master' }}
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}

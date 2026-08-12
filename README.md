@@ -35,6 +35,11 @@
 默认 detector topic 为 `armor_detector/armors_frame`。tracker 对外只发布
 `tracker/target_frame`。
 
+Tracker 在构造期从 `CameraFrameSync::Calibration()` 复制一份原生相机标定。Detector
+发布的四角点保持原生传感器坐标，Tracker 继续独立使用 230 mm 大装甲板模型和零畸变
+策略执行 PnP；本阶段不复用 Detector pose，因为两者的尺寸、畸变和 yaw 处理语义不同。
+逐帧 `FrameGeometry` 按值经过异步 pending frame 和 `target_frame.source_frame` 传到后级。
+
 输出统一使用与公开本体系 `B` 同向的惯性解算轴 `O`：右手系，`x` 向右，
 `y` 向前，`z` 向上；yaw 以前向为 0，左转为正。`O` 的轴向不随当前云台 yaw
 转动，因此后级 Aimer 从 `tracker/target_frame` 解出的 `host/target_euler.yaw`
@@ -45,7 +50,7 @@
 ## Preview
 
 内置 preview 只在 `cfg.preview.enabled: true` 时启动，不订阅 topic、不录像、不反压主链路。
-它绘制 detector 原始四边形、tracker 整车中心、四个装甲面中心、相邻装甲面连线，以及带固定
+它把 detector 原生角点和 tracker 原生重投影逆映射到当前帧后，绘制 detector 四边形、tracker 整车中心、四个装甲面中心、相邻装甲面连线，以及带固定
 倾角的装甲板物理框。多车跟踪时，preview 会绘制所有 active 车辆，并在车体中心标注编号和
 当前选择评分；被选中的车辆用更醒目的中心和连线显示。detector preview 不在这里处理。
 
@@ -55,6 +60,10 @@ tracker 内部按装甲板编号维护多套车辆 EKF 状态，同一 slot 丢�
 同一帧里出现多个编号时，各编号状态独立更新；
 `tracker/target_frame` 中只携带一个当前选择目标。当前选择分数使用装甲板观测数量的低通值、距离、
 可打击面积、自旋速度和目标相对当前云台视轴的角度差，并用滞回 margin 避免输出目标抖动。
+可打击面积在 `NativeToFrame` 后计算，因此 2x wide 模式不会产生 4 倍面积偏置。
+
+候选的图像中心排序现在使用原生标定主点，而不是历史硬编码 `(720, 540)`。这是独立的
+legacy bug 修复，可能只在同优先级候选排序接近边界时造成预期差异。
 
 ## 验证
 

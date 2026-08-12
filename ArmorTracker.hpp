@@ -48,18 +48,13 @@ constructor_args:
       web_port: 8080
       web_stream_name: "armor_tracker"
       max_fps: 30.0
-  sync: '@nullptr'
+  sync: '@camera_frame_sync'
 template_args:
-  - Info:
+  - Layout:
       width: 1280
       height: 720
       step: 3840
       encoding: CameraTypes::Encoding::BGR8
-      camera_matrix: [800.0, 0.0, 640.0, 0.0, 800.0, 360.0, 0.0, 0.0, 1.0]
-      distortion_model: CameraTypes::DistortionModel::PLUMB_BOB
-      distortion_coefficients: [0.0, 0.0, 0.0, 0.0, 0.0]
-      rectification_matrix: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
-      projection_matrix: [800.0, 0.0, 640.0, 0.0, 0.0, 800.0, 360.0, 0.0, 0.0, 0.0, 1.0, 0.0]
 required_hardware: []
 depends:
   - qdu-future/ArmorDetector
@@ -68,6 +63,7 @@ depends:
 === END MANIFEST === */
 // clang-format on
 
+#include <Eigen/Dense>
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -75,6 +71,7 @@ depends:
 #include <cmath>
 #include <cstdint>
 #include <mutex>
+#include <opencv2/core.hpp>
 #include <optional>
 #include <string>
 #include <thread>
@@ -82,13 +79,12 @@ depends:
 #include <utility>
 #include <vector>
 
-#include <Eigen/Dense>
-#include <opencv2/core.hpp>
-
 #include "ArmorDetectorTypes.hpp"
 #include "ArmorTrackerCore.hpp"
+#include "ArmorTrackerFrameAdapter.hpp"
 #include "ArmorTrackerTarget.hpp"
 #include "CameraFrameSync.hpp"
+#include "ReplayBenchmark.hpp"
 #include "VisionPreview.hpp"
 #include "app_framework.hpp"
 #include "libxr_time.hpp"
@@ -124,22 +120,23 @@ depends:
  * core, publishes the same-frame target packet, and optionally submits a built-in
  * preview overlay.
  */
-template <CameraTypes::CameraInfo CameraInfoV>
+template <CameraTypes::FrameLayout FrameLayoutV>
 class ArmorTracker : public LibXR::Application
 {
  public:
-  using FrameSync = CameraFrameSync<CameraInfoV>;
+  using FrameSync = CameraFrameSync<FrameLayoutV>;
   using Base = typename FrameSync::Base;
-  using CameraInfo = typename Base::CameraInfo;
+  using CameraCalibration = CameraTypes::CameraCalibration;
+  using FrameGeometry = CameraTypes::FrameGeometry;
   using ImageFrame = typename FrameSync::ImageFrame;
   using ImuStamped = typename FrameSync::ImuStamped;
-  using DetectionPacket = ArmorDetectionsFramePacket<CameraInfoV>;
-  using DetectionMessage = ArmorDetectionsFrameMessage<CameraInfoV>;
-  using DetectionMessageArg = typename std::conditional<
-      std::is_pointer<DetectionMessage>::value, DetectionMessage,
-      const DetectionMessage&>::type;
+  using DetectionPacket = ArmorDetectionsFramePacket<FrameLayoutV>;
+  using DetectionMessage = ArmorDetectionsFrameMessage<FrameLayoutV>;
+  using DetectionMessageArg =
+      typename std::conditional<std::is_pointer<DetectionMessage>::value,
+                                DetectionMessage, const DetectionMessage&>::type;
 
-  static inline constexpr CameraInfo kCameraInfo = CameraInfoV;
+  static inline constexpr auto frame_layout = Base::frame_layout;
 
   /**
    * @brief Runtime configuration loaded from the module YAML config.
@@ -209,12 +206,12 @@ class ArmorTracker : public LibXR::Application
   struct TargetFramePacket
   {
     /// tracker 输入所用的 detector 同源图像/IMU 帧。
-    ArmorDetectionsSourceFrame<CameraInfoV> source_frame{};
+    ArmorDetectionsSourceFrame<FrameLayoutV> source_frame{};
     /// 本帧 tracker 输出的目标结果，使用与公开 B 系同向的惯性输出轴 O。
     const ArmorTrackerTarget* target{nullptr};
     /// output 坐标到 OpenCV camera 坐标的旋转，row-major，满足 p_C = R_CO p_O + t_CO。
-    std::array<double, 9> output_to_camera_rotation{
-        1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0};
+    std::array<double, 9> output_to_camera_rotation{1.0, 0.0, 0.0, 0.0, 1.0,
+                                                    0.0, 0.0, 0.0, 1.0};
     /// output 坐标到 OpenCV camera 坐标的平移，单位 m。
     std::array<double, 3> output_to_camera_translation{0.0, 0.0, 0.0};
   };
@@ -233,6 +230,7 @@ class ArmorTracker : public LibXR::Application
   struct PendingDetectionFrame
   {
     uint64_t image_timestamp_us{0};
+    FrameGeometry geometry{};
     ImageFrame image_frame{};
     ImuStamped imu{};
     ArmorDetectorResults detections{};
@@ -242,13 +240,11 @@ class ArmorTracker : public LibXR::Application
   /**
    * @brief Construct the module and subscribe to the detector topic.
    */
-  explicit ArmorTracker(LibXR::HardwareContainer& hw,
-                        LibXR::ApplicationManager& app, Config cfg,
-                        FrameSync* sync);
+  explicit ArmorTracker(LibXR::HardwareContainer& hw, LibXR::ApplicationManager& app,
+                        Config cfg, FrameSync* sync);
 
-  explicit ArmorTracker(LibXR::HardwareContainer& hw,
-                        LibXR::ApplicationManager& app, Config cfg,
-                        FrameSync& sync);
+  explicit ArmorTracker(LibXR::HardwareContainer& hw, LibXR::ApplicationManager& app,
+                        Config cfg, FrameSync& sync);
 
   /**
    * @brief RamFS command entry used to show or update selected tracker params.
@@ -309,12 +305,19 @@ class ArmorTracker : public LibXR::Application
   /**
    * @brief Submit a preview overlay job when the preview runtime is enabled.
    */
-  void SubmitPreview(const ImageFrame& image_frame,
+  void SubmitPreview(const ImageFrame& image_frame, const FrameGeometry& geometry,
                      const ArmorDetectorResults& detector_armors,
                      const ArmorTrackerTarget& target_msg,
                      const armor_tracker_detail::Output& output);
 
+  static CameraCalibration CopyCalibration(FrameSync* sync)
+  {
+    ASSERT(sync != nullptr);
+    return sync->Calibration();
+  }
+
   Config cfg_;
+  const CameraCalibration calibration_;
   armor_tracker_detail::TrackerCore tracker_{};
   VisionPreview preview_{};
 
@@ -340,21 +343,20 @@ class ArmorTracker : public LibXR::Application
   uint64_t last_monitor_overwritten_{0};
   uint64_t last_monitor_processed_{0};
   uint64_t last_monitor_process_time_us_{0};
-  FrameSync* sync_{nullptr};
 };
 
 /**
  * @brief tracker/target_frame 的跨模块 frame packet 类型。
  */
-template <CameraTypes::CameraInfo CameraInfoV>
+template <CameraTypes::FrameLayout FrameLayoutV>
 using ArmorTrackerTargetFramePacket =
-    typename ArmorTracker<CameraInfoV>::TargetFramePacket;
+    typename ArmorTracker<FrameLayoutV>::TargetFramePacket;
 
 /**
  * @brief tracker/target_frame 的跨模块 topic payload 类型。
  */
-template <CameraTypes::CameraInfo CameraInfoV>
+template <CameraTypes::FrameLayout FrameLayoutV>
 using ArmorTrackerTargetFrameMessage =
-    typename ArmorTracker<CameraInfoV>::TargetFrameMessage;
+    typename ArmorTracker<FrameLayoutV>::TargetFrameMessage;
 
 #include "ArmorTrackerPipeline.hpp"
