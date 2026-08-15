@@ -18,7 +18,6 @@ constexpr CameraTypes::CameraCalibration kCalibration{
 };
 
 constexpr CameraTypes::FrameGeometry kWideGeometry{
-    .epoch = 1,
     .width = 720,
     .height = 540,
     .step = 2160,
@@ -64,36 +63,15 @@ ArmorDetectorResult MakeDetectionFromFrameQuad(
   return armor;
 }
 
-void TestGeometryStatus()
+void TestGeometryValidation()
 {
-  using Status = armor_tracker_detail::DetectorFrameGeometryStatus;
-  Expect(armor_tracker_detail::CheckDetectorFrameGeometry<kLayout>(
-             kCalibration, kWideGeometry, kWideGeometry) == Status::VALID,
-         "matching valid geometry must be accepted");
+  Expect(CameraTypes::ValidateFrameGeometry(kLayout, kCalibration, kWideGeometry),
+         "image-owned geometry must be accepted");
 
   auto invalid = kWideGeometry;
-  invalid.epoch = 0;
-  Expect(armor_tracker_detail::CheckDetectorFrameGeometry<kLayout>(
-             kCalibration, invalid, invalid) == Status::INVALID,
-         "invalid packet geometry must be rejected");
-
-  auto changed_roi = kWideGeometry;
-  changed_roi.roi_offset_x_native = 1;
-  Expect(armor_tracker_detail::CheckDetectorFrameGeometry<kLayout>(
-             kCalibration, kWideGeometry, changed_roi) == Status::IMAGE_MISMATCH,
-         "same-epoch ROI mutation must be rejected");
-
-  auto changed_phase = kWideGeometry;
-  changed_phase.sample_phase_x_native = 1.0F;
-  Expect(armor_tracker_detail::CheckDetectorFrameGeometry<kLayout>(
-             kCalibration, kWideGeometry, changed_phase) == Status::IMAGE_MISMATCH,
-         "same-epoch phase mutation must be rejected");
-
-  auto changed_epoch = kWideGeometry;
-  changed_epoch.epoch = 2;
-  Expect(armor_tracker_detail::CheckDetectorFrameGeometry<kLayout>(
-             kCalibration, kWideGeometry, changed_epoch) == Status::IMAGE_MISMATCH,
-         "epoch mismatch must be rejected");
+  invalid.decimation_x = 0;
+  Expect(!CameraTypes::ValidateFrameGeometry(kLayout, kCalibration, invalid),
+         "invalid image-owned geometry must be rejected");
 }
 
 void TestFrameAreaRecovery(const CameraTypes::FrameGeometry& geometry,
@@ -130,7 +108,7 @@ void TestFrameAreaRecovery(const CameraTypes::FrameGeometry& geometry,
 
 int main()
 {
-  TestGeometryStatus();
+  TestGeometryValidation();
   const std::array<cv::Point2f, 4> frame_points{
       cv::Point2f{10.0F, 20.0F}, cv::Point2f{50.0F, 20.0F}, cv::Point2f{50.0F, 40.0F},
       cv::Point2f{10.0F, 40.0F}};

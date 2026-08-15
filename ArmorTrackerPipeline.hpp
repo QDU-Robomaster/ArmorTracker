@@ -91,33 +91,73 @@ void ArmorTracker<FrameLayoutV>::OnMonitor()
   const uint64_t overwritten = overwritten_frame_count_.load(std::memory_order_relaxed);
   const uint64_t processed = processed_frame_count_.load(std::memory_order_relaxed);
   const uint64_t process_time_us = process_time_us_accum_.load(std::memory_order_relaxed);
+  const auto queue = pending_frames_.Snapshot();
 
   const uint64_t enqueue_delta = enqueued - last_monitor_enqueued_;
   const uint64_t overwrite_delta = overwritten - last_monitor_overwritten_;
   const uint64_t processed_delta = processed - last_monitor_processed_;
   const uint64_t process_time_delta_us = process_time_us - last_monitor_process_time_us_;
-  bool pending_ready = false;
-  {
-    std::lock_guard<std::mutex> lock(pending_frame_mutex_);
-    pending_ready = pending_frame_ready_;
-  }
+  const uint64_t full_wait_delta = queue.full_wait_count - last_monitor_full_wait_count_;
+  const uint64_t producer_wait_delta_ns =
+      queue.producer_wait_ns - last_monitor_producer_wait_ns_;
 
   last_monitor_enqueued_ = enqueued;
   last_monitor_overwritten_ = overwritten;
   last_monitor_processed_ = processed;
   last_monitor_process_time_us_ = process_time_us;
+  last_monitor_full_wait_count_ = queue.full_wait_count;
+  last_monitor_producer_wait_ns_ = queue.producer_wait_ns;
 
-  const double avg_process_ms = processed_delta == 0
-                                    ? 0.0
-                                    : static_cast<double>(process_time_delta_us) /
-                                          static_cast<double>(processed_delta) / 1000.0;
+  const double avg_worker_service_ms =
+      processed_delta == 0 ? 0.0
+                           : static_cast<double>(process_time_delta_us) /
+                                 static_cast<double>(processed_delta) / 1000.0;
+  const double avg_producer_wait_ms =
+      enqueue_delta == 0 ? 0.0
+                         : static_cast<double>(producer_wait_delta_ns) /
+                               static_cast<double>(enqueue_delta) / 1000000.0;
   XR_LOG_INFO(
       "ArmorTracker monitor enqueue=%llu overwrite=%llu processed=%llu "
-      "avg_process_ms=%.3f pending=%d",
+      "ready=%u occupied=%u high_water=%u full_wait=%llu "
+      "avg_producer_wait_ms=%.3f avg_worker_service_ms=%.3f worker_active=%d",
       static_cast<unsigned long long>(enqueue_delta),
       static_cast<unsigned long long>(overwrite_delta),
-      static_cast<unsigned long long>(processed_delta), avg_process_ms,
-      pending_ready ? 1 : 0);
+      static_cast<unsigned long long>(processed_delta),
+      static_cast<unsigned>(queue.ready), static_cast<unsigned>(queue.occupied),
+      static_cast<unsigned>(queue.high_water),
+      static_cast<unsigned long long>(full_wait_delta), avg_producer_wait_ms,
+      avg_worker_service_ms, queue.worker_active ? 1 : 0);
+}
+
+template <CameraTypes::FrameLayout FrameLayoutV>
+bool ArmorTracker<FrameLayoutV>::PipelineDrained() const noexcept
+{
+  const uint64_t enqueued = enqueued_frame_count_.load(std::memory_order_acquire);
+  const uint64_t processed = processed_frame_count_.load(std::memory_order_acquire);
+  return armor_tracker_pipeline::PipelineDrained(enqueued, processed,
+                                                 pending_frames_.Snapshot());
+}
+
+template <CameraTypes::FrameLayout FrameLayoutV>
+typename ArmorTracker<FrameLayoutV>::PipelineMetrics
+ArmorTracker<FrameLayoutV>::GetPipelineMetrics() const
+{
+  const auto queue = pending_frames_.Snapshot();
+  return PipelineMetrics{
+      .enqueued = enqueued_frame_count_.load(std::memory_order_acquire),
+      .overwritten = overwritten_frame_count_.load(std::memory_order_acquire),
+      .processed = processed_frame_count_.load(std::memory_order_acquire),
+      .queue_ready = queue.ready,
+      .queue_occupied = queue.occupied,
+      .queue_high_water = queue.high_water,
+      .image_storage_bytes = 0U,
+      .slot_storage_bytes = pending_frame_capacity * sizeof(PendingDetectionFrame),
+      .queue_full_waits = queue.full_wait_count,
+      .producer_wait_us = queue.producer_wait_ns / 1000U,
+      .worker_service_us = process_time_us_accum_.load(std::memory_order_acquire),
+      .producer_active = queue.producer_active,
+      .worker_active = queue.worker_active,
+  };
 }
 
 template <CameraTypes::FrameLayout FrameLayoutV>
@@ -233,110 +273,54 @@ int ArmorTracker<FrameLayoutV>::CommandFun(ArmorTracker<FrameLayoutV>* self, int
 
 template <CameraTypes::FrameLayout FrameLayoutV>
 void ArmorTracker<FrameLayoutV>::ArmorsCallback(
-    typename ArmorTracker<FrameLayoutV>::DetectionMessageArg message)
+    typename ArmorTracker<FrameLayoutV>::DetectionMessage message)
 {
-  const ArmorDetectionsSourceFrame<FrameLayoutV>* source_frame_ptr = nullptr;
-  const ArmorDetectorResults* detections_ptr = nullptr;
-  uint64_t detections_timestamp_us = 0;
-
-  if constexpr (std::is_pointer<DetectionMessage>::value)
+  if (message == nullptr || !message->Valid())
   {
-    if (message == nullptr)
-    {
-      XR_LOG_ERROR("ArmorTracker received empty detector packet pointer");
-      return;
-    }
-    if (message->detections == nullptr)
-    {
-      XR_LOG_ERROR("ArmorTracker received detector packet without detections");
-      return;
-    }
-    source_frame_ptr = &message->source_frame;
-    detections_ptr = &message->detections->results;
-    detections_timestamp_us = message->detections->image_timestamp_us;
-  }
-  else
-  {
-    source_frame_ptr = &message.source_frame;
-    detections_ptr = &message.results;
-    detections_timestamp_us = message.source_frame.image_timestamp_us;
-  }
-
-  const auto& source_frame = *source_frame_ptr;
-  if (source_frame.image_frame == nullptr)
-  {
-    XR_LOG_ERROR("ArmorTracker received detector packet without image frame");
-    return;
-  }
-  if (source_frame.imu == nullptr)
-  {
-    XR_LOG_ERROR("ArmorTracker received detector packet without synced imu");
-    return;
-  }
-  const auto geometry_status =
-      armor_tracker_detail::CheckDetectorFrameGeometry<FrameLayoutV>(
-          calibration_, source_frame.geometry, source_frame.image_frame->geometry);
-  if (geometry_status == armor_tracker_detail::DetectorFrameGeometryStatus::INVALID)
-  {
-    XR_LOG_ERROR("ArmorTracker received invalid frame geometry epoch=%u",
-                 source_frame.geometry.epoch);
-    return;
-  }
-  if (geometry_status ==
-      armor_tracker_detail::DetectorFrameGeometryStatus::IMAGE_MISMATCH)
-  {
-    XR_LOG_ERROR("ArmorTracker detector packet geometry mismatch epoch=%u image=%u",
-                 source_frame.geometry.epoch, source_frame.image_frame->geometry.epoch);
+    XR_LOG_ERROR("ArmorTracker received invalid detector frame");
     return;
   }
 
-  const uint64_t image_timestamp_us = source_frame.image_timestamp_us;
-  if (source_frame.image_frame->timestamp_us != image_timestamp_us)
+  const ImageFrame* const image_frame = message->GetImageFrame();
+  if (image_frame == nullptr)
   {
-    XR_LOG_ERROR("ArmorTracker detector packet timestamp mismatch image=%u packet=%u",
-                 static_cast<unsigned>(source_frame.image_frame->timestamp_us),
-                 static_cast<unsigned>(image_timestamp_us));
+    XR_LOG_ERROR("ArmorTracker detector frame lost its image owner");
     return;
   }
-  if (detections_timestamp_us != image_timestamp_us)
+  if (!CameraTypes::ValidateFrameGeometry(FrameLayoutV, calibration_,
+                                          image_frame->geometry))
   {
-    XR_LOG_ERROR("ArmorTracker detector result timestamp mismatch result=%u packet=%u",
-                 static_cast<unsigned>(detections_timestamp_us),
-                 static_cast<unsigned>(image_timestamp_us));
+    XR_LOG_ERROR(
+        "ArmorTracker received invalid frame geometry width=%u height=%u step=%u",
+        image_frame->geometry.width, image_frame->geometry.height,
+        image_frame->geometry.step);
     return;
   }
 
+  const uint64_t frame_timestamp_us = static_cast<uint64_t>(message->imu.timestamp_us);
+
+  AutoAimReplayBenchmark::RecordTrackerEnqueue(frame_timestamp_us);
+  const auto reservation = pending_frames_.WaitAcquire();
   const auto copy_start = std::chrono::steady_clock::now();
-  AutoAimReplayBenchmark::RecordTrackerEnqueue(image_timestamp_us);
-  PendingDetectionFrame pending_frame{};
-  pending_frame.image_timestamp_us = image_timestamp_us;
-  pending_frame.geometry = source_frame.geometry;
-  pending_frame.image_frame = *source_frame.image_frame;
-  pending_frame.imu = *source_frame.imu;
-  pending_frame.detections = *detections_ptr;
-  pending_frame.valid = true;
+  PendingDetectionFrame* const pending_frame = reservation.slot;
+  pending_frame->sequence = message->sequence;
+  pending_frame->image = message->image;
+  pending_frame->imu = message->imu;
+  pending_frame->detections = message->detections;
   const auto copy_finish = std::chrono::steady_clock::now();
   AutoAimReplayBenchmark::RecordTrackerQueued(
-      image_timestamp_us,
+      frame_timestamp_us,
       std::chrono::duration<double, std::milli>(copy_finish - copy_start).count());
-  enqueued_frame_count_.fetch_add(1, std::memory_order_relaxed);
-
-  bool need_post = false;
-  {
-    std::lock_guard<std::mutex> lock(pending_frame_mutex_);
-    if (pending_frame_ready_)
-    {
-      overwritten_frame_count_.fetch_add(1, std::memory_order_relaxed);
-      AutoAimReplayBenchmark::RecordTrackerOverwrite();
-    }
-    pending_frame_ = std::move(pending_frame);
-    need_post = !pending_frame_ready_;
-    pending_frame_ready_ = true;
-  }
-  if (need_post)
-  {
-    pending_frame_sem_.Post();
-  }
+  const uint64_t admission_sequence =
+      admission_sequence_count_.fetch_add(1, std::memory_order_relaxed) + 1U;
+  pending_frame->admission_sequence = admission_sequence;
+  enqueued_frame_count_.fetch_add(1, std::memory_order_release);
+  const auto commit = pending_frames_.Commit(pending_frame);
+  AutoAimReplayBenchmark::RecordTrackerQueueAdmission(
+      frame_timestamp_us, admission_sequence,
+      static_cast<double>(reservation.producer_wait_ns) / 1000000.0,
+      reservation.waited_for_full, static_cast<uint32_t>(commit.ready),
+      static_cast<uint32_t>(commit.occupied), static_cast<uint32_t>(commit.high_water));
 }
 
 template <CameraTypes::FrameLayout FrameLayoutV>
@@ -345,75 +329,76 @@ void ArmorTracker<FrameLayoutV>::TrackerWorkerThreadFun(ArmorTracker* self)
   XR_LOG_INFO("ArmorTracker worker started");
   while (true)
   {
-    if (self->pending_frame_sem_.Wait(UINT32_MAX) != LibXR::ErrorCode::OK)
+    PendingDetectionFrame* const frame = self->pending_frames_.WaitFront();
+    const uint64_t frame_timestamp_us = static_cast<uint64_t>(frame->imu.timestamp_us);
+    const uint64_t worker_sequence =
+        self->worker_sequence_count_.fetch_add(1, std::memory_order_relaxed) + 1U;
+    const auto worker_service_start = std::chrono::steady_clock::now();
+    if (self->params_is_changed_)
     {
-      continue;
+      self->SetConfig(self->cfg_);
+      self->params_is_changed_ = false;
     }
 
-    while (true)
-    {
-      PendingDetectionFrame frame{};
-      {
-        std::lock_guard<std::mutex> lock(self->pending_frame_mutex_);
-        if (!self->pending_frame_ready_)
-        {
-          break;
-        }
-        frame = std::move(self->pending_frame_);
-        self->pending_frame_ = PendingDetectionFrame{};
-        self->pending_frame_ready_ = false;
-      }
-
-      if (!frame.valid)
-      {
-        continue;
-      }
-
-      if (self->params_is_changed_)
-      {
-        self->SetConfig(self->cfg_);
-        self->params_is_changed_ = false;
-      }
-
-      self->ProcessPendingDetectionFrame(frame);
-    }
+    self->ProcessPendingDetectionFrame(*frame);
+    const auto worker_service_finish = std::chrono::steady_clock::now();
+    const auto worker_service_us =
+        static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                  worker_service_finish - worker_service_start)
+                                  .count());
+    self->process_time_us_accum_.fetch_add(worker_service_us, std::memory_order_relaxed);
+    AutoAimReplayBenchmark::RecordTrackerWorkerService(
+        frame_timestamp_us, frame->admission_sequence, worker_sequence,
+        std::chrono::duration<double, std::milli>(worker_service_finish -
+                                                  worker_service_start)
+            .count());
+    self->processed_frame_count_.fetch_add(1, std::memory_order_release);
+    self->pending_frames_.ReleaseFront(frame);
   }
 }
 
 template <CameraTypes::FrameLayout FrameLayoutV>
 void ArmorTracker<FrameLayoutV>::ProcessPendingDetectionFrame(
-    const PendingDetectionFrame& frame)
+    PendingDetectionFrame& frame)
 {
-  const auto process_start = std::chrono::steady_clock::now();
-  AutoAimReplayBenchmark::RecordTrackerStart(frame.image_timestamp_us);
-  ArmorDetectionsSourceFrame<FrameLayoutV> source_frame{};
-  source_frame.image_timestamp_us = frame.image_timestamp_us;
-  source_frame.geometry = frame.geometry;
-  source_frame.image_frame = &frame.image_frame;
-  source_frame.imu = &frame.imu;
+  TargetFrame target_frame{};
+  target_frame.sequence = frame.sequence;
+  target_frame.image = std::move(frame.image);
+  target_frame.imu = frame.imu;
 
-  const uint64_t image_timestamp_us = source_frame.image_timestamp_us;
+  const ImageFrame* const image_frame = target_frame.GetImageFrame();
+  if (image_frame == nullptr)
+  {
+    XR_LOG_ERROR("ArmorTracker worker received an invalid image owner");
+    return;
+  }
+
+  const auto process_start = std::chrono::steady_clock::now();
+  const uint64_t frame_timestamp_us =
+      static_cast<uint64_t>(target_frame.imu.timestamp_us);
+  const FrameGeometry& geometry = image_frame->geometry;
+  AutoAimReplayBenchmark::RecordTrackerStart(frame_timestamp_us);
   const ArmorDetectorResults& detector_armors = frame.detections;
   std::vector<armor_tracker_detail::InputArmor> inputs;
   inputs.reserve(detector_armors.size());
   for (const auto& armor : detector_armors)
   {
-    inputs.push_back(armor_tracker_detail::BuildTrackerInput(armor, frame.geometry));
+    inputs.push_back(armor_tracker_detail::BuildTrackerInput(armor, geometry));
   }
 
   Eigen::Quaterniond q_body_to_world(
-      source_frame.imu->rotation_wxyz[0], source_frame.imu->rotation_wxyz[1],
-      source_frame.imu->rotation_wxyz[2], source_frame.imu->rotation_wxyz[3]);
+      target_frame.imu.rotation_wxyz[0], target_frame.imu.rotation_wxyz[1],
+      target_frame.imu.rotation_wxyz[2], target_frame.imu.rotation_wxyz[3]);
   if (!std::isfinite(q_body_to_world.norm()) || q_body_to_world.norm() < 1e-9)
   {
     q_body_to_world = Eigen::Quaterniond::Identity();
   }
   q_body_to_world.normalize();
 
-  const auto output = tracker_.Step(image_timestamp_us, q_body_to_world, inputs);
+  const auto output = tracker_.Step(frame_timestamp_us, q_body_to_world, inputs);
 
   ArmorTrackerTarget target_msg{};
-  target_msg.image_timestamp_us = image_timestamp_us;
+  target_msg.image_timestamp_us = frame_timestamp_us;
   target_msg.id = ArmorNumber::INVALID;
 
   if (output.has_target)
@@ -438,10 +423,8 @@ void ArmorTracker<FrameLayoutV>::ProcessPendingDetectionFrame(
     target_msg.tracking = false;
   }
 
-  const LibXR::MicrosecondTimestamp publish_timestamp(image_timestamp_us);
-  target_frame_target_msg_ = target_msg;
-  target_frame_packet_.source_frame = source_frame;
-  target_frame_packet_.target = &target_frame_target_msg_;
+  const LibXR::MicrosecondTimestamp publish_timestamp(frame_timestamp_us);
+  target_frame.target = target_msg;
 
   const Eigen::Matrix3d R_camera_to_body =
       armor_tracker_detail::CameraToBodyRotationFromMountExtrinsic(
@@ -460,17 +443,16 @@ void ArmorTracker<FrameLayoutV>::ProcessPendingDetectionFrame(
   {
     for (int col = 0; col < 3; ++col)
     {
-      target_frame_packet_
-          .output_to_camera_rotation[static_cast<std::size_t>(row * 3 + col)] =
+      target_frame.output_to_camera_rotation[static_cast<std::size_t>(row * 3 + col)] =
           R_output_to_camera(row, col);
     }
-    target_frame_packet_.output_to_camera_translation[static_cast<std::size_t>(row)] =
+    target_frame.output_to_camera_translation[static_cast<std::size_t>(row)] =
         t_output_to_camera(row);
   }
 
   const auto tracker_compute_finish = std::chrono::steady_clock::now();
   AutoAimReplayBenchmark::RecordTracker(
-      image_timestamp_us,
+      frame_timestamp_us,
       std::chrono::duration<double, std::milli>(tracker_compute_finish - process_start)
           .count(),
       target_msg.tracking, static_cast<int>(target_msg.id),
@@ -479,30 +461,22 @@ void ArmorTracker<FrameLayoutV>::ProcessPendingDetectionFrame(
       target_msg.yaw, target_msg.v_yaw, target_msg.radius_1, target_msg.radius_2,
       target_msg.dz);
 
-  TargetFrameMessage target_frame_msg = &target_frame_packet_;
+  TargetFrameMessage target_frame_msg = &target_frame;
   target_frame_topic_.Publish(target_frame_msg, publish_timestamp);
-  SubmitPreview(*source_frame.image_frame, source_frame.geometry, detector_armors,
-                target_msg, output);
-
-  const auto process_finish = std::chrono::steady_clock::now();
-  const auto process_us =
-      static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
-                                process_finish - process_start)
-                                .count());
-  processed_frame_count_.fetch_add(1, std::memory_order_relaxed);
-  process_time_us_accum_.fetch_add(process_us, std::memory_order_relaxed);
+  SubmitPreview(*image_frame, detector_armors, target_msg, output);
 }
 
 template <CameraTypes::FrameLayout FrameLayoutV>
 void ArmorTracker<FrameLayoutV>::SubmitPreview(
-    const ImageFrame& image_frame, const FrameGeometry& geometry,
-    const ArmorDetectorResults& detector_armors, const ArmorTrackerTarget& target_msg,
-    const armor_tracker_detail::Output& output)
+    const ImageFrame& image_frame, const ArmorDetectorResults& detector_armors,
+    const ArmorTrackerTarget& target_msg, const armor_tracker_detail::Output& output)
 {
   if (!preview_.Running())
   {
     return;
   }
+
+  const FrameGeometry& geometry = image_frame.geometry;
 
   int cv_type = -1;
   switch (frame_layout.encoding)

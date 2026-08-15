@@ -38,7 +38,9 @@
 Tracker 在构造期从 `CameraFrameSync::Calibration()` 复制一份原生相机标定。Detector
 发布的四角点保持原生传感器坐标，Tracker 继续独立使用 230 mm 大装甲板模型和零畸变
 策略执行 PnP；本阶段不复用 Detector pose，因为两者的尺寸、畸变和 yaw 处理语义不同。
-逐帧 `FrameGeometry` 按值经过异步 pending frame 和 `target_frame.source_frame` 传到后级。
+异步 pending frame 只复制 `SharedFrame` 所有权、IMU 和检测结果，不复制图像字节。
+worker 将所有权移动到栈上 `TrackedFrame`，同步发布 `const TrackedFrame*`；逐帧
+`FrameGeometry` 始终只从 `SharedFrame.Get()->geometry` 读取。
 
 输出统一使用与公开本体系 `B` 同向的惯性解算轴 `O`：右手系，`x` 向右，
 `y` 向前，`z` 向上；yaw 以前向为 0，左转为正。`O` 的轴向不随当前云台 yaw
