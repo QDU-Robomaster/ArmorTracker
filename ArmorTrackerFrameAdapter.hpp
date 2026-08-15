@@ -2,7 +2,7 @@
 
 /**
  * @file ArmorTrackerFrameAdapter.hpp
- * @brief Validates detector frame geometry and adapts native detections for tracking.
+ * @brief Adapts native detector coordinates for tracking.
  */
 
 #include <cstddef>
@@ -14,36 +14,6 @@
 
 namespace armor_tracker_detail
 {
-/**
- * @brief Result of validating a detector packet against its referenced image.
- */
-enum class DetectorFrameGeometryStatus
-{
-  VALID,
-  INVALID,
-  IMAGE_MISMATCH,
-};
-
-/**
- * @brief Validate packet geometry and require an exact match with the image snapshot.
- */
-template <CameraTypes::FrameLayout FrameLayoutV>
-[[nodiscard]] constexpr DetectorFrameGeometryStatus CheckDetectorFrameGeometry(
-    const CameraTypes::CameraCalibration& calibration,
-    const CameraTypes::FrameGeometry& packet_geometry,
-    const CameraTypes::FrameGeometry& image_geometry)
-{
-  if (!CameraTypes::ValidateFrameGeometry(FrameLayoutV, calibration, packet_geometry))
-  {
-    return DetectorFrameGeometryStatus::INVALID;
-  }
-  if (!CameraTypes::SameFrameGeometry(packet_geometry, image_geometry))
-  {
-    return DetectorFrameGeometryStatus::IMAGE_MISMATCH;
-  }
-  return DetectorFrameGeometryStatus::VALID;
-}
-
 /**
  * @brief Keep native corners for PnP while restoring frame-scale points for selection.
  */
