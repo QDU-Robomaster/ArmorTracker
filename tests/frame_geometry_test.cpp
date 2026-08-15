@@ -18,18 +18,7 @@ constexpr CameraTypes::CameraCalibration kCalibration{
 };
 
 constexpr CameraTypes::FrameGeometry kWideGeometry{
-    .width = 720,
-    .height = 540,
-    .step = 2160,
-    .roi_offset_x_native = 0,
-    .roi_offset_y_native = 0,
-    .decimation_x = 2,
-    .decimation_y = 2,
-    .flags = CameraTypes::FRAME_GEOMETRY_NONE,
-    .reserved = 0,
-    .sample_phase_x_native = 0.0F,
-    .sample_phase_y_native = 0.0F,
-};
+    720, 540, 2160, 0, 0, 2, 2, CameraTypes::FRAME_GEOMETRY_NONE, 0, 0.0F, 0.0F};
 
 void Expect(bool condition, std::string_view message)
 {
@@ -75,7 +64,8 @@ void TestGeometryValidation()
 }
 
 void TestFrameAreaRecovery(const CameraTypes::FrameGeometry& geometry,
-                           const std::array<cv::Point2f, 4>& expected_frame_points)
+                           const std::array<cv::Point2f, 4>& expected_frame_points,
+                           double expected_native_area)
 {
   const std::array<cv::Point2f, 4> frame_points{
       cv::Point2f{10.0F, 20.0F}, cv::Point2f{50.0F, 20.0F}, cv::Point2f{50.0F, 40.0F},
@@ -97,8 +87,8 @@ void TestFrameAreaRecovery(const CameraTypes::FrameGeometry& geometry,
 
   const std::vector<cv::Point2f> native_points(detection.points.begin(),
                                                detection.points.end());
-  ExpectNear(std::abs(cv::contourArea(native_points)), 3200.0,
-             "wide native quad area must scale by four");
+  ExpectNear(std::abs(cv::contourArea(native_points)), expected_native_area,
+             "native quad area must follow the current frame geometry");
 
   const auto tracked = armor_tracker_detail::MakeTrackedArmor(input);
   ExpectNear(std::abs(cv::contourArea(tracked.selection_points)), 800.0,
@@ -112,14 +102,21 @@ int main()
   const std::array<cv::Point2f, 4> frame_points{
       cv::Point2f{10.0F, 20.0F}, cv::Point2f{50.0F, 20.0F}, cv::Point2f{50.0F, 40.0F},
       cv::Point2f{10.0F, 40.0F}};
-  TestFrameAreaRecovery(kWideGeometry, frame_points);
+  TestFrameAreaRecovery(kWideGeometry, frame_points, 3200.0);
+
+  auto narrow = kWideGeometry;
+  narrow.roi_offset_x_native = 360;
+  narrow.roi_offset_y_native = 270;
+  narrow.decimation_x = 1;
+  narrow.decimation_y = 1;
+  TestFrameAreaRecovery(narrow, frame_points, 800.0);
 
   auto reversed = kWideGeometry;
   reversed.flags =
       CameraTypes::FRAME_GEOMETRY_REVERSE_X | CameraTypes::FRAME_GEOMETRY_REVERSE_Y;
   const std::array<cv::Point2f, 4> reversed_frame_points{
       frame_points[2], frame_points[3], frame_points[0], frame_points[1]};
-  TestFrameAreaRecovery(reversed, reversed_frame_points);
+  TestFrameAreaRecovery(reversed, reversed_frame_points, 3200.0);
 
   std::cout << "ArmorTracker frame geometry tests passed\n";
   return EXIT_SUCCESS;

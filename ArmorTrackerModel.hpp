@@ -258,6 +258,8 @@ struct Config
   int max_temp_lost_count = 15;
   int outpost_max_temp_lost_count = 75;
   TargetSelectConfig target_select{};
+  uint32_t native_width{720};
+  uint32_t native_height{540};
   std::array<double, 9> camera_matrix{1164.3428599490444,
                                       0.0,
                                       366.6782312546237,
@@ -267,6 +269,9 @@ struct Config
                                       0.0,
                                       0.0,
                                       1.0};
+  std::array<double, 14> distortion_coefficients{};
+  uint8_t distortion_size{0};
+  bool camera_model_supported{true};
   std::array<double, 4> camera_mount_to_body_rotation{1.0, 0.0, 0.0, 0.0};
   std::array<double, 3> camera_mount_to_body_translation{0.0, 0.0, 0.0};
 };
@@ -366,19 +371,29 @@ class Solver
   {
     Eigen::Matrix<double, 3, 3, Eigen::RowMajor> camera_matrix(
         config.camera_matrix.data());
-    Eigen::Matrix<double, 1, 5> distort_coeffs;
-    distort_coeffs << 0.0, 0.0, 0.0, 0.0, 0.0;
     camera_matrix_ = Mat3dToCv(camera_matrix);
-    distort_coeffs_ = cv::Mat(1, 5, CV_64F);
-    for (int col = 0; col < 5; ++col)
+
+    camera_model_supported_ = CameraModelConfigReasonable(config);
+    if (camera_model_supported_ && config.distortion_size > 0)
     {
-      distort_coeffs_.at<double>(0, col) = distort_coeffs(0, col);
+      distort_coeffs_ = cv::Mat(1, config.distortion_size, CV_64F);
+      for (uint8_t index = 0; index < config.distortion_size; ++index)
+      {
+        distort_coeffs_.at<double>(0, index) = config.distortion_coefficients[index];
+      }
     }
     R_camera_to_body_ =
         CameraToBodyRotationFromMountExtrinsic(config.camera_mount_to_body_rotation);
     t_camera_to_body_ = Eigen::Vector3d(config.camera_mount_to_body_translation[0],
                                         config.camera_mount_to_body_translation[1],
                                         config.camera_mount_to_body_translation[2]);
+  }
+
+  /** Return whether this solver can consume the configured distortion model
+   * directly. */
+  [[nodiscard]] bool CameraModelSupported() const noexcept
+  {
+    return camera_model_supported_;
   }
 
   /**
@@ -392,14 +407,35 @@ class Solver
   /**
    * @brief Solve a detector armor pose and fill its 3D fields in-place.
    */
-  void Solve(Armor& armor) const
+  [[nodiscard]] bool Solve(Armor& armor) const
   {
+    if (!camera_model_supported_)
+    {
+      return false;
+    }
+
     const auto& object_points =
         armor.type == ArmorType::BIG ? BigArmorPoints() : SmallArmorPoints();
+    if (armor.points.size() != object_points.size())
+    {
+      return false;
+    }
+    for (const auto& point : armor.points)
+    {
+      if (!std::isfinite(point.x) || !std::isfinite(point.y))
+      {
+        return false;
+      }
+    }
+
     cv::Vec3d rvec;
     cv::Vec3d tvec;
-    cv::solvePnP(object_points, armor.points, camera_matrix_, distort_coeffs_, rvec, tvec,
-                 false, cv::SOLVEPNP_IPPE);
+    if (!cv::solvePnP(object_points, armor.points, camera_matrix_, distort_coeffs_, rvec,
+                      tvec, false, cv::SOLVEPNP_IPPE) ||
+        !cv::checkRange(rvec) || !cv::checkRange(tvec))
+    {
+      return false;
+    }
 
     Eigen::Vector3d xyz_in_camera(tvec[0], tvec[1], tvec[2]);
     armor.xyz_in_body = R_camera_to_body_ * xyz_in_camera + t_camera_to_body_;
@@ -420,9 +456,10 @@ class Solver
          armor.name == ArmorName::FIVE);
     if (is_balance)
     {
-      return;
+      return true;
     }
     OptimizeYaw(armor);
+    return true;
   }
 
   /**
@@ -431,6 +468,11 @@ class Solver
   std::vector<cv::Point2f> ReprojectArmor(const Eigen::Vector3d& xyz_in_world, double yaw,
                                           ArmorType type, ArmorName name) const
   {
+    if (!camera_model_supported_ || !VectorFinite(xyz_in_world) || !std::isfinite(yaw))
+    {
+      return {};
+    }
+
     const auto tilt = name == ArmorName::OUTPOST ? kOutpostArmorTilt : 15.0 * kPi / 180.0;
     const Eigen::Matrix3d R_armor2world = ArmorRotationFromYaw(yaw, tilt);
 
@@ -456,6 +498,11 @@ class Solver
   bool IsArmorFaceFrontFacing(const Eigen::Vector3d& xyz_in_world, double yaw,
                               ArmorName name) const
   {
+    if (!camera_model_supported_ || !VectorFinite(xyz_in_world) || !std::isfinite(yaw))
+    {
+      return false;
+    }
+
     const auto tilt = name == ArmorName::OUTPOST ? kOutpostArmorTilt : 15.0 * kPi / 180.0;
     const Eigen::Matrix3d R_armor2world = ArmorRotationFromYaw(yaw, tilt);
     const Eigen::Vector3d front_normal_world = -R_armor2world.col(0);
@@ -482,6 +529,61 @@ class Solver
   }
 
  private:
+  static bool CameraModelConfigReasonable(const Config& config)
+  {
+    if (!config.camera_model_supported || config.native_width == 0 ||
+        config.native_height == 0 ||
+        (config.distortion_size != 0 && config.distortion_size != 5 &&
+         config.distortion_size != 8))
+    {
+      return false;
+    }
+
+    for (double value : config.camera_matrix)
+    {
+      if (!std::isfinite(value))
+      {
+        return false;
+      }
+    }
+    for (double value : config.distortion_coefficients)
+    {
+      if (!std::isfinite(value) || std::abs(value) > 10.0)
+      {
+        return false;
+      }
+    }
+
+    const double max_dim =
+        static_cast<double>(std::max(config.native_width, config.native_height));
+    const double fx = config.camera_matrix[0];
+    const double fy = config.camera_matrix[4];
+    if (fx <= 0.0 || fy <= 0.0)
+    {
+      return false;
+    }
+    const double focal_ratio = fx / fy;
+    const double pad_x = static_cast<double>(config.native_width) * 0.25;
+    const double pad_y = static_cast<double>(config.native_height) * 0.25;
+    return std::abs(config.camera_matrix[1]) <= 1e-9 &&
+           std::abs(config.camera_matrix[3]) <= 1e-9 &&
+           std::abs(config.camera_matrix[6]) <= 1e-9 &&
+           std::abs(config.camera_matrix[7]) <= 1e-9 &&
+           std::abs(config.camera_matrix[8] - 1.0) <= 1e-9 && fx >= max_dim * 0.15 &&
+           fx <= max_dim * 10.0 && fy >= max_dim * 0.15 && fy <= max_dim * 10.0 &&
+           focal_ratio >= 0.5 && focal_ratio <= 2.0 &&
+           config.camera_matrix[2] >= -pad_x &&
+           config.camera_matrix[2] <= static_cast<double>(config.native_width) + pad_x &&
+           config.camera_matrix[5] >= -pad_y &&
+           config.camera_matrix[5] <= static_cast<double>(config.native_height) + pad_y;
+  }
+
+  static bool VectorFinite(const Eigen::Vector3d& vector)
+  {
+    return std::isfinite(vector.x()) && std::isfinite(vector.y()) &&
+           std::isfinite(vector.z());
+  }
+
   /**
    * @brief 用给定几何模板重投影装甲板四角。
    */
@@ -489,6 +591,12 @@ class Solver
       const Eigen::Vector3d& xyz_in_world, double yaw, double tilt,
       const std::vector<cv::Point3f>& object_points) const
   {
+    if (!camera_model_supported_ || !VectorFinite(xyz_in_world) || !std::isfinite(yaw) ||
+        !std::isfinite(tilt))
+    {
+      return {};
+    }
+
     const Eigen::Matrix3d R_armor2world = ArmorRotationFromYaw(yaw, tilt);
     const Eigen::Vector3d& t_armor2world = xyz_in_world;
     Eigen::Matrix3d R_armor2camera =
@@ -509,6 +617,7 @@ class Solver
 
   cv::Mat camera_matrix_;
   cv::Mat distort_coeffs_;
+  bool camera_model_supported_{false};
   Eigen::Matrix3d R_camera_to_body_;
   Eigen::Vector3d t_camera_to_body_;
   Eigen::Matrix3d R_body_to_world_;
@@ -1347,8 +1456,8 @@ class Tracker
     {
       return true;
     }
-    // Outpost keeps the fixed tower center and height phase across short NIS failures;
-    // otherwise side PnP noise can rebuild it with a wrong phase.
+    // Outpost keeps the fixed tower center and height phase across short NIS
+    // failures; otherwise side PnP noise can rebuild it with a wrong phase.
     if (slot.target.name == ArmorName::OUTPOST)
     {
       return false;
@@ -1660,7 +1769,10 @@ class Tracker
       return false;
     }
     auto& armor = armors.front();
-    solver_.Solve(armor);
+    if (!solver_.Solve(armor))
+    {
+      return false;
+    }
 
     const auto is_balance =
         armor.type == ArmorType::BIG &&
@@ -1721,16 +1833,21 @@ class Tracker
       return false;
     }
 
+    bool solved = false;
     for (auto& armor : armors)
     {
       if (armor.name != slot.target.name || armor.type != slot.target.armor_type)
       {
         continue;
       }
-      solver_.Solve(armor);
+      if (!solver_.Solve(armor))
+      {
+        continue;
+      }
       slot.target.Update(armor);
+      solved = true;
     }
-    return true;
+    return solved;
   }
 };
 

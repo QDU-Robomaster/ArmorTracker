@@ -38,7 +38,16 @@ armor_tracker_detail::Config ArmorTracker<FrameLayoutV>::BuildTrackerConfig() co
   config.target_select.detecting_scale = cfg_.tracker.target_select.detecting_scale;
   config.target_select.temp_lost_scale = cfg_.tracker.target_select.temp_lost_scale;
   config.target_select.switch_margin = cfg_.tracker.target_select.switch_margin;
+  config.native_width = calibration_.native_width;
+  config.native_height = calibration_.native_height;
   config.camera_matrix = calibration_.camera_matrix;
+  config.distortion_coefficients = calibration_.distortion_coefficients;
+  const CameraTypes::PnPDistCoeffs pnp_distortion =
+      CameraTypes::BuildPnPDistCoeffs(calibration_);
+  config.distortion_size = pnp_distortion.size;
+  config.camera_model_supported =
+      CameraBaseIntrinsicSanity::CameraCalibrationReasonable(calibration_) &&
+      !pnp_distortion.requires_undistort_first;
   config.camera_mount_to_body_rotation = cfg_.extrinsic.camera_mount_to_body.rotation;
   config.camera_mount_to_body_translation =
       cfg_.extrinsic.camera_mount_to_body.translation;
@@ -58,6 +67,24 @@ ArmorTracker<FrameLayoutV>::ArmorTracker(LibXR::HardwareContainer& hw,
   cmd_file_.emplace(LibXR::RamFS::CreateFile(name_, CommandFun, this));
 
   XR_LOG_INFO("Starting ArmorTracker");
+  const CameraTypes::PnPDistCoeffs pnp_distortion =
+      CameraTypes::BuildPnPDistCoeffs(calibration_);
+  const bool calibration_reasonable =
+      CameraBaseIntrinsicSanity::CameraCalibrationReasonable(calibration_);
+  if (pnp_distortion.requires_undistort_first)
+  {
+    XR_LOG_ERROR(
+        "ArmorTracker unsupported distortion model=%u; tracker "
+        "observations are disabled",
+        static_cast<unsigned int>(calibration_.distortion_model));
+  }
+  else if (!calibration_reasonable)
+  {
+    XR_LOG_ERROR(
+        "ArmorTracker camera K/D is invalid or non-finite; tracker "
+        "observations are "
+        "disabled");
+  }
   tracker_.Configure(BuildTrackerConfig());
   preview_.Start(cfg_.preview);
   hw.template FindOrExit<LibXR::RamFS>({"ramfs"})->Add(*cmd_file_);
@@ -291,7 +318,8 @@ void ArmorTracker<FrameLayoutV>::ArmorsCallback(
                                           image_frame->geometry))
   {
     XR_LOG_ERROR(
-        "ArmorTracker received invalid frame geometry width=%u height=%u step=%u",
+        "ArmorTracker received invalid frame geometry width=%u "
+        "height=%u step=%u",
         image_frame->geometry.width, image_frame->geometry.height,
         image_frame->geometry.step);
     return;
