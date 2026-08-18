@@ -84,7 +84,6 @@ depends:
 #include "ArmorTrackerFrameAdapter.hpp"
 #include "ArmorTrackerQueue.hpp"
 #include "ArmorTrackerTarget.hpp"
-#include "AutoAimReplayBenchmark.hpp"
 #include "CameraFrameSync.hpp"
 #include "DurationStatistics.hpp"
 #include "VisionPreview.hpp"
@@ -224,7 +223,6 @@ class ArmorTracker : public LibXR::Application
   struct PendingDetectionFrame
   {
     uint64_t sequence{0};
-    uint64_t admission_sequence{0};
     SharedFrame image{};
     ImuStamped imu{};
     ArmorDetectorResults detections{};
@@ -336,8 +334,6 @@ class ArmorTracker : public LibXR::Application
   std::atomic<bool> params_is_changed_{false};
   armor_tracker_pipeline::FixedSlotQueue<PendingDetectionFrame, pending_frame_capacity>
       pending_frames_;
-  std::atomic<uint64_t> admission_sequence_count_{0};
-  std::atomic<uint64_t> worker_sequence_count_{0};
   std::atomic<uint64_t> enqueued_frame_count_{0};
   std::atomic<uint64_t> overwritten_frame_count_{0};
   std::atomic<uint64_t> processed_frame_count_{0};

@@ -298,30 +298,14 @@ void ArmorTracker<FrameLayoutV>::ArmorsCallback(
     return;
   }
 
-  const uint64_t frame_timestamp_us = static_cast<uint64_t>(message->imu.timestamp_us);
-
-  AutoAimReplayBenchmark::RecordTrackerEnqueue(frame_timestamp_us);
   const auto reservation = pending_frames_.WaitAcquire();
-  const auto copy_start = std::chrono::steady_clock::now();
   PendingDetectionFrame* const pending_frame = reservation.slot;
   pending_frame->sequence = message->sequence;
   pending_frame->image = message->image;
   pending_frame->imu = message->imu;
   pending_frame->detections = message->detections;
-  const auto copy_finish = std::chrono::steady_clock::now();
-  AutoAimReplayBenchmark::RecordTrackerQueued(
-      frame_timestamp_us,
-      std::chrono::duration<double, std::milli>(copy_finish - copy_start).count());
-  const uint64_t admission_sequence =
-      admission_sequence_count_.fetch_add(1, std::memory_order_relaxed) + 1U;
-  pending_frame->admission_sequence = admission_sequence;
   enqueued_frame_count_.fetch_add(1, std::memory_order_release);
-  const auto commit = pending_frames_.Commit(pending_frame);
-  AutoAimReplayBenchmark::RecordTrackerQueueAdmission(
-      frame_timestamp_us, admission_sequence,
-      static_cast<double>(reservation.producer_wait_ns) / 1000000.0,
-      reservation.waited_for_full, static_cast<uint32_t>(commit.ready),
-      static_cast<uint32_t>(commit.occupied), static_cast<uint32_t>(commit.high_water));
+  pending_frames_.Commit(pending_frame);
 }
 
 template <CameraTypes::FrameLayout FrameLayoutV>
@@ -331,9 +315,6 @@ void ArmorTracker<FrameLayoutV>::TrackerWorkerThreadFun(ArmorTracker* self)
   while (true)
   {
     PendingDetectionFrame* const frame = self->pending_frames_.WaitFront();
-    const uint64_t frame_timestamp_us = static_cast<uint64_t>(frame->imu.timestamp_us);
-    const uint64_t worker_sequence =
-        self->worker_sequence_count_.fetch_add(1, std::memory_order_relaxed) + 1U;
     const auto worker_service_start = std::chrono::steady_clock::now();
     {
       auto worker_service_measurement = self->worker_service_duration_.Measure();
@@ -351,11 +332,6 @@ void ArmorTracker<FrameLayoutV>::TrackerWorkerThreadFun(ArmorTracker* self)
                                   worker_service_finish - worker_service_start)
                                   .count());
     self->process_time_us_accum_.fetch_add(worker_service_us, std::memory_order_relaxed);
-    AutoAimReplayBenchmark::RecordTrackerWorkerService(
-        frame_timestamp_us, frame->admission_sequence, worker_sequence,
-        std::chrono::duration<double, std::milli>(worker_service_finish -
-                                                  worker_service_start)
-            .count());
     self->processed_frame_count_.fetch_add(1, std::memory_order_release);
     self->pending_frames_.ReleaseFront(frame);
   }
@@ -377,11 +353,9 @@ void ArmorTracker<FrameLayoutV>::ProcessPendingDetectionFrame(
     return;
   }
 
-  const auto process_start = std::chrono::steady_clock::now();
   const uint64_t frame_timestamp_us =
       static_cast<uint64_t>(target_frame.imu.timestamp_us);
   const FrameGeometry& geometry = image_frame->geometry;
-  AutoAimReplayBenchmark::RecordTrackerStart(frame_timestamp_us);
   const ArmorDetectorResults& detector_armors = frame.detections;
   std::vector<armor_tracker_detail::InputArmor> inputs;
   inputs.reserve(detector_armors.size());
@@ -453,17 +427,6 @@ void ArmorTracker<FrameLayoutV>::ProcessPendingDetectionFrame(
     target_frame.output_to_camera_translation[static_cast<std::size_t>(row)] =
         t_output_to_camera(row);
   }
-
-  const auto tracker_compute_finish = std::chrono::steady_clock::now();
-  AutoAimReplayBenchmark::RecordTracker(
-      frame_timestamp_us,
-      std::chrono::duration<double, std::milli>(tracker_compute_finish - process_start)
-          .count(),
-      target_msg.tracking, static_cast<int>(target_msg.id),
-      {target_msg.position.x(), target_msg.position.y(), target_msg.position.z()},
-      {target_msg.velocity.x(), target_msg.velocity.y(), target_msg.velocity.z()},
-      target_msg.yaw, target_msg.v_yaw, target_msg.radius_1, target_msg.radius_2,
-      target_msg.dz);
 
   TargetFrameMessage target_frame_msg = &target_frame;
   target_frame_topic_.Publish(target_frame_msg, publish_timestamp);
