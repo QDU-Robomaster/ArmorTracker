@@ -60,6 +60,7 @@ depends:
   - qdu-future/ArmorDetector
   - qdu-future/CameraFrameSync
   - qdu-future/VisionPreview
+  - xrobot-org/DurationStatistics
 === END MANIFEST === */
 // clang-format on
 
@@ -85,6 +86,7 @@ depends:
 #include "ArmorTrackerTarget.hpp"
 #include "AutoAimReplayBenchmark.hpp"
 #include "CameraFrameSync.hpp"
+#include "DurationStatistics.hpp"
 #include "VisionPreview.hpp"
 #include "app_framework.hpp"
 #include "libxr_time.hpp"
@@ -273,7 +275,7 @@ class ArmorTracker : public LibXR::Application
   }
 
   /**
-   * @brief Application monitor hook; tracker has no periodic monitor work.
+   * @brief 输出 tracker 队列和 worker 服务耗时统计。
    */
   void OnMonitor() override;
 
@@ -340,10 +342,10 @@ class ArmorTracker : public LibXR::Application
   std::atomic<uint64_t> overwritten_frame_count_{0};
   std::atomic<uint64_t> processed_frame_count_{0};
   std::atomic<uint64_t> process_time_us_accum_{0};
+  XRobot::DurationStatistics worker_service_duration_{};
   uint64_t last_monitor_enqueued_{0};
   uint64_t last_monitor_overwritten_{0};
   uint64_t last_monitor_processed_{0};
-  uint64_t last_monitor_process_time_us_{0};
   uint64_t last_monitor_full_wait_count_{0};
   uint64_t last_monitor_producer_wait_ns_{0};
 };
