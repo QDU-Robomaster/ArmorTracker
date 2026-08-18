@@ -90,13 +90,12 @@ void ArmorTracker<FrameLayoutV>::OnMonitor()
   const uint64_t enqueued = enqueued_frame_count_.load(std::memory_order_relaxed);
   const uint64_t overwritten = overwritten_frame_count_.load(std::memory_order_relaxed);
   const uint64_t processed = processed_frame_count_.load(std::memory_order_relaxed);
-  const uint64_t process_time_us = process_time_us_accum_.load(std::memory_order_relaxed);
   const auto queue = pending_frames_.Snapshot();
+  const auto worker_service = worker_service_duration_.GetSummary();
 
   const uint64_t enqueue_delta = enqueued - last_monitor_enqueued_;
   const uint64_t overwrite_delta = overwritten - last_monitor_overwritten_;
   const uint64_t processed_delta = processed - last_monitor_processed_;
-  const uint64_t process_time_delta_us = process_time_us - last_monitor_process_time_us_;
   const uint64_t full_wait_delta = queue.full_wait_count - last_monitor_full_wait_count_;
   const uint64_t producer_wait_delta_ns =
       queue.producer_wait_ns - last_monitor_producer_wait_ns_;
@@ -104,14 +103,9 @@ void ArmorTracker<FrameLayoutV>::OnMonitor()
   last_monitor_enqueued_ = enqueued;
   last_monitor_overwritten_ = overwritten;
   last_monitor_processed_ = processed;
-  last_monitor_process_time_us_ = process_time_us;
   last_monitor_full_wait_count_ = queue.full_wait_count;
   last_monitor_producer_wait_ns_ = queue.producer_wait_ns;
 
-  const double avg_worker_service_ms =
-      processed_delta == 0 ? 0.0
-                           : static_cast<double>(process_time_delta_us) /
-                                 static_cast<double>(processed_delta) / 1000.0;
   const double avg_producer_wait_ms =
       enqueue_delta == 0 ? 0.0
                          : static_cast<double>(producer_wait_delta_ns) /
@@ -119,14 +113,21 @@ void ArmorTracker<FrameLayoutV>::OnMonitor()
   XR_LOG_INFO(
       "ArmorTracker monitor enqueue=%llu overwrite=%llu processed=%llu "
       "ready=%u occupied=%u high_water=%u full_wait=%llu "
-      "avg_producer_wait_ms=%.3f avg_worker_service_ms=%.3f worker_active=%d",
+      "avg_producer_wait_ms=%.3f worker_active=%d",
       static_cast<unsigned long long>(enqueue_delta),
       static_cast<unsigned long long>(overwrite_delta),
       static_cast<unsigned long long>(processed_delta),
       static_cast<unsigned>(queue.ready), static_cast<unsigned>(queue.occupied),
       static_cast<unsigned>(queue.high_water),
       static_cast<unsigned long long>(full_wait_delta), avg_producer_wait_ms,
-      avg_worker_service_ms, queue.worker_active ? 1 : 0);
+      queue.worker_active ? 1 : 0);
+  XR_LOG_INFO(
+      "ArmorTracker worker_service count=%llu average_us=%llu minimum_us=%llu "
+      "maximum_us=%llu",
+      static_cast<unsigned long long>(worker_service.sample_count),
+      static_cast<unsigned long long>(worker_service.average_us),
+      static_cast<unsigned long long>(worker_service.minimum_us),
+      static_cast<unsigned long long>(worker_service.maximum_us));
 }
 
 template <CameraTypes::FrameLayout FrameLayoutV>
@@ -334,13 +335,16 @@ void ArmorTracker<FrameLayoutV>::TrackerWorkerThreadFun(ArmorTracker* self)
     const uint64_t worker_sequence =
         self->worker_sequence_count_.fetch_add(1, std::memory_order_relaxed) + 1U;
     const auto worker_service_start = std::chrono::steady_clock::now();
-    if (self->params_is_changed_)
     {
-      self->SetConfig(self->cfg_);
-      self->params_is_changed_ = false;
-    }
+      auto worker_service_measurement = self->worker_service_duration_.Measure();
+      if (self->params_is_changed_)
+      {
+        self->SetConfig(self->cfg_);
+        self->params_is_changed_ = false;
+      }
 
-    self->ProcessPendingDetectionFrame(*frame);
+      self->ProcessPendingDetectionFrame(*frame);
+    }
     const auto worker_service_finish = std::chrono::steady_clock::now();
     const auto worker_service_us =
         static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
