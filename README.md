@@ -36,8 +36,10 @@
 `tracker/target_frame`。
 
 Tracker 在构造期从 `CameraFrameSync::Calibration()` 复制一份原生相机标定。Detector
-发布的四角点保持原生传感器坐标，Tracker 继续独立使用 230 mm 大装甲板模型和零畸变
-策略执行 PnP；本阶段不复用 Detector pose，因为两者的尺寸、畸变和 yaw 处理语义不同。
+发布的四角点保持原生传感器坐标，Tracker 独立使用 230 mm 大装甲板模型和原生相机
+K/D 执行 PnP、重投影。支持当前直接 PnP 路径的无畸变、5 项和 8 项畸变系数；需要
+预先去畸变的模型或无效标定会记录错误并禁用观测。PnP 失败或结果非有限时不把该观测
+送入跟踪更新。本阶段仍不复用 Detector pose，两者的尺寸和 yaw 处理语义保持独立。
 异步 pending frame 只复制 `SharedFrame` 所有权、IMU 和检测结果，不复制图像字节。
 worker 将所有权移动到栈上 `TrackedFrame`，同步发布 `const TrackedFrame*`；逐帧
 `FrameGeometry` 始终只从 `SharedFrame.Get()->geometry` 读取。
@@ -68,6 +70,10 @@ tracker 内部按装甲板编号维护多套车辆 EKF 状态，同一 slot 丢�
 legacy bug 修复，可能只在同优先级候选排序接近边界时造成预期差异。
 
 ## 验证
+
+标定尺寸与内参的一致性由 CameraBase 校验；内部 PnP 求解器只检查数值、模型支持和
+求解结果，不要求离线角点回放额外提供图像宽高。输入时间戳回退时，TrackerCore
+清除旧目标与滤波状态、重建时间基线，并使用不变的配置和标定重新捕获目标。
 
 单车过滤回归使用 `tools/tracker_replay/armor_tracker_replay.cpp` 对固定数据集重放；多车目标选择
 需要使用不按编号过滤的 replay，确认同帧多编号输入会独立更新各 slot 并只输出当前选中的目标。

@@ -226,6 +226,8 @@ class TrackerCore
   /**
    * @brief Advance tracker state with one detector frame.
    *
+   * A backward timestamp resets tracking history and reacquires using unchanged
+   * calibration and configuration.
    * @param timestamp_us Sensor timestamp of the detector frame.
    * @param q_body_to_world Body-to-world IMU orientation in public B axes.
    * @param inputs Detector armors from the same image frame.
@@ -234,6 +236,12 @@ class TrackerCore
   Output Step(uint64_t timestamp_us, const Eigen::Quaterniond& q_body_to_world,
               const std::vector<InputArmor>& inputs)
   {
+    if (has_time_base_ && timestamp_us < last_timestamp_us_)
+    {
+      tracker_ = std::make_unique<Tracker>(config_, *solver_);
+      has_time_base_ = false;
+    }
+    last_timestamp_us_ = timestamp_us;
     Eigen::Quaterniond q = q_body_to_world;
     if (!std::isfinite(q.norm()) || q.norm() < 1e-9)
     {
@@ -355,6 +363,7 @@ class TrackerCore
   std::unique_ptr<Tracker> tracker_{};
   bool has_time_base_ = false;
   uint64_t base_timestamp_us_ = 0;
+  uint64_t last_timestamp_us_ = 0;
   std::chrono::steady_clock::time_point base_tp_{};
 
   /**

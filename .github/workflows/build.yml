@@ -132,6 +132,7 @@ jobs:
           cmake --build build -j2 --target \
             armor_tracker_compile_test \
             armor_tracker_frame_geometry_test \
+            armor_tracker_distortion_projection_test \
             armor_tracker_queue_contract_test \
             armor_tracker_stage_frame_contract_test
 
