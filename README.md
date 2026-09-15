@@ -1,5 +1,16 @@
 # ArmorTracker
 
+## Static assembly source line
+
+This source line uses explicit C++ constructor dependencies and ordered instance
+arguments. Inspect the current primary header with `xrobot_mod_parser --path .`;
+its declarations, not old manifest/config examples, define the interface.
+Historical HardwareContainer/ApplicationManager examples below apply only to the
+older dynamic source tags. Device/protocol descriptions remain relevant.
+See the XRobot [migration guide](https://github.com/xrobot-org/XRobot/blob/dev/MIGRATION.md).
+Compilation is not hardware validation; retain version-specific board evidence.
+
+
 `ArmorTracker` 是 Webots/Linux 自瞄链路里的目标级跟踪模块。输入来自
 `ArmorDetector` 发布的检测结果和 `CameraFrameSync` 同步帧，输出
 `tracker/target_frame` 同帧目标包。

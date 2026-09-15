@@ -8,59 +8,17 @@
 // clang-format off
 /* === MODULE MANIFEST V2 ===
 module_description: Armor tracker
-constructor_args:
-  cfg:
-    tracker:
-      require_target_tag: false
-      target_tag_id: -1
-      min_detect_count: 2
-      max_temp_lost_count: 15
-      outpost_max_temp_lost_count: 75
-      target_select:
-        observed_count_weight: 1.6
-        distance_weight: 2.0
-        area_weight: 1.2
-        spin_weight: 0.8
-        angle_weight: 2.0
-        max_distance_m: 8.0
-        distance_span_m: 7.5
-        area_norm_px: 6000.0
-        observed_count_norm: 4.0
-        max_spin_rad_s: 8.0
-        max_angle_norm: 0.5
-        detecting_scale: 0.55
-        temp_lost_scale: 0.35
-        switch_margin: 0.25
-
-    extrinsic:
-      camera_mount_to_body:
-        rotation: [1.0, 0.0, 0.0, 0.0]
-        translation: [0.0, 0.0, 0.0]
-
-    preview:
-      enabled: false
-      preview_window_name: "armor_tracker_preview"
-      preview_scale: 0.5
-      preview_wait_key_ms: 1
-      queue_capacity: 1
-      output_mode: "window"
-      web_bind_address: "0.0.0.0"
-      web_port: 8080
-      web_stream_name: "armor_tracker"
-      max_fps: 30.0
-  sync: '@camera_frame_sync'
-template_args:
-  - Layout:
-      width: 1280
-      height: 720
-      step: 3840
-      encoding: CameraTypes::Encoding::BGR8
-required_hardware: []
 depends:
-  - qdu-future/ArmorDetector
-  - qdu-future/CameraFrameSync
-  - qdu-future/VisionPreview
-  - xrobot-org/DurationStatistics
+- id: QDU-Robomaster/ArmorDetector
+  ref: same-or-dev
+- id: QDU-Robomaster/CameraFrameSync
+  ref: same-or-dev
+- id: QDU-Robomaster/VisionPreview
+  ref: same-or-dev
+- id: xrobot-org/DurationStatistics
+  ref: same-or-dev
+- id: QDU-Robomaster/CameraBase
+  ref: same-or-dev
 === END MANIFEST === */
 // clang-format on
 
@@ -87,10 +45,11 @@ depends:
 #include "CameraFrameSync.hpp"
 #include "DurationStatistics.hpp"
 #include "VisionPreview.hpp"
-#include "app_framework.hpp"
+#include "libxr_def.hpp"
 #include "libxr_time.hpp"
 #include "logger.hpp"
 #include "message.hpp"
+#include "ramfs.hpp"
 #include "timebase.hpp"
 
 #if defined(__has_include)
@@ -121,7 +80,7 @@ depends:
  * preview overlay.
  */
 template <CameraTypes::FrameLayout FrameLayoutV>
-class ArmorTracker : public LibXR::Application
+class ArmorTracker
 {
  public:
   using FrameSync = CameraFrameSync<FrameLayoutV>;
@@ -237,11 +196,9 @@ class ArmorTracker : public LibXR::Application
   /**
    * @brief Construct the module and subscribe to the detector topic.
    */
-  explicit ArmorTracker(LibXR::HardwareContainer& hw, LibXR::ApplicationManager& app,
-                        Config cfg, FrameSync* sync);
+  explicit ArmorTracker(LibXR::RamFS& external_ramfs, Config cfg, FrameSync* sync);
 
-  explicit ArmorTracker(LibXR::HardwareContainer& hw, LibXR::ApplicationManager& app,
-                        Config cfg, FrameSync& sync);
+  explicit ArmorTracker(LibXR::RamFS& external_ramfs, Config cfg, FrameSync& sync);
 
   /**
    * @brief RamFS command entry used to show or update selected tracker params.
@@ -275,7 +232,7 @@ class ArmorTracker : public LibXR::Application
   /**
    * @brief 输出 tracker 队列和 worker 服务耗时统计。
    */
-  void OnMonitor() override;
+  void OnMonitor();
 
  private:
   static constexpr const char* kDetectorTopicName = "armors_frame";
