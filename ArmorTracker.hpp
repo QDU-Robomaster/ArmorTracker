@@ -196,9 +196,12 @@ class ArmorTracker
   /**
    * @brief Construct the module and subscribe to the detector topic.
    */
-  explicit ArmorTracker(LibXR::RamFS& external_ramfs, Config cfg, FrameSync* sync);
+  static Config DefaultConfig() { return {}; }
 
-  explicit ArmorTracker(LibXR::RamFS& external_ramfs, Config cfg, FrameSync& sync);
+  explicit ArmorTracker(
+      LibXR::RamFS& ramfs,
+      FrameSync& sync,
+      Config cfg = DefaultConfig());
 
   /**
    * @brief RamFS command entry used to show or update selected tracker params.
@@ -270,10 +273,9 @@ class ArmorTracker
                      const ArmorTrackerTarget& target_msg,
                      const armor_tracker_detail::Output& output);
 
-  static CameraCalibration CopyCalibration(FrameSync* sync)
+  static CameraCalibration CopyCalibration(FrameSync& sync)
   {
-    ASSERT(sync != nullptr);
-    return sync->Calibration();
+    return sync.Calibration();
   }
 
   Config cfg_;

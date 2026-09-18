@@ -55,8 +55,10 @@ armor_tracker_detail::Config ArmorTracker<FrameLayoutV>::BuildTrackerConfig() co
 }
 
 template <CameraTypes::FrameLayout FrameLayoutV>
-ArmorTracker<FrameLayoutV>::ArmorTracker(LibXR::RamFS& external_ramfs, Config cfg,
-                                         FrameSync* sync)
+ArmorTracker<FrameLayoutV>::ArmorTracker(
+      LibXR::RamFS& ramfs,
+      FrameSync& sync,
+      Config cfg)
     : cfg_(std::move(cfg)), calibration_(CopyCalibration(sync))
 {
   armor_detector_domain_.emplace("armor_detector");
@@ -86,16 +88,9 @@ ArmorTracker<FrameLayoutV>::ArmorTracker(LibXR::RamFS& external_ramfs, Config cf
   }
   tracker_.Configure(BuildTrackerConfig());
   preview_.Start(cfg_.preview);
-  external_ramfs.Add(*cmd_file_);
+  ramfs.Add(*cmd_file_);
   std::thread(TrackerWorkerThreadFun, this).detach();
   SubscribeDetectorTopic();
-}
-
-template <CameraTypes::FrameLayout FrameLayoutV>
-ArmorTracker<FrameLayoutV>::ArmorTracker(LibXR::RamFS& external_ramfs, Config cfg,
-                                         FrameSync& sync)
-    : ArmorTracker(external_ramfs, std::move(cfg), &sync)
-{
 }
 
 template <CameraTypes::FrameLayout FrameLayoutV>

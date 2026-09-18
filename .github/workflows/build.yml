@@ -1,177 +1,134 @@
 name: XRobot Module Build Test
-
-on:
-  push:
-  pull_request:
+'on':
+  push: null
+  pull_request: null
   schedule:
-    - cron: '0 3 1 * *'
-
+  - cron: 0 3 1 * *
+permissions:
+  contents: read
 jobs:
   build:
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/xrobot-org/docker-image-webots:main
       options: --user 0
-
     env:
+      XR_MODULE_ID: ${{ github.repository }}
       XR_MODULE_NAME: ${{ github.event.repository.name }}
-
+      XR_REF_NAME: ${{ github.head_ref || github.ref_name }}
+      XR_REF_KIND: ${{ github.ref_type }}
+      XR_TEMPLATE_ARGS: '["CameraTypes::FrameLayout{.width=640,.height=480,.step=1920,.encoding=CameraTypes::Encoding::BGR8}"]'
+      XROBOT_REF: ${{ vars.XROBOT_REF || '' }}
+      LIBXR_REF: ${{ vars.LIBXR_REF || '' }}
+      PYTHONPATH: ${{ github.workspace }}/XRobot/src
     steps:
-      - name: Checkout current module repo to ./Modules/${{ env.XR_MODULE_NAME }}
-        uses: actions/checkout@v4
-        with:
-          path: Modules/${{ env.XR_MODULE_NAME }}
-          ref: ${{ github.head_ref || github.ref_name }}
-
-      - name: Create main.cpp
-        run: |
-          cat > main.cpp <<'EOF'
-          #include "ArmorTracker.hpp"
-
-          constexpr CameraTypes::FrameLayout kLayout{
-              720, 540, 2160, CameraTypes::Encoding::BGR8};
-          template class ArmorTracker<kLayout>;
-
-          int main() { return 0; }
-          EOF
-
-      - name: Create minimal CMakeLists.txt
-        run: |
-          cat > CMakeLists.txt <<'EOF'
-          cmake_minimum_required(VERSION 3.16)
-          project(xrobot_mod_test CXX)
-          set(CMAKE_CXX_STANDARD 20)
-          set(CMAKE_CXX_STANDARD_REQUIRED ON)
-          set(XROBOT_MODULES_DIR ${CMAKE_CURRENT_SOURCE_DIR}/Modules/)
-          set(WEBOTS_HOME /usr/local/webots)
-          set(LIBXR_PRINT_INTEGER_ENABLE_64BIT ON CACHE BOOL "" FORCE)
-          set(LIBXR_PRINT_FLOAT_ENABLE_DOUBLE ON CACHE BOOL "" FORCE)
-          set(LIBXR_PRINT_ENABLE_POINTER ON CACHE BOOL "" FORCE)
-          add_subdirectory(libxr)
-          set_property(TARGET xr PROPERTY CXX_STANDARD 20)
-          set_property(TARGET xr PROPERTY CXX_STANDARD_REQUIRED ON)
-          add_executable(armor_tracker_compile_test main.cpp)
-          target_link_libraries(armor_tracker_compile_test PRIVATE xr)
-          EOF
-
-      - name: Pull libxr to ./libxr
-        run: git clone --depth=1 --branch master https://github.com/Jiu-xiao/libxr ./libxr
-
-      - name: Setup Python and build deps
-        run: |
-          apt-get update
-          apt-get install -y --no-install-recommends libgpiod-dev
-          python3 -m pip install --upgrade pip
-          pip3 install pyyaml requests
-
-      - name: Add XRobot tools to PATH
-        run: echo "$HOME/.local/bin" >> $GITHUB_PATH
-
-      - name: Install xrobot toolchain
-        run: pip3 install xrobot libxr
-
-      - name: Prepare module sources
-        run: |
-          xrobot_setup || true
-          xrobot_src_man add-source https://qdu-robomaster.github.io/qdu-future-modules/index.yaml
-          xrobot_add_mod qdu-future/${{ env.XR_MODULE_NAME }}
-          cat Modules/sources.yaml
-          cat Modules/modules.yaml
-
-      - name: Add current manifest dependencies to module config
-        run: |
-          python3 - <<'PY'
-          import os
-          from pathlib import Path
-
-          import yaml
-          from xrobot.ModuleParser import load_single_module
-
-          module_path = Path("Modules") / os.environ["XR_MODULE_NAME"]
-          manifest = load_single_module(module_path)
-          if manifest is None:
-              raise SystemExit(f"manifest not found: {module_path}")
-
-          config_path = Path("Modules/modules.yaml")
-          config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-          config["modules"] = list(manifest.depends)
-          config_path.write_text(
-              yaml.safe_dump(config, sort_keys=False, allow_unicode=True),
-              encoding="utf-8",
-          )
-          print("direct manifest dependencies:", manifest.depends)
-          PY
-
-      - name: Sync module repos from MANIFEST dependencies
-        run: xrobot_init_mod
-
-      - name: Align coordinated dependency branches
-        shell: bash
-        run: |
-          set -euo pipefail
-          candidate="${GITHUB_HEAD_REF:-${GITHUB_REF_NAME}}"
-          for module_dir in Modules/*; do
-            [[ -d "${module_dir}" ]] || continue
-            [[ "$(basename "${module_dir}")" == "${XR_MODULE_NAME}" ]] && continue
-            git -C "${module_dir}" rev-parse --git-dir >/dev/null 2>&1 || continue
-            if git -C "${module_dir}" ls-remote --exit-code --heads origin "refs/heads/${candidate}" >/dev/null 2>&1; then
-              git -C "${module_dir}" fetch --depth=1 origin "refs/heads/${candidate}"
-              git -C "${module_dir}" checkout --detach FETCH_HEAD
-              git -C "${module_dir}" submodule update --init --recursive --depth=1
+    - name: Checkout the exact Module revision
+      uses: actions/checkout@v4
+      with:
+        path: Modules/${{ github.repository }}
+        ref: ${{ github.event.pull_request.head.sha || github.sha }}
+        submodules: recursive
+    - name: Checkout matching core tools
+      shell: bash
+      run: |
+        set -euo pipefail
+        checkout_tool() {
+          local repo="$1" directory="$2" selected="$3" available
+          if [[ -n "$selected" ]]; then
+            if [[ "$selected" != refs/heads/* && "$selected" != refs/tags/* &&
+                  ! "$selected" =~ ^[0-9a-fA-F]{40}$ ]]; then
+              echo "Use a full refs/heads/, refs/tags/ or commit SHA for $directory" >&2
+              return 1
             fi
-          done
+          elif [[ "$XR_REF_KIND" == tag ]]; then
+            selected="refs/tags/$XR_REF_NAME"
+          else
+            available=$(git ls-remote --heads "$repo" "refs/heads/$XR_REF_NAME")
+            if [[ -n "$available" ]]; then
+              selected="refs/heads/$XR_REF_NAME"
+            else
+              selected=refs/heads/dev
+            fi
+          fi
+          git init "$directory"
+          git -C "$directory" remote add origin "$repo"
+          git -C "$directory" fetch --depth=1 origin "$selected"
+          git -C "$directory" checkout --detach FETCH_HEAD
+          git -C "$directory" submodule update --init --recursive --depth=1
+        }
+        checkout_tool https://github.com/xrobot-org/XRobot.git XRobot "$XROBOT_REF"
+        checkout_tool https://github.com/xrobot-org/libxr.git libxr "$LIBXR_REF"
+    - name: Install build dependencies
+      run: |
+        apt-get update
+        apt-get install -y --no-install-recommends libgpiod-dev
+        python3 -m pip install ./XRobot
+    - name: Resolve sources and generate the compile-only constructor
+      run: |
+        python3 - <<'PYCODE'
+        import json
+        import os
+        from pathlib import Path
+        import subprocess
+        import yaml
+        from xrobot.InitModule import sync_modules_by_config
+        from xrobot.GenerateMain import generate_compile_check
+        from xrobot.ModuleParser import load_single_module
+        from xrobot.SourceManager import validate_id
 
-      - name: Build
-        run: |
-          cmake -S . -B build \
-            -DOpenVINO_DIR=/opt/intel/openvino_2025.4.0/runtime/cmake \
-            -DBUILD_TESTING=ON \
-            -DLIBXR_PRINT_INTEGER_ENABLE_64BIT=ON \
-            -DLIBXR_PRINT_FLOAT_ENABLE_DOUBLE=ON \
-            -DLIBXR_PRINT_ENABLE_POINTER=ON
-          cmake --build build -j2 --target \
-            armor_tracker_compile_test \
-            armor_tracker_frame_geometry_test \
-            armor_tracker_distortion_projection_test \
-            armor_tracker_queue_contract_test \
-            armor_tracker_stage_frame_contract_test
+        identity = validate_id(os.environ['XR_MODULE_ID'])
+        folder = Path('Modules') / identity
 
-      - name: Run ArmorTracker tests
-        run: >-
-          ctest --test-dir build/libxr --output-on-failure
-          --no-tests=error
-          -R '^armor_tracker_' --timeout 15
+        def git(*args):
+            return subprocess.check_output(['git', '-C', str(folder), *args], text=True).strip()
 
-      - name: Run coordinate semantics check
-        run: |
-          g++ -std=c++20 -O2 \
-            -IModules/${{ env.XR_MODULE_NAME }} \
-            -I/usr/include/eigen3 \
-            $(pkg-config --cflags --libs opencv4) \
-            Modules/${{ env.XR_MODULE_NAME }}/tools/coordinate_semantics_check.cpp \
-            -o build/coordinate_semantics_check
-          ./build/coordinate_semantics_check
+        def write_yaml(path, data):
+            Path(path).write_text(yaml.safe_dump(data, sort_keys=False), encoding='utf-8')
 
-      - name: Create Tag via GitHub API
-        if: ${{ success() && github.event_name != 'pull_request' && github.ref == 'refs/heads/master' }}
-        uses: actions/github-script@v7
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          script: |
-            const tagPrefix = 'auto-'
-            const date = new Date();
-            const yyyy = date.getUTCFullYear();
-            const mm = String(date.getUTCMonth() + 1).padStart(2, '0');
-            const dd = String(date.getUTCDate()).padStart(2, '0');
-            const HH = String(date.getUTCHours()).padStart(2, '0');
-            const MM = String(date.getUTCMinutes()).padStart(2, '0');
-            const SS = String(date.getUTCSeconds()).padStart(2, '0');
-            const tagName = `${tagPrefix}${yyyy}${mm}${dd}-${HH}${MM}${SS}`;
-            const sha = process.env.GITHUB_SHA;
-            await github.rest.git.createRef({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              ref: `refs/tags/${tagName}`,
-              sha: sha
-            });
-            console.log(`Created tag: ${tagName} on sha: ${sha}`);
+        # Pin the checked-out PR/branch commit. Only its logical dependency context moves.
+        context = ('refs/tags/' if os.environ['XR_REF_KIND'] == 'tag' else 'refs/heads/')
+        context += os.environ['XR_REF_NAME']
+        write_yaml('ci-index.yaml', {'modules': [{'id': identity, 'repo': git('remote', 'get-url', 'origin')}]})
+        write_yaml('Modules/sources.yaml', {'sources': [
+            {'url': 'https://xrobot.work/xrobot-modules/index.yaml', 'priority': 0},
+            {'url': 'https://qdu-robomaster.github.io/qdu-future-modules/index.yaml', 'priority': 0},
+            {'url': '../ci-index.yaml', 'priority': -100},
+        ]})
+        write_yaml('Modules/modules.yaml', {'modules': [{
+            'id': identity, 'ref': git('rev-parse', 'HEAD'), 'context_ref': context,
+        }]})
+        sync_modules_by_config('Modules/modules.yaml', 'Modules/sources.yaml', 'Modules')
+        manifest = load_single_module(folder)
+        if manifest.standalone:
+            generate_compile_check(identity, 'Modules', 'module_check.cpp',
+                                   json.loads(os.environ['XR_TEMPLATE_ARGS']))
+        else:
+            # A library has no Module constructor. Its actual .cpp files still build in xr.
+            Path('module_check.cpp').write_text('#include "' + folder.name + '.hpp"\n', encoding='utf-8')
+        PYCODE
+    - name: Create native CMake project
+      run: |
+        cat > CMakeLists.txt <<'CMAKE'
+        cmake_minimum_required(VERSION 3.16)
+        project(xrobot_module_compile LANGUAGES C CXX ASM)
+        set(CMAKE_CXX_STANDARD 20)
+        set(CMAKE_CXX_STANDARD_REQUIRED ON)
+        set(LIBXR_SYSTEM linux CACHE STRING "LibXR execution backend")
+        set(LIBXR_DRIVER linux CACHE STRING "LibXR driver backend")
+        set(LIBXR_PRINT_INTEGER_ENABLE_64BIT ON CACHE BOOL "")
+        set(LIBXR_PRINT_FLOAT_ENABLE_DOUBLE ON CACHE BOOL "")
+        set(LIBXR_PRINT_ENABLE_POINTER ON CACHE BOOL "")
+        set(XROBOT_MODULES_DIR "${CMAKE_CURRENT_SOURCE_DIR}/Modules")
+        include(CTest)
+        add_subdirectory(libxr)
+        set_property(TARGET xr PROPERTY CXX_STANDARD 20)
+        set_property(TARGET xr PROPERTY CXX_STANDARD_REQUIRED ON)
+        add_library(module_check OBJECT module_check.cpp)
+        target_link_libraries(module_check PRIVATE xr)
+        CMAKE
+    - name: Compile Module sources and constructor
+      run: |
+        cmake -S . -B build -DBUILD_TESTING=ON -DOpenVINO_DIR=/opt/intel/openvino_2025.4.0/runtime/cmake -DLIBXR_PRINT_INTEGER_ENABLE_64BIT=ON -DLIBXR_PRINT_FLOAT_ENABLE_DOUBLE=ON -DLIBXR_PRINT_ENABLE_POINTER=ON -DWEBOTS_HOME=/usr/local/webots
+        cmake --build build --parallel 2
+    - name: Run ArmorTracker tests
+      run: ctest --test-dir build/libxr --output-on-failure --no-tests=error -R '^armor_tracker_' --timeout 15
