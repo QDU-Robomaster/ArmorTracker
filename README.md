@@ -153,9 +153,9 @@ Configuration parameters (`Config`; `DefaultConfig()` holds all defaults):
 
 ## 5. 配置示例 / Configuration Example
 
-`xrobot instance add QDU-Robomaster/ArmorTracker` 写入的实例：模板实参填为帧布局 constexpr，依赖填为 RamFS 的硬件注册名和 CameraFrameSync 实例的 id，`cfg` 展开为字段映射并填入外参与预览设置。帧布局 `AutoAimRunConfig::MainFrameLayout` 在配置的 `constexprs:` 中定义，须与相机输出一致。RamFS 对象 `ramfs` 由 BSP 的 `XR_REGISTER`（硬件注册）提供。
+`xrobot instance add QDU-Robomaster/ArmorTracker` 写入的实例：模板实参填为帧布局 constexpr，依赖填为 RamFS 的硬件注册名和 CameraFrameSync 实例的 id，`cfg` 为 `DefaultConfig()` 表达式，`Config` 的默认值见第 3 节；`cfg` 也可以展开为 `Config` 字段 `tracker`、`extrinsic`、`preview` 的 YAML 映射。帧布局 `AutoAimRunConfig::MainFrameLayout` 在配置的 `constexprs:` 中定义，须与相机输出一致。RamFS 对象 `ramfs` 由 BSP 的 `XR_REGISTER`（硬件注册）提供。
 
-An instance written by `xrobot instance add QDU-Robomaster/ArmorTracker`: the template argument is set to the frame layout constexpr, the dependencies are set to the Registration name of the RamFS and the id of the CameraFrameSync instance, and `cfg` is expanded into a field mapping with the extrinsic and preview settings filled in. The frame layout `AutoAimRunConfig::MainFrameLayout` is defined under `constexprs:` of the Configuration and matches the camera output. The RamFS object `ramfs` is provided by the BSP's `XR_REGISTER` (Registration).
+An instance written by `xrobot instance add QDU-Robomaster/ArmorTracker`: the template argument is set to the frame layout constexpr, the dependencies are set to the Registration name of the RamFS and the id of the CameraFrameSync instance, and `cfg` is the `DefaultConfig()` expression, with the defaults of `Config` listed in section 3; `cfg` can also be expanded into a YAML mapping of the `Config` fields `tracker`, `extrinsic` and `preview`. The frame layout `AutoAimRunConfig::MainFrameLayout` is defined under `constexprs:` of the Configuration and matches the camera output. The RamFS object `ramfs` is provided by the BSP's `XR_REGISTER` (Registration).
 
 ```yaml
 constexpr_namespace: AutoAimRunConfig
@@ -173,43 +173,7 @@ modules:
     args:
       - ramfs: ramfs
       - sync: CameraFrameSync_0
-      - cfg:
-          tracker:
-            require_target_tag: false
-            target_tag_id: -1
-            min_detect_count: 2
-            max_temp_lost_count: 15
-            outpost_max_temp_lost_count: 75
-            target_select:
-              observed_count_weight: 1.6
-              distance_weight: 2.0
-              area_weight: 1.2
-              spin_weight: 0.8
-              angle_weight: 2.0
-              max_distance_m: 8.0
-              distance_span_m: 7.5
-              area_norm_px: 6000.0
-              observed_count_norm: 4.0
-              max_spin_rad_s: 8.0
-              max_angle_norm: 0.5
-              detecting_scale: 0.55
-              temp_lost_scale: 0.35
-              switch_margin: 0.25
-          extrinsic:
-            camera_mount_to_body:
-              rotation: [1.0, 0.0, 0.0, 0.0]
-              translation: [0.0, 0.0, 0.0]
-          preview:
-            enabled: true
-            preview_window_name: "armor_tracker_preview"
-            preview_scale: 0.5
-            preview_wait_key_ms: 1
-            queue_capacity: 1
-            output_mode: "web"
-            web_bind_address: "0.0.0.0"
-            web_port: 8080
-            web_stream_name: "armor_tracker"
-            max_fps: 30.0
+      - cfg: ArmorTracker<AutoAimRunConfig::MainFrameLayout>::DefaultConfig()
 ```
 
 `CameraFrameSync_0` 与 ArmorDetector 实例在 `modules:` 中位于本实例之前，并使用相同的 `template_args`。Aimer 订阅本模块的 `target_frame`。
