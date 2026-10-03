@@ -1,6 +1,6 @@
 # ArmorTracker
 
-装甲板目标级跟踪：由检测结果和同帧 IMU 姿态维护整车 EKF 并发布同帧目标 / Armor target tracking: maintains per-vehicle EKF states from detections and same-frame IMU attitude and publishes the same-frame target
+装甲板目标级跟踪：由检测结果和同帧 IMU 姿态维护整车 EKF 并发布同帧目标 / Armor target tracking Module that maintains per-vehicle EKF states from detections and same-frame IMU attitude and publishes the same-frame target
 
 ## 1. 模块作用 / Purpose
 
