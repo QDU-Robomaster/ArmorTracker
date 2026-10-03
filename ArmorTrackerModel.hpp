@@ -127,7 +127,7 @@ inline double OutpostArmorHeightOffset(int face_id, int height_phase)
   }
 }
 
-inline double OutpostObservedFaceYaw(double yaw) { return LimitRad(yaw + kPi); }
+inline double OutpostObservedFaceYaw(double yaw) { return LimitRad(yaw); }
 
 inline int SignNonZero(double value) { return value > 0.0 ? 1 : -1; }
 
@@ -932,7 +932,7 @@ class Target
     const double center_z = CenterWorldForOutput().z();
     for (int i = 0; i < armor_num_; ++i)
     {
-      auto angle = LimitRad(ekf_.x[6] + kPi + i * 2.0 * kPi / armor_num_);
+      auto angle = LimitRad(ekf_.x[6] + i * 2.0 * kPi / armor_num_);
       Eigen::Vector3d xyz = HArmorXyz(ekf_.x, i);
       xyz.z() = center_z + OutpostArmorHeightOffset(i, outpost_height_phase_);
       list.push_back({xyz[0], xyz[1], xyz[2], angle});
@@ -1165,9 +1165,7 @@ class Target
     ekf_.Update(z, H, R, h, z_subtract);
     if (UseOutpostHeightModel())
     {
-      ekf_.x[0] = center_x_before;
       ekf_.x[1] = 0.0;
-      ekf_.x[2] = center_y_before;
       ekf_.x[3] = 0.0;
       if (outpost_height_phase_valid_ && id >= 0 && id < 3 &&
           side_view < kOutpostCenterZFollowFacingAngle)

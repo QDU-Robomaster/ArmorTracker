@@ -307,10 +307,6 @@ class TrackerCore
     out.armors_num = static_cast<int>(out.faces_world.size());
     out.center_world = target.CenterWorldForOutput();
     out.yaw_world = LimitRad(x[6]);
-    if (target.name == ArmorName::OUTPOST && out.armors_num == 3)
-    {
-      out.yaw_world = LimitRad(out.yaw_world + kPi);
-    }
     out.center = R_world_to_output * out.center_world;
     out.velocity = R_world_to_output * target.VelocityWorldForOutput();
     out.yaw = WorldYawToOutputYaw(out.yaw_world, output_yaw_world);
