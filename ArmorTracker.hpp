@@ -199,7 +199,9 @@ class ArmorTracker
 
     /// 内置预览参数，默认关闭
     /// Built-in preview parameters, disabled by default
-    VisionPreview::RuntimeParam preview{};
+    VisionPreview::RuntimeParam preview{.preview_window_name = "armor_tracker_preview",
+                                        .preview_scale = 0.5,
+                                        .web_stream_name = "armor_tracker"};
   };
 
   /**
@@ -261,6 +263,11 @@ class ArmorTracker
   /**
    * @brief 返回全部默认值的配置。
    *        Return the configuration holding all defaults.
+   *
+   * 预览默认关闭，窗口名为 `armor_tracker_preview`，缩放为 0.5，Web 流名为
+   * `armor_tracker`。
+   * The preview is disabled by default, with window name `armor_tracker_preview`,
+   * scale 0.5 and web stream name `armor_tracker`.
    *
    * @return 默认配置。
    *         Default configuration.

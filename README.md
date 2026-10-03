@@ -103,7 +103,7 @@ explicit ArmorTracker(LibXR::RamFS& ramfs, FrameSync& sync, Config cfg = Default
 - `tracker.target_select.switch_margin`：替换当前目标所需的最小分差，默认 `0.25`。
 - `extrinsic.camera_mount_to_body.rotation`：`wxyz` 四元数，默认 `[1, 0, 0, 0]`。
 - `extrinsic.camera_mount_to_body.translation`：平移，单位 m，默认 `[0, 0, 0]`。
-- `preview`：`VisionPreview::RuntimeParam`，默认关闭，字段见 VisionPreview。
+- `preview`：`VisionPreview::RuntimeParam`，默认关闭，`preview_window_name` 为 `"armor_tracker_preview"`，`preview_scale` 为 `0.5`，`web_stream_name` 为 `"armor_tracker"`，其余字段取 VisionPreview 的默认值，字段见 VisionPreview。
 
 Template parameter:
 
@@ -137,7 +137,7 @@ Configuration parameters (`Config`; `DefaultConfig()` holds all defaults):
 - `tracker.target_select.switch_margin`: minimum score difference required to replace the current target, default `0.25`.
 - `extrinsic.camera_mount_to_body.rotation`: `wxyz` quaternion, default `[1, 0, 0, 0]`.
 - `extrinsic.camera_mount_to_body.translation`: translation in m, default `[0, 0, 0]`.
-- `preview`: `VisionPreview::RuntimeParam`, disabled by default; see VisionPreview for the fields.
+- `preview`: `VisionPreview::RuntimeParam`, disabled by default, `preview_window_name` is `"armor_tracker_preview"`, `preview_scale` is `0.5` and `web_stream_name` is `"armor_tracker"`, the other fields take the defaults of VisionPreview; see VisionPreview for the fields.
 
 ## 4. Topic
 
