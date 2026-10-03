@@ -4,8 +4,7 @@
  * @file ArmorTrackerTarget.hpp
  * @brief 定义 ArmorTracker 对外发布的目标状态消息。
  *
- * 该文件只描述 tracker 输出的目标几何，不包含弹道、开火或云台命令语义。
- * 后级 Aimer 应当以此消息作为输入自行完成瞄准解算。
+ * 该文件描述 tracker 输出的目标几何，后级 Aimer 以此消息作为瞄准解算的输入。
  */
 
 #include <Eigen/Dense>

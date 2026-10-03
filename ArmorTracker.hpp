@@ -7,7 +7,7 @@
 
 // clang-format off
 /* === MODULE MANIFEST V2 ===
-module_description: Armor tracker
+module_description: 装甲板目标级跟踪：由检测结果和同帧 IMU 姿态维护整车 EKF 并发布同帧目标 / Armor target tracking: maintains per-vehicle EKF states from detections and same-frame IMU attitude and publishes the same-frame target
 depends:
 - id: QDU-Robomaster/ArmorDetector
   ref: same-or-dev
