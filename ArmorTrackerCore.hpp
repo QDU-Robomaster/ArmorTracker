@@ -13,12 +13,14 @@
 #include <cmath>
 #include <cstdint>
 #include <list>
+#include <map>
 #include <memory>
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
 #include <string>
 #include <vector>
 
+#include "ArmorTrackerAaest.hpp"
 #include "ArmorTrackerModel.hpp"
 
 namespace armor_tracker_detail
@@ -221,6 +223,7 @@ class TrackerCore
     tracker_ = std::make_unique<Tracker>(config_, *solver_);
     has_time_base_ = false;
     base_timestamp_us_ = 0;
+    ConfigureAaest();
   }
 
   /**
@@ -240,6 +243,7 @@ class TrackerCore
     {
       tracker_ = std::make_unique<Tracker>(config_, *solver_);
       has_time_base_ = false;
+      aaest_.clear();
     }
     last_timestamp_us_ = timestamp_us;
     Eigen::Quaterniond q = q_body_to_world;
@@ -274,6 +278,10 @@ class TrackerCore
         base_tp_ + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
                        std::chrono::microseconds(delta_us));
     (void)tracker_->Track(armors, tp);
+    if (config_.use_aaest && aaest_supported_)
+    {
+      StepAaest(timestamp_us, q, inputs);
+    }
 
     Output out;
     out.state = tracker_->State();
@@ -324,6 +332,10 @@ class TrackerCore
       out.armor = face.head<3>();
       out.armor_yaw = face[3];
     }
+    if (config_.use_aaest && aaest_supported_)
+    {
+      ApplyAaest(out, R_world_to_output, output_yaw_world);
+    }
     return out;
   }
 
@@ -365,6 +377,168 @@ class TrackerCore
   uint64_t base_timestamp_us_ = 0;
   uint64_t last_timestamp_us_ = 0;
   std::chrono::steady_clock::time_point base_tp_{};
+
+  /**
+   * @brief One aaest estimator per detector number of a four-plate vehicle.
+   */
+  struct AaestTrack
+  {
+    aaest::Estimator estimator;
+    aaest::Target last{};
+    uint64_t last_seen_us = 0;
+  };
+  std::map<int, AaestTrack> aaest_{};
+  aaest::Camera aaest_camera_{};
+  bool aaest_supported_ = false;
+
+  /**
+   * @brief Build the aaest camera from the tracker calibration and mount extrinsic.
+   *
+   * aaest projects with the OpenCV plumb-bob model (k1 k2 p1 p2 k3); calibrations with
+   * further non-zero coefficients keep the EKF output.
+   */
+  void ConfigureAaest()
+  {
+    aaest_.clear();
+    aaest_camera_.fx = config_.camera_matrix[0];
+    aaest_camera_.cx = config_.camera_matrix[2];
+    aaest_camera_.fy = config_.camera_matrix[4];
+    aaest_camera_.cy = config_.camera_matrix[5];
+    aaest_supported_ = config_.camera_model_supported;
+    for (std::size_t i = 0; i < config_.distortion_coefficients.size(); ++i)
+    {
+      const double k = i < config_.distortion_size ? config_.distortion_coefficients[i] : 0.0;
+      if (i < aaest_camera_.dist.size())
+      {
+        aaest_camera_.dist[i] = k;
+      }
+      else if (k != 0.0)
+      {
+        aaest_supported_ = false;
+      }
+    }
+    aaest_camera_.R_cb =
+        CameraToBodyRotationFromMountExtrinsic(config_.camera_mount_to_body_rotation);
+    aaest_camera_.t_cb = Eigen::Vector3d(config_.camera_mount_to_body_translation[0],
+                                         config_.camera_mount_to_body_translation[1],
+                                         config_.camera_mount_to_body_translation[2]);
+  }
+
+  /**
+   * @brief Whether a detection belongs to a four-plate vehicle that aaest models.
+   *
+   * Outpost (5) and base (7) have other plate layouts; big plates on numbers 2-4 are
+   * two-plate balance infantry.
+   */
+  static bool AaestEligible(const InputArmor& input)
+  {
+    if (input.tag_id == 5 || input.tag_id == 7)
+    {
+      return false;
+    }
+    return !(input.armor_type == 1 &&
+             (input.tag_id == 2 || input.tag_id == 3 || input.tag_id == 4));
+  }
+
+  /**
+   * @brief Step every aaest estimator with the detections of its number in this frame.
+   *
+   * Estimators without detections for two seconds are dropped.
+   */
+  void StepAaest(uint64_t timestamp_us, const Eigen::Quaterniond& q,
+                 const std::vector<InputArmor>& inputs)
+  {
+    std::map<int, std::vector<aaest::Detection>> by_tag;
+    for (const auto& input : inputs)
+    {
+      if (!ValidInput(input) || !AaestEligible(input))
+      {
+        continue;
+      }
+      aaest::Detection det;
+      for (std::size_t k = 0; k < 4; ++k)
+      {
+        det.corners[k] = aaest::Vec2(input.corners[k].x, input.corners[k].y);
+      }
+      det.type = input.armor_type == 1 ? 1 : 0;
+      by_tag[input.tag_id].push_back(det);
+    }
+    for (const auto& entry : by_tag)
+    {
+      if (aaest_.find(entry.first) == aaest_.end())
+      {
+        aaest_.emplace(entry.first,
+                       AaestTrack{aaest::Estimator(aaest_camera_), {}, timestamp_us});
+      }
+    }
+    const double t = static_cast<double>(timestamp_us - base_timestamp_us_) * 1e-6;
+    const std::array<double, 4> wxyz{q.w(), q.x(), q.y(), q.z()};
+    static const std::vector<aaest::Detection> kNone{};
+    for (auto it = aaest_.begin(); it != aaest_.end();)
+    {
+      const auto found = by_tag.find(it->first);
+      const auto& dets = found == by_tag.end() ? kNone : found->second;
+      if (!dets.empty())
+      {
+        it->second.last_seen_us = timestamp_us;
+      }
+      else if (timestamp_us - it->second.last_seen_us > 2000000U)
+      {
+        it = aaest_.erase(it);
+        continue;
+      }
+      const double distance =
+          it->second.last.tracking ? it->second.last.position.head<2>().norm() : 5.0;
+      const double horizon =
+          config_.aaest_latency_s + distance / std::max(config_.aaest_bullet_speed_m_s, 1.0);
+      it->second.last = it->second.estimator.step(t, wxyz, dets, horizon);
+      ++it;
+    }
+  }
+
+  /**
+   * @brief Replace the selected four-plate target state by its aaest estimate.
+   */
+  void ApplyAaest(Output& out, const Eigen::Matrix3d& R_world_to_output,
+                  double output_yaw_world) const
+  {
+    if (!out.has_target || out.armors_num != 4)
+    {
+      return;
+    }
+    const auto it = aaest_.find(out.selected_tag_id);
+    if (it == aaest_.end() || !it->second.last.tracking)
+    {
+      return;
+    }
+    const aaest::Target& tg = it->second.last;
+    out.center_world = tg.position;
+    out.center = R_world_to_output * out.center_world;
+    out.velocity =
+        R_world_to_output * Eigen::Vector3d(tg.velocity.x(), tg.velocity.y(), 0.0);
+    out.yaw_world = LimitRad(tg.yaw);
+    out.yaw = WorldYawToOutputYaw(out.yaw_world, output_yaw_world);
+    out.vyaw = tg.v_yaw;
+    out.radius_even = tg.radius_1;
+    out.radius_odd = tg.radius_2;
+    out.dz = tg.dz;
+    out.selected_face = tg.face;
+    out.jumped = false;
+    out.faces_world.clear();
+    for (int k = 0; k < 4; ++k)
+    {
+      const double a = tg.yaw + k * aaest::HALF_PI;
+      const bool odd = k % 2 == 1;
+      const double r = odd ? tg.radius_2 : tg.radius_1;
+      out.faces_world.emplace_back(tg.position.x() + r * std::sin(a),
+                                   tg.position.y() - r * std::cos(a),
+                                   tg.position.z() + (odd ? tg.dz : 0.0), LimitRad(a));
+    }
+    const auto face = WorldFaceToOutputFace(out.faces_world[static_cast<std::size_t>(tg.face)],
+                                            R_world_to_output, output_yaw_world);
+    out.armor = face.head<3>();
+    out.armor_yaw = face[3];
+  }
 
   /**
    * @brief Convert an internal target snapshot to public output-frame fields.

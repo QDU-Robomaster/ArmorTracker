@@ -383,6 +383,16 @@ int main(int argc, char** argv)
     config.camera_matrix = {spec.camera.fx, 0.0, spec.camera.cx,
                             0.0, spec.camera.fy, spec.camera.cy,
                             0.0, 0.0, 1.0};
+    if (const char* env = std::getenv("TRACKER_USE_AAEST"))
+    {
+      config.use_aaest = std::string(env) == "1";
+    }
+    if (const char* env = std::getenv("TRACKER_AAEST_HORIZON"))
+    {
+      // Fixed rate horizon for comparisons with a standalone aaest replay.
+      config.aaest_latency_s = std::atof(env);
+      config.aaest_bullet_speed_m_s = 1e9;
+    }
     armor_tracker_detail::TrackerCore tracker(config);
     const auto imu = read_imu_quats(imu_path_for(spec.dataset));
     std::map<uint64_t, std::vector<armor_tracker_detail::InputArmor>> frames;

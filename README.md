@@ -13,6 +13,7 @@
 - `ArmorTrackerModel.hpp`：PnP、目标状态、整车 EKF 和跟踪状态机。
 - `ArmorTrackerMath.hpp`：角度/坐标转换和 EKF 基础工具。
 - `ArmorTrackerTarget.hpp`：`tracker/target_frame` 内携带的目标状态消息。
+- `ArmorTrackerAaest.hpp`：可选的整车观测器 aaest（见下文 aaest 一节），从 aasim 仓库原样同步。
 - `tools/coordinate_semantics_check.cpp`：公开坐标系姿态语义回归检查，防止
   `host/gimbal_quat` 被额外固定旋转翻转 roll/pitch。
 - `tools/tracker_replay/armor_tracker_replay.cpp`：离线重放一致性检查工具。
@@ -24,7 +25,8 @@
 
 运行配置只保留当前链路实际使用的三组字段：
 
-- `cfg.tracker`：目标过滤、进入跟踪与丢失阈值。
+- `cfg.tracker`：目标过滤、进入跟踪与丢失阈值；`use_aaest`、`aaest_latency_s`、`aaest_bullet_speed_m_s`
+  控制可选的 aaest 观测器。
 - `cfg.extrinsic.camera_mount_to_body`：手眼外参，只表达相机安装坐标系 `M` 到公开
   本体系 `B` 的真实安装偏差。`M` 与 OpenCV 相机系 `C` 同原点，并与 `B` 使用
   同一轴约定：右手系，`x` 向右，`y` 向前，`z` 向上。`C` 到 `M` 的固定轴变换
@@ -68,6 +70,27 @@ tracker 内部按装甲板编号维护多套车辆 EKF 状态，同一 slot 丢�
 
 候选的图像中心排序现在使用原生标定主点，而不是历史硬编码 `(720, 540)`。这是独立的
 legacy bug 修复，可能只在同优先级候选排序接近边界时造成预期差异。
+
+## aaest 观测器（可选）
+
+`cfg.tracker.use_aaest: true` 时，四块装甲板的车辆改由 aaest 输出整车状态；目标的建立、丢失和选择
+仍由本模块的 tracker 负责。前哨站（5）、基地（7）和大装甲的平衡步兵（2–4 号）保持原输出。
+
+aaest 是角点级的平稳 EKF，加上对操作手换档（平移和自旋加速度阶跃）的 GLR 检测、周期变速陀螺的
+谐振子模型，以及按角点似然选择的四个滤波器；首次观测用 IPPE 位姿和一组转速假设起始。算法规格和
+仿真、实录结果在 aasim 仓库的 `docs/glr_estimator.md`、`docs/input_prediction.md`。
+
+输出字段的含义与原来相同，只有两处差别：
+
+- `velocity` 和 `v_yaw` 是未来 h 秒内的平均值，含按换档推断的前推；h 取
+  `aaest_latency_s + 目标水平距离 / aaest_bullet_speed_m_s`（默认 0.07 s 与 23 m/s）。
+- `tracked_face_index` 是当前最正对射手的板。
+
+相机标定按 OpenCV 五参数畸变使用；第 6 项以后有非零系数时 aaest 不启用，输出保持原样。
+相机安装外参与 PnP 使用同一份 `cfg.extrinsic.camera_mount_to_body`。
+
+`tools/tracker_replay/armor_tracker_replay.cpp` 读取环境变量 `TRACKER_USE_AAEST=1` 打开 aaest，
+`TRACKER_AAEST_HORIZON` 把 h 固定为给定秒数（用于和 aasim 的独立回放 `aaest_replay` 对比）。
 
 ## 验证
 

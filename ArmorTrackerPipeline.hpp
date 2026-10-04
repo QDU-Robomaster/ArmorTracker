@@ -22,6 +22,9 @@ armor_tracker_detail::Config ArmorTracker<FrameLayoutV>::BuildTrackerConfig() co
   config.min_detect_count = cfg_.tracker.min_detect_count;
   config.max_temp_lost_count = cfg_.tracker.max_temp_lost_count;
   config.outpost_max_temp_lost_count = cfg_.tracker.outpost_max_temp_lost_count;
+  config.use_aaest = cfg_.tracker.use_aaest;
+  config.aaest_latency_s = cfg_.tracker.aaest_latency_s;
+  config.aaest_bullet_speed_m_s = cfg_.tracker.aaest_bullet_speed_m_s;
   config.target_select.observed_count_weight =
       cfg_.tracker.target_select.observed_count_weight;
   config.target_select.distance_weight = cfg_.tracker.target_select.distance_weight;

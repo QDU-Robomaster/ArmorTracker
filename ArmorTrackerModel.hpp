@@ -272,6 +272,12 @@ struct Config
   bool camera_model_supported{true};
   std::array<double, 4> camera_mount_to_body_rotation{1.0, 0.0, 0.0, 0.0};
   std::array<double, 3> camera_mount_to_body_translation{0.0, 0.0, 0.0};
+  /// Report four-plate vehicles from the aaest estimator (ArmorTrackerAaest.hpp) instead of the EKF;
+  /// target management and selection stay with the tracker.
+  bool use_aaest = false;
+  /// aaest rates are means over frame-to-impact: aaest_latency_s + distance / aaest_bullet_speed_m_s.
+  double aaest_latency_s = 0.07;
+  double aaest_bullet_speed_m_s = 23.0;
 };
 
 /**

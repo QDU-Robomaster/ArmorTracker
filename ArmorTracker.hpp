@@ -16,6 +16,9 @@ constructor_args:
       min_detect_count: 2
       max_temp_lost_count: 15
       outpost_max_temp_lost_count: 75
+      use_aaest: false
+      aaest_latency_s: 0.07
+      aaest_bullet_speed_m_s: 23.0
       target_select:
         observed_count_weight: 1.6
         distance_weight: 2.0
@@ -154,6 +157,11 @@ class ArmorTracker : public LibXR::Application
       int min_detect_count = 2;
       int max_temp_lost_count = 15;
       int outpost_max_temp_lost_count = 75;
+      /// Report four-plate vehicles from the aaest estimator (ArmorTrackerAaest.hpp).
+      bool use_aaest = false;
+      /// aaest rates are averaged over aaest_latency_s + distance / aaest_bullet_speed_m_s.
+      double aaest_latency_s = 0.07;
+      double aaest_bullet_speed_m_s = 23.0;
       struct TargetSelectParams
       {
         double observed_count_weight = 1.6;
