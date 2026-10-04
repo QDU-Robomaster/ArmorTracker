@@ -570,11 +570,11 @@ class Filter {
     static const std::array<int, 2> I2{0, 1};
     static const std::array<int, 1> I1{2};
     static const std::array<int, 3> I3{0, 1, 2};
-    double lr[3];
+    double lr[3] = {0.0, 0.0, 0.0};
     int j[3] = {0, 0, 0};
-    Eigen::Matrix<double, 2, 1> g2; Eigen::Matrix2d C2;
-    Eigen::Matrix<double, 1, 1> g1; Eigen::Matrix<double, 1, 1> C1;
-    Eigen::Vector3d g3; Mat3 C3;
+    Eigen::Matrix<double, 2, 1> g2 = Eigen::Matrix<double, 2, 1>::Zero(); Eigen::Matrix2d C2 = Eigen::Matrix2d::Zero();
+    Eigen::Matrix<double, 1, 1> g1 = Eigen::Matrix<double, 1, 1>::Zero(); Eigen::Matrix<double, 1, 1> C1 = Eigen::Matrix<double, 1, 1>::Zero();
+    Eigen::Vector3d g3 = Eigen::Vector3d::Zero(); Mat3 C3 = Mat3::Zero();
     best_onset<2>(I2, Sd, lr[0], j[0], g2, C2);
     best_onset<1>(I1, Sd, lr[1], j[1], g1, C1);
     best_onset<3>(I3, Sd, lr[2], j[2], g3, C3);
