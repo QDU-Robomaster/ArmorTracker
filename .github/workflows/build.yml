@@ -5,11 +5,8 @@ on:
   workflow_dispatch:
 jobs:
   build:
-    uses: xrobot-org/XRobot/.github/workflows/module-ci.yml@dev
+    uses: xrobot-org/XRobot/.github/workflows/module-ci.yml@v1
     with:
-      xrobot-ref: dev
-      libxr-ref: dev
-      dependency-ref: refs/heads/dev
       template-args: '["CameraTypes::FrameLayout{.width=640,.height=480,.step=1920,.encoding=CameraTypes::Encoding::BGR8}"]'
       image: 'ghcr.io/xrobot-org/docker-image-webots:main'
       cmake-options: '-DOpenVINO_DIR=/opt/intel/openvino_2025.4.0/runtime/cmake -DWEBOTS_HOME=/usr/local/webots'
