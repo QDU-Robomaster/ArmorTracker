@@ -296,10 +296,10 @@ class TrackSet
     const bool found = kind ? UpdateFallback(slot, *kind, same_size, t)
                             : UpdateVehicle(slot, same_size, t);
     Advance(slot, found);
-    // 状态机只决定能否被选为目标；整车估计器连续 2 s
-    // 没看到才丢弃，丢失后由它自己重新起步。 The state machine only decides
-    // selectability; a vehicle estimator is dropped after 2 s unseen and otherwise
-    // reboots itself after a loss.
+    // 状态机只决定能否被选为目标；整车估计器连续 2 s 没看到才丢弃，丢失后由它自己重新起步。
+    //
+    // The state machine only decides selectability; a vehicle estimator is dropped after
+    // 2 s unseen and otherwise reboots itself after a loss.
     if (slot.vehicle && t - slot.last_seen > 2.0)
     {
       slot.vehicle.reset();
