@@ -33,9 +33,9 @@ The reported velocity and spin are means over the next h seconds, h = `latency_s
 
 ## 3. 兜底 EKF / Fallback EKF
 
-前哨站（三块板，三档高度）和基地（三块板）不是四块板的车，由 `FallbackTarget.hpp` 跟踪：逐块板 IPPE 求位姿，朝向在机体前向 ±70° 内按 1° 搜索重投影误差最小者，再用 11 维 EKF 跟踪中心、速度、朝向、转速和半径。前哨站按换面时的高度跳变确定高度相位，丢失后用上一次的中心重新起始。
+前哨站（三块板，三档高度）和基地（三块板）不是四块板的车，由 `FallbackTarget.hpp` 跟踪：逐块板 IPPE 求位姿，朝向在机体前向 ±70° 内按 1° 搜索重投影误差最小者，再用 11 维 EKF 跟踪中心、速度、朝向、转速和半径。前哨站按物理约定建模：板朝外，朝向与车辆同一约定，中心是转轴并由 EKF 逐帧修正；高度相位由换面时的高度跳变确定，丢失后用上一次的中心重新起始。
 
-The outpost (three plates at three heights) and the base (three plates) are not four-plate vehicles and are tracked by `FallbackTarget.hpp`: IPPE per plate, the heading searched in 1° steps within ±70° of the body forward for the smallest reprojection error, then an 11-state EKF of centre, velocity, heading, spin and radius. The outpost's height phase comes from the height jump at a face change, and after a loss it restarts from the previous centre.
+The outpost (three plates at three heights) and the base (three plates) are not four-plate vehicles and are tracked by `FallbackTarget.hpp`: IPPE per plate, the heading searched in 1° steps within ±70° of the body forward for the smallest reprojection error, then an 11-state EKF of centre, velocity, heading, spin and radius. The outpost follows the physical convention: plates face outward, the heading convention is the vehicles', and the centre is the spin axis, corrected by the EKF every frame; the height phase comes from the height jump at a face change, and after a loss it restarts from the previous centre.
 
 ## 4. 目标管理 / Target Management
 
@@ -92,9 +92,9 @@ modules:
 
 ## 7. 测试 / Tests
 
-`tests/tracker_test.cpp` 用合成的车辆检测检查：整车估计器在转动目标上收敛（中心 < 2 cm、转速 < 0.3 rad/s）、两个目标中选近的并在其消失后换到另一个、检测器把 3 号报成大板时仍按小板整车跟踪、基地按三块板兜底、模块每收一帧发一帧。
+`tests/tracker_test.cpp` 用合成的车辆检测检查：整车估计器在转动目标上收敛（中心 < 2 cm、转速 < 0.3 rad/s）、两个目标中选近的并在其消失后换到另一个、检测器把 3 号报成大板时仍按小板整车跟踪、基地按三块板兜底、板朝外的前哨站中心落在转轴上（< 5 cm）、模块每收一帧发一帧。
 
-`tests/tracker_test.cpp` checks with synthetic vehicle detections that the vehicle estimator converges on a spinning target (centre < 2 cm, spin < 0.3 rad/s), the nearer of two targets is chosen and the other takes over when it disappears, number 3 reported as large is still tracked as a small-plate vehicle, the base falls back to a three-plate target, and the Module publishes one frame per frame.
+`tests/tracker_test.cpp` checks with synthetic vehicle detections that the vehicle estimator converges on a spinning target (centre < 2 cm, spin < 0.3 rad/s), the nearer of two targets is chosen and the other takes over when it disappears, number 3 reported as large is still tracked as a small-plate vehicle, the base falls back to a three-plate target, an outward-facing outpost keeps its centre on the spin axis (< 5 cm), and the Module publishes one frame per frame.
 
 ## 8. 依赖 / Dependencies
 

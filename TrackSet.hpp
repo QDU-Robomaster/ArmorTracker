@@ -414,7 +414,7 @@ class TrackSet
     if (to_centre.head<2>().norm() >= 1e-6)
     {
       const double face_yaw = Fallback::BearingYaw(to_centre);
-      const double observed = Fallback::OutpostObservedYaw(obs.yaw);
+      const double observed = obs.yaw;
       double best = std::numeric_limits<double>::infinity();
       for (int id = 0; id < 3; ++id)
       {

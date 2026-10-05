@@ -94,9 +94,6 @@ inline double OutpostHeightOffset(int face, int phase)
   }
 }
 
-/// 前哨站贴纸朝外，观测到的板朝向要转半圈 / Outpost plates face outward.
-inline double OutpostObservedYaw(double yaw) { return LimitRad(yaw + PI); }
-
 /// 一块板的 PnP 观测（世界系）/ One plate's PnP observation in the world frame.
 struct PlateObservation
 {
@@ -262,7 +259,7 @@ class FallbackTarget
         height_phase_valid_(start.height_phase_valid)
   {
     const double r = kind == Kind::OUTPOST ? OUTPOST_RADIUS : 0.3205;
-    const double yaw = kind == Kind::OUTPOST ? OutpostObservedYaw(obs.yaw) : obs.yaw;
+    const double yaw = obs.yaw;
     double cx = obs.xyz.x() - r * std::sin(yaw);
     double cy = obs.xyz.y() + r * std::cos(yaw);
     double cz = obs.xyz.z();
@@ -381,11 +378,9 @@ class FallbackTarget
 
   Vec3 Centre() const { return {x_(0), x_(2), x_(4)}; }
   Vec3 Velocity() const { return {x_(1), x_(3), kind_ == Kind::OUTPOST ? 0.0 : x_(5)}; }
-  /// 输出朝向：前哨站转半圈 / Output heading; the outpost turns half a circle.
-  double OutputYaw() const
-  {
-    return kind_ == Kind::OUTPOST ? LimitRad(x_(6) + PI) : LimitRad(x_(6));
-  }
+  /// 输出朝向：0 号板的朝向，前哨站与车辆同一约定 / Output heading of plate 0, the
+  /// same convention for the outpost and vehicles.
+  double OutputYaw() const { return LimitRad(x_(6)); }
   double OutputDz() const
   {
     return kind_ == Kind::OUTPOST ? OUTPOST_HEIGHT_STEP : x_(10);
@@ -429,7 +424,7 @@ class FallbackTarget
     {
       const Vec4& p = plates[i].first;
       const Vec3 ypd = XyzToYpd(p.head<3>());
-      const double yaw = OutpostHeightModel() ? OutpostObservedYaw(obs.yaw) : obs.yaw;
+      const double yaw = obs.yaw;
       double error =
           std::abs(LimitRad(yaw - p(3))) + std::abs(LimitRad(obs.ypd(0) - ypd(0)));
       if (OutpostHeightModel() && height_phase_valid_)
@@ -542,8 +537,7 @@ class FallbackTarget
   void UpdateEkf(const PlateObservation& obs, int id)
   {
     const Vec3 centre_before = Centre();
-    const double observed_yaw =
-        OutpostHeightModel() ? OutpostObservedYaw(obs.yaw) : obs.yaw;
+    const double observed_yaw = obs.yaw;
     const double side_view = std::abs(LimitRad(observed_yaw - BearingYaw(obs.xyz)));
     Vec4 r_diag;
     if (kind_ == Kind::OUTPOST)
@@ -575,13 +569,12 @@ class FallbackTarget
 
     if (OutpostHeightModel())
     {
-      // 前哨站中心不动；高度只在正对时缓慢跟随 / The outpost centre stays; the height
-      // follows slowly only when facing.
+      // 前哨站不平移：中心由 EKF 逐帧修正，速度清零；高度只在正对时缓慢跟随。
+      // The outpost does not translate: the EKF keeps correcting the centre, velocities
+      // stay zero, and the height follows slowly only when facing.
       constexpr double Z_FOLLOW_ALPHA = 0.08;
       constexpr double Z_FOLLOW_FACING = 0.30;
-      x_(0) = centre_before.x();
       x_(1) = 0.0;
-      x_(2) = centre_before.y();
       x_(3) = 0.0;
       if (height_phase_valid_ && side_view < Z_FOLLOW_FACING)
       {

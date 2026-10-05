@@ -45,7 +45,9 @@ struct Truth
   double omega;
   double r_even = 0.25, r_odd = 0.22, dz = 0.05;
   bool large = false;
-  int plates = 4;  ///< 基地为 3 / 3 for the base
+  int plates = 4;  ///< 基地与前哨站为 3 / 3 for the base and the outpost
+  std::array<double, 3> plate_z{0.0, 0.0,
+                                0.0};  ///< 三块板时各板高度 / Heights of 3 plates
   Vehicle::PlateShape shape = LIGHTBAR4_SHAPE;
 
   Vehicle::Vec StateAt(double t) const
@@ -76,8 +78,9 @@ struct Truth
       const double a = x(Vehicle::YAW) + k * 2.0 * M_PI / plates;
       const bool odd = plates == 4 && k % 2 == 1;
       const double r = odd ? r_odd : r_even;
+      const double z = plates == 3 ? plate_z[k] : (odd ? dz : 0.0);
       const Vehicle::Vec3 c(centre.x() + r * std::sin(a), centre.y() - r * std::cos(a),
-                            centre.z() + (odd ? dz : 0.0));
+                            centre.z() + z);
       const Vehicle::Vec2 n(std::sin(a), -std::cos(a));
       if (n.dot(-c.head<2>() / c.head<2>().norm()) < 0.3)
       {
@@ -230,6 +233,38 @@ void TestBaseFallback()
   Expect((out.position.head<2>() - base.centre.head<2>()).norm() < 0.1, "base centre");
 }
 
+void TestOutpostFallback()
+{
+  // 板朝外的物理前哨站：三档高度，0.8π rad/s / A physical outpost with outward plates.
+  Truth outpost{{0.3, 5.0, 0.4}, 0.0, 0.8 * M_PI};
+  outpost.plates = 3;
+  outpost.r_even = outpost.r_odd = Fallback::OUTPOST_RADIUS;
+  outpost.plate_z = {Fallback::OutpostHeightOffset(0, 0),
+                     Fallback::OutpostHeightOffset(1, 0),
+                     Fallback::OutpostHeightOffset(2, 0)};
+  TrackSet set(Settings("outpost"));
+  std::mt19937 rng(6);
+  ArmorTrackerTarget out;
+  double worst = 0.0;
+  for (int i = 0; i < 400; ++i)
+  {
+    std::vector<AutoAim::Armor> armors;
+    for (const auto& c : outpost.Visible(0.01 * i, rng))
+    {
+      armors.push_back(MakeArmor(ArmorNumber::OUTPOST, false, c));
+    }
+    out = set.Step(10000ULL * i, {1, 0, 0, 0}, CALIBRATION, armors);
+    if (i >= 200 && out.tracking)
+    {
+      worst = std::max(worst, (out.position.head<2>() - outpost.centre.head<2>()).norm());
+    }
+  }
+  std::printf("outpost: armors_num %d worst centre err after 2 s %.3f m, v_yaw %.2f\n",
+              out.armors_num, worst, out.v_yaw);
+  Expect(out.tracking && out.armors_num == 3, "three-plate outpost");
+  Expect(worst < 0.05, "centre on the physical axis");
+}
+
 void TestModule()
 {
   LibXR::Topic detected =
@@ -299,6 +334,7 @@ int main()
   TestSelectionAndSwitching();
   TestSizeByNumber();
   TestBaseFallback();
+  TestOutpostFallback();
   TestModule();
   std::puts("armor_tracker_test passed");
   return 0;
