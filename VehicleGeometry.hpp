@@ -19,19 +19,19 @@ namespace Vehicle
 /// 15 维状态的下标 / Indices of the 15-dimensional state.
 enum State : int
 {
-  CX = 0,     ///< 中心 x / Centre x
-  CY = 1,     ///< 中心 y / Centre y
-  VX = 2,     ///< 中心速度 / Centre velocity
+  CX = 0,  ///< 中心 x / Centre x
+  CY = 1,  ///< 中心 y / Centre y
+  VX = 2,  ///< 中心速度 / Centre velocity
   VY = 3,
-  AX = 4,     ///< 中心加速度 / Centre acceleration
+  AX = 4,  ///< 中心加速度 / Centre acceleration
   AY = 5,
-  YAW = 6,    ///< 0 号板朝向 / Heading of plate 0
-  OMEGA = 7,  ///< 转速 / Spin rate
-  ALPHA = 8,  ///< 角加速度 / Spin acceleration
-  CZ = 9,     ///< 中心高度 / Centre height
-  R_EVEN = 10,  ///< 偶数板半径 / Even-plate radius
-  R_ODD = 11,   ///< 奇数板半径 / Odd-plate radius
-  DZ = 12,      ///< 奇数板高度差 / Odd-plate height offset
+  YAW = 6,       ///< 0 号板朝向 / Heading of plate 0
+  OMEGA = 7,     ///< 转速 / Spin rate
+  ALPHA = 8,     ///< 角加速度 / Spin acceleration
+  CZ = 9,        ///< 中心高度 / Centre height
+  R_EVEN = 10,   ///< 偶数板半径 / Even-plate radius
+  R_ODD = 11,    ///< 奇数板半径 / Odd-plate radius
+  DZ = 12,       ///< 奇数板高度差 / Odd-plate height offset
   SCALE_W = 13,  ///< 关键点横向尺度 / Keypoint lateral scale
   SCALE_H = 14,  ///< 关键点纵向尺度 / Keypoint vertical scale
   NX = 15,
@@ -105,13 +105,26 @@ inline Mat3 ArmorRotation(double yaw)
   return r;
 }
 
-/// 装甲板系里的四个关键点 / The four keypoints in the armor frame.
-inline std::array<Vec3, 4> ObjectPoints(int type)
+/// 关键点在装甲板系里的半宽（小板、大板）与半高 / Keypoint half widths (small, large)
+/// and half height in the armor frame.
+struct PlateShape
 {
-  const double w = type == 1 ? 0.230 : 0.135;
-  const double l = 0.056;
-  return {Vec3(0, w / 2, l / 2), Vec3(0, -w / 2, l / 2), Vec3(0, -w / 2, -l / 2),
-          Vec3(0, w / 2, -l / 2)};
+  double small_half_width;
+  double large_half_width;
+  double half_height;
+};
+
+/// 原型 aaest 的关键点（135 / 230 × 56 mm），用于与原型对拍 / The prototype's keypoints,
+/// used for the parity check.
+inline constexpr PlateShape PROTOTYPE_SHAPE{0.135 / 2, 0.230 / 2, 0.056 / 2};
+
+/// 装甲板系里的四个关键点：左上、右上、右下、左下 / The four keypoints in the armor
+/// frame: top-left, top-right, bottom-right, bottom-left.
+inline std::array<Vec3, 4> ObjectPoints(int type, const PlateShape& s)
+{
+  const double w = type == 1 ? s.large_half_width : s.small_half_width;
+  const double h = s.half_height;
+  return {Vec3(0, w, h), Vec3(0, -w, h), Vec3(0, -w, -h), Vec3(0, w, -h)};
 }
 
 /// 世界点投影到像素 / World points to pixels for a body-to-world attitude.

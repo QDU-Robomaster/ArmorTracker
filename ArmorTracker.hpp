@@ -49,8 +49,7 @@ class ArmorTracker
   {
     auto on_detected = LibXR::Topic::Callback::Create(
         [](bool, ArmorTracker* self, const AutoAim::DetectedFrame* frame)
-        { self->Push(*frame); },
-        this);
+        { self->Push(*frame); }, this);
     AutoAim::RequireTopic<const AutoAim::DetectedFrame*>(
         StageTopicName(camera_name_, AutoAim::STAGE_DETECTED))
         .RegisterCallback(on_detected);
@@ -86,7 +85,8 @@ class ArmorTracker
     if (queue_.size() >= QUEUE_CAPACITY)
     {
       waits_.fetch_add(1, std::memory_order_relaxed);
-      not_full_.wait(lock, [this]() { return queue_.size() < QUEUE_CAPACITY || !running_.load(); });
+      not_full_.wait(
+          lock, [this]() { return queue_.size() < QUEUE_CAPACITY || !running_.load(); });
     }
     if (!running_.load())
     {
@@ -126,7 +126,8 @@ class ArmorTracker
     tracked.target = tracks_.Step(static_cast<uint64_t>(synced.imu.timestamp_us),
                                   synced.imu.rotation_wxyz, *synced.image->calibration,
                                   tracked.detected.armors);
-    tracks_.WorldToCamera(tracked.output_to_camera_rotation, tracked.output_to_camera_translation);
+    tracks_.WorldToCamera(tracked.output_to_camera_rotation,
+                          tracked.output_to_camera_translation);
     const AutoAim::TrackedFrame* payload = &tracked;
     tracked_topic_.Publish(payload);
     frames_.fetch_add(1, std::memory_order_relaxed);

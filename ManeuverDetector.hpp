@@ -149,14 +149,15 @@ class ManeuverDetector
   struct Onset
   {
     double t;
-    MatD D;   ///< 真实响应减滤波器响应 / True minus filter response
-    Mat3 C;   ///< 阶跃的信息矩阵 / Information matrix of the step
-    Vec3 d;   ///< 信息向量 / Information vector
+    MatD D;  ///< 真实响应减滤波器响应 / True minus filter response
+    Mat3 C;  ///< 阶跃的信息矩阵 / Information matrix of the step
+    Vec3 d;  ///< 信息向量 / Information vector
   };
 
   template <int M>
-  void BestOnset(const std::array<int, M>& ix, const Mat3& prior, double& lr_best, int& j_best,
-                 Eigen::Matrix<double, M, 1>& g_best, Eigen::Matrix<double, M, M>& cm_best) const
+  void BestOnset(const std::array<int, M>& ix, const Mat3& prior, double& lr_best,
+                 int& j_best, Eigen::Matrix<double, M, 1>& g_best,
+                 Eigen::Matrix<double, M, M>& cm_best) const
   {
     using MM = Eigen::Matrix<double, M, M>;
     using VM = Eigen::Matrix<double, M, 1>;

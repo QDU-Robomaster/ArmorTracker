@@ -12,6 +12,12 @@
 #include "FallbackTarget.hpp"
 #include "VehicleEstimator.hpp"
 
+/// v4 检测器角点（灯条四端点）对应的关键点，取自 AutoAimTypes / Keypoints of the v4
+/// detector's corners (light-bar ends), from AutoAimTypes.
+inline constexpr Vehicle::PlateShape LIGHTBAR4_SHAPE{AutoAim::SMALL_ARMOR_HALF_WIDTH,
+                                                     AutoAim::LARGE_ARMOR_HALF_WIDTH,
+                                                     AutoAim::ARMOR_HALF_HEIGHT};
+
 /// 跟踪槽的状态 / State of a track slot.
 enum class TrackState : uint8_t
 {
@@ -67,7 +73,12 @@ class TrackSet
  public:
   static constexpr int SLOTS = 8;  ///< ONE … BASE
 
-  explicit TrackSet(const TrackerSettings& s) : s_(s) {}
+  /// shape 只在与原型对拍时改 / Change `shape` only for the parity check.
+  explicit TrackSet(const TrackerSettings& s,
+                    const Vehicle::PlateShape& shape = LIGHTBAR4_SHAPE)
+      : s_(s), shape_(shape)
+  {
+  }
 
   /**
    * @param t_us 帧的 IMU 时间戳 / IMU timestamp of the frame
@@ -125,7 +136,8 @@ class TrackSet
 
   /// 世界系到相机光学系的旋转与平移（行优先），供预览投影 / World-to-optical
   /// transform (row-major) for preview projection.
-  void WorldToCamera(std::array<double, 9>& rotation, std::array<double, 3>& translation) const
+  void WorldToCamera(std::array<double, 9>& rotation,
+                     std::array<double, 3>& translation) const
   {
     // p_c = R_cbᵀ (R_bwᵀ p_w − t_cb)
     const Vehicle::Mat3 r = camera_.R_cb.transpose() * r_bw_.transpose();
@@ -173,8 +185,9 @@ class TrackSet
     const auto& m = s_.mount_rotation_wxyz;
     camera_.R_cb = Vehicle::RotationFromQuaternion(m[0], m[1], m[2], m[3]) *
                    Vehicle::OpticalToBody();
-    camera_.t_cb = {s_.mount_translation[0], s_.mount_translation[1], s_.mount_translation[2]};
-    solver_.emplace(camera_);
+    camera_.t_cb = {s_.mount_translation[0], s_.mount_translation[1],
+                    s_.mount_translation[2]};
+    solver_.emplace(camera_, shape_);
     ResetAll();
   }
 
@@ -221,7 +234,8 @@ class TrackSet
     {
       return Fallback::Kind::BASE;
     }
-    if (large && (n == ArmorNumber::THREE || n == ArmorNumber::FOUR || n == ArmorNumber::FIVE))
+    if (large &&
+        (n == ArmorNumber::THREE || n == ArmorNumber::FOUR || n == ArmorNumber::FIVE))
     {
       return Fallback::Kind::BALANCE;  // 两块大板的平衡步兵 / Two-plate balance robot
     }
@@ -244,10 +258,12 @@ class TrackSet
     for (const AutoAim::Armor* a : dets)
     {
       const auto c = EstimatorCorners(*a);
-      slot.area += std::abs(cv::contourArea(std::vector<cv::Point2f>(c.begin(), c.end())));
+      slot.area +=
+          std::abs(cv::contourArea(std::vector<cv::Point2f>(c.begin(), c.end())));
       const cv::Point2f centre = (c[0] + c[1] + c[2] + c[3]) * 0.25F;
-      min_angle = std::min(min_angle, std::atan(std::hypot((centre.x - camera_.cx) / camera_.fx,
-                                                           (centre.y - camera_.cy) / camera_.fy)));
+      min_angle = std::min(min_angle,
+                           std::atan(std::hypot((centre.x - camera_.cx) / camera_.fx,
+                                                (centre.y - camera_.cy) / camera_.fy)));
     }
     if (std::isfinite(min_angle))
     {
@@ -255,8 +271,8 @@ class TrackSet
     }
   }
 
-  void UpdateSlot(Slot& slot, ArmorNumber n, const std::vector<const AutoAim::Armor*>& dets,
-                  double t)
+  void UpdateSlot(Slot& slot, ArmorNumber n,
+                  const std::vector<const AutoAim::Armor*>& dets, double t)
   {
     UpdateMetrics(slot, dets);
     if (slot.state != TrackState::LOST && t - slot.last_t > 0.1)
@@ -280,9 +296,10 @@ class TrackSet
     const bool found = kind ? UpdateFallback(slot, *kind, same_size, t)
                             : UpdateVehicle(slot, same_size, t);
     Advance(slot, found);
-    // 状态机只决定能否被选为目标；整车估计器连续 2 s 没看到才丢弃，丢失后由它自己重新起步。
-    // The state machine only decides selectability; a vehicle estimator is dropped after
-    // 2 s unseen and otherwise reboots itself after a loss.
+    // 状态机只决定能否被选为目标；整车估计器连续 2 s
+    // 没看到才丢弃，丢失后由它自己重新起步。 The state machine only decides
+    // selectability; a vehicle estimator is dropped after 2 s unseen and otherwise
+    // reboots itself after a loss.
     if (slot.vehicle && t - slot.last_seen > 2.0)
     {
       slot.vehicle.reset();
@@ -304,7 +321,7 @@ class TrackSet
       {
         return false;
       }
-      slot.vehicle.emplace(camera_);
+      slot.vehicle.emplace(camera_, Vehicle::RateMode::AUTO, shape_);
     }
     std::vector<Vehicle::Detection> input;
     for (const AutoAim::Armor* a : dets)
@@ -319,8 +336,9 @@ class TrackSet
       input.push_back(d);
     }
     // 速率取帧到命中的平均 / Rates averaged over frame-to-impact.
-    const double distance =
-        slot.vehicle_target.tracking ? slot.vehicle_target.position.head<2>().norm() : 5.0;
+    const double distance = slot.vehicle_target.tracking
+                                ? slot.vehicle_target.position.head<2>().norm()
+                                : 5.0;
     const double horizon = s_.latency_s + distance / std::max(s_.bullet_speed, 1.0);
     slot.vehicle_target = slot.vehicle->Step(t, q_, input, horizon);
     if (!dets.empty())
@@ -385,7 +403,8 @@ class TrackSet
       }
     }
     Fallback::PlateObservation obs;
-    if (nearest == nullptr || !solver_->Solve(EstimatorCorners(*nearest), slot.large, kind, obs))
+    if (nearest == nullptr ||
+        !solver_->Solve(EstimatorCorners(*nearest), slot.large, kind, obs))
     {
       return false;
     }
@@ -400,8 +419,8 @@ class TrackSet
 
   /// 前哨站重新起始：按上次的中心推断看到的是哪块板、高度相位 / Restarting the outpost:
   /// infer the observed face and the height phase from the previous centre.
-  static Fallback::FallbackTarget::Start OutpostStart(const Vehicle::Vec3& hint,
-                                                      const Fallback::PlateObservation& obs)
+  static Fallback::FallbackTarget::Start OutpostStart(
+      const Vehicle::Vec3& hint, const Fallback::PlateObservation& obs)
   {
     using Fallback::LimitRad;
     Fallback::FallbackTarget::Start start;
@@ -414,7 +433,8 @@ class TrackSet
       double best = std::numeric_limits<double>::infinity();
       for (int id = 0; id < 3; ++id)
       {
-        const double error = std::abs(LimitRad(face_yaw - LimitRad(observed + id * 2.0 * Fallback::PI / 3.0)));
+        const double error = std::abs(
+            LimitRad(face_yaw - LimitRad(observed + id * 2.0 * Fallback::PI / 3.0)));
         if (error < best)
         {
           best = error;
@@ -425,8 +445,8 @@ class TrackSet
     double best = std::numeric_limits<double>::infinity();
     for (int phase = 0; phase < 3; ++phase)
     {
-      const double error =
-          std::abs(obs.xyz.z() - Fallback::OutpostHeightOffset(start.face, phase) - hint.z());
+      const double error = std::abs(
+          obs.xyz.z() - Fallback::OutpostHeightOffset(start.face, phase) - hint.z());
       if (error < best)
       {
         best = error;
@@ -501,21 +521,24 @@ class TrackSet
     const double distance_score =
         clamp01((w.max_distance_m - centre.norm()) / std::max(w.distance_span_m, 1e-6));
     const double area_score = clamp01(slot.area / std::max(w.area_norm_px, 1e-6));
-    const double count_score = clamp01(slot.count_lpf / std::max(w.observed_count_norm, 1e-6));
-    const double spin_score = clamp01(1.0 - std::abs(spin) / std::max(w.max_spin_rad_s, 1e-6));
-    const double angle_score = clamp01(1.0 - slot.view_angle / std::max(w.max_angle_rad, 1e-6));
+    const double count_score =
+        clamp01(slot.count_lpf / std::max(w.observed_count_norm, 1e-6));
+    const double spin_score =
+        clamp01(1.0 - std::abs(spin) / std::max(w.max_spin_rad_s, 1e-6));
+    const double angle_score =
+        clamp01(1.0 - slot.view_angle / std::max(w.max_angle_rad, 1e-6));
     const double scale = slot.state == TrackState::DETECTING   ? w.detecting_scale
                          : slot.state == TrackState::TEMP_LOST ? w.temp_lost_scale
                                                                : 1.0;
-    return scale * (w.observed_count_weight * count_score + w.distance_weight * distance_score +
-                    w.area_weight * area_score + w.spin_weight * spin_score +
-                    w.angle_weight * angle_score);
+    return scale * (w.observed_count_weight * count_score +
+                    w.distance_weight * distance_score + w.area_weight * area_score +
+                    w.spin_weight * spin_score + w.angle_weight * angle_score);
   }
 
   static bool Selectable(const Slot& slot)
   {
-    return slot.Initialized() && slot.state != TrackState::LOST && std::isfinite(slot.score) &&
-           (!slot.vehicle || slot.vehicle_target.tracking);
+    return slot.Initialized() && slot.state != TrackState::LOST &&
+           std::isfinite(slot.score) && (!slot.vehicle || slot.vehicle_target.tracking);
   }
 
   /// 得分最高者；换目标要领先 switch_margin / Best score; switching needs a margin.
@@ -523,8 +546,9 @@ class TrackSet
   {
     if (s_.target_number >= 0)
     {
-      return s_.target_number < SLOTS && Selectable(slots_[s_.target_number]) ? s_.target_number
-                                                                                : -1;
+      return s_.target_number < SLOTS && Selectable(slots_[s_.target_number])
+                 ? s_.target_number
+                 : -1;
     }
     int best = -1;
     for (int i = 0; i < SLOTS; ++i)
@@ -534,7 +558,8 @@ class TrackSet
         best = i;
       }
     }
-    if (best >= 0 && selected_ >= 0 && best != selected_ && Selectable(slots_[selected_]) &&
+    if (best >= 0 && selected_ >= 0 && best != selected_ &&
+        Selectable(slots_[selected_]) &&
         slots_[best].score <= slots_[selected_].score + s_.select.switch_margin)
     {
       return selected_;
@@ -575,6 +600,7 @@ class TrackSet
   }
 
   const TrackerSettings s_;
+  const Vehicle::PlateShape shape_;
   const CameraTypes::CameraCalibration* calibration_ = nullptr;
   Vehicle::Camera camera_;
   std::optional<Fallback::PlateSolver> solver_;

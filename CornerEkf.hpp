@@ -46,8 +46,10 @@ struct FilterParams
   double lost_after = 0.3, sat_frac = 0.75, v_key = 2.0, sig_scale = 1e-4, r0 = 0.22;
   // GLR 突变检测 / GLR step detection
   double window = 0.3;
-  std::array<double, 3> threshold{15.0, 25.0, 30.0};  ///< 平移、自旋、两者 / translation, spin, joint
-  std::array<double, 3> sig_step{5.0, 2.0, 30.0};     ///< 横向、纵深、自旋 / lateral, depth, spin
+  std::array<double, 3> threshold{15.0, 25.0,
+                                  30.0};  ///< 平移、自旋、两者 / translation, spin, joint
+  std::array<double, 3> sig_step{5.0, 2.0,
+                                 30.0};  ///< 横向、纵深、自旋 / lateral, depth, spin
   double amb_margin = 6.0, max_wait = 0.05;
   // 巡航平台 / Cruise plateaus
   double plateau_frac = 0.25, plateau_hold = 0.15, plateau_min_speed = 0.4, key_cv = 0.15;
@@ -58,6 +60,8 @@ struct FilterParams
   double hist_dt = 0.02;
   double period_min = 0.8, period_max = 3.0, period_step = 0.1;
   ChassisResponse chassis;
+  PlateShape shape =
+      PROTOTYPE_SHAPE;  ///< 检测器角点对应的关键点 / Keypoints of the corners
 };
 
 /// 时域 h 内的平均中心速度与平均转速 / Mean centre velocity and spin over a horizon.
@@ -87,7 +91,8 @@ class CornerEkf
  public:
   CornerEkf(const FilterParams& p, const Camera& cam) : p_(p), cam_(cam)
   {
-    for (double period = p.period_min; period <= p.period_max + 1e-9; period += p.period_step)
+    for (double period = p.period_min; period <= p.period_max + 1e-9;
+         period += p.period_step)
     {
       periods_.push_back(std::round(period * 100) / 100);
     }
@@ -121,12 +126,14 @@ class CornerEkf
       qc(i) = p_.q_geom;
     }
     qc(SCALE_W) = qc(SCALE_H) = 1e-8;
-    Eigen::Matrix<double, 2 * NX, 2 * NX> m = Eigen::Matrix<double, 2 * NX, 2 * NX>::Zero();
+    Eigen::Matrix<double, 2 * NX, 2 * NX> m =
+        Eigen::Matrix<double, 2 * NX, 2 * NX>::Zero();
     const Mat a = Dynamics(plain);
     m.topLeftCorner<NX, NX>() = -a;
     m.topRightCorner<NX, NX>() = qc.asDiagonal();
     m.bottomRightCorner<NX, NX>() = a.transpose();
-    const Eigen::Matrix<double, 2 * NX, 2 * NX> e = (m * (std::lround(dt * 1e5) * 1e-5)).exp();
+    const Eigen::Matrix<double, 2 * NX, 2 * NX> e =
+        (m * (std::lround(dt * 1e5) * 1e-5)).exp();
     const Mat phi = e.bottomRightCorner<NX, NX>().transpose();
     const Mat q = phi * e.topRightCorner<NX, NX>();
     return cache_[key] = {phi, 0.5 * (q + q.transpose())};
@@ -169,7 +176,7 @@ class CornerEkf
   bool Update(Vec& state, Mat& cov, const Detection& d, const Mat3& r_bw,
               UpdateTerms& u) const
   {
-    const auto object = ObjectPoints(d.type);
+    const auto object = ObjectPoints(d.type, p_.shape);
     Pix measured;
     for (int k = 0; k < 4; ++k)
     {
@@ -180,7 +187,8 @@ class CornerEkf
     double best = std::numeric_limits<double>::infinity();
     for (int p = 0; p < 4; ++p)
     {
-      const double e = (PlateCorners(cam_, r_bw, state, p, object) - measured).cwiseAbs().mean();
+      const double e =
+          (PlateCorners(cam_, r_bw, state, p, object) - measured).cwiseAbs().mean();
       if (e < best)
       {
         best = e;
@@ -204,7 +212,8 @@ class CornerEkf
     Pix noise;
     for (int i = 0; i < 8; ++i)
     {
-      noise(i) = p_.sig_px * p_.sig_px * std::max(1.0, std::abs(u.r(i)) / p_.sig_px / 2.0);
+      noise(i) =
+          p_.sig_px * p_.sig_px * std::max(1.0, std::abs(u.r(i)) / p_.sig_px / 2.0);
     }
     u.S = u.H * cov * u.H.transpose();
     u.S.diagonal() += noise;
@@ -314,8 +323,9 @@ class CornerEkf
   /// 从 v0 出发、保持输入 u 的一阶响应在 [0, h] 上的平均 / Mean first-order response.
   template <int N>
   static Eigen::Matrix<double, N, 1> MeanRate(Eigen::Matrix<double, N, 1> v,
-                                              const Eigen::Matrix<double, N, 1>& u, double tau,
-                                              double a_max, double h, double v_max)
+                                              const Eigen::Matrix<double, N, 1>& u,
+                                              double tau, double a_max, double h,
+                                              double v_max)
   {
     const int n = std::max(2, static_cast<int>(std::ceil(h / 0.002)));
     const double dt = h / n;
@@ -425,7 +435,8 @@ class CornerEkf
       periodic_ = false;
       return;
     }
-    double best_res = std::numeric_limits<double>::infinity(), best_period = 0, best_amp = 0;
+    double best_res = std::numeric_limits<double>::infinity(), best_period = 0,
+           best_amp = 0;
     double ww = 0;
     for (const auto& h : history_)
     {
@@ -452,7 +463,8 @@ class CornerEkf
       }
     }
     const double previous = period_fit_;
-    periodic_ = (1 - best_res / var) >= p_.min_r2 && best_amp >= p_.min_amp && previous > 0 &&
+    periodic_ = (1 - best_res / var) >= p_.min_r2 && best_amp >= p_.min_amp &&
+                previous > 0 &&
                 std::abs(best_period - previous) <= p_.period_tol * previous;
     period_fit_ = best_period;
     if (periodic_ && std::abs(2 * M_PI / best_period - w_) > 1e-9)

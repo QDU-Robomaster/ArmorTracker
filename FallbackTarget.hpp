@@ -117,8 +117,16 @@ struct PlateObservation
 class PlateSolver
 {
  public:
-  PlateSolver(const Camera& cam) : cam_(cam)
+  PlateSolver(const Camera& cam, const Vehicle::PlateShape& shape) : cam_(cam)
   {
+    const auto make = [](double half_width, double half_height)
+    {
+      const auto w = static_cast<float>(half_width);
+      const auto h = static_cast<float>(half_height);
+      return std::vector<cv::Point3f>{{0, w, h}, {0, -w, h}, {0, -w, -h}, {0, w, -h}};
+    };
+    small_ = make(shape.small_half_width, shape.half_height);
+    large_ = make(shape.large_half_width, shape.half_height);
     k_ = (cv::Mat_<double>(3, 3) << cam.fx, 0, cam.cx, 0, cam.fy, cam.cy, 0, 0, 1);
     d_ = (cv::Mat_<double>(1, 5) << cam.dist[0], cam.dist[1], cam.dist[2], cam.dist[3],
           cam.dist[4]);
@@ -133,7 +141,8 @@ class PlateSolver
   {
     std::vector<cv::Point2f> image(corners.begin(), corners.end());
     cv::Vec3d rvec, tvec;
-    if (!cv::solvePnP(Points(large), image, k_, d_, rvec, tvec, false, cv::SOLVEPNP_IPPE) ||
+    if (!cv::solvePnP(Points(large), image, k_, d_, rvec, tvec, false,
+                      cv::SOLVEPNP_IPPE) ||
         !cv::checkRange(rvec) || !cv::checkRange(tvec))
     {
       return false;
@@ -160,10 +169,12 @@ class PlateSolver
   }
 
   /// 板在世界系 (xyz, yaw) 时的角点像素 / Corner pixels of a plate at (xyz, yaw).
-  std::vector<cv::Point2f> Reproject(const Vec3& xyz, double yaw, bool large, Kind kind) const
+  std::vector<cv::Point2f> Reproject(const Vec3& xyz, double yaw, bool large,
+                                     Kind kind) const
   {
     const double tilt = kind == Kind::OUTPOST ? OUTPOST_TILT : Vehicle::ARMOR_TILT;
-    const double s = std::sin(yaw), c = std::cos(yaw), st = std::sin(tilt), ct = std::cos(tilt);
+    const double s = std::sin(yaw), c = std::cos(yaw), st = std::sin(tilt),
+                 ct = std::cos(tilt);
     Mat3 r_armor_world;
     r_armor_world << -s * ct, -c, -s * st, c * ct, -s, c * st, -st, 0, ct;
     const Mat3 r_cb_t = cam_.R_cb.transpose();
@@ -186,18 +197,9 @@ class PlateSolver
   }
 
  private:
-  static const std::vector<cv::Point3f>& Points(bool large)
+  const std::vector<cv::Point3f>& Points(bool large) const
   {
-    static const auto make = [](float half_width)
-    {
-      constexpr float HALF_HEIGHT = 0.028F;
-      return std::vector<cv::Point3f>{{0, half_width, HALF_HEIGHT},
-                                      {0, -half_width, HALF_HEIGHT},
-                                      {0, -half_width, -HALF_HEIGHT},
-                                      {0, half_width, -HALF_HEIGHT}};
-    };
-    static const std::vector<cv::Point3f> SMALL = make(0.135F / 2), LARGE = make(0.230F / 2);
-    return large ? LARGE : SMALL;
+    return large ? large_ : small_;
   }
 
   double SearchYaw(const std::array<cv::Point2f, 4>& corners, bool large, Kind kind,
@@ -227,6 +229,8 @@ class PlateSolver
   }
 
   const Camera cam_;
+  std::vector<cv::Point3f> small_;
+  std::vector<cv::Point3f> large_;
   cv::Mat k_;
   cv::Mat d_;
   Mat3 r_bw_ = Mat3::Identity();
@@ -257,8 +261,11 @@ class FallbackTarget
   };
 
   FallbackTarget(Kind kind, const PlateObservation& obs, double t, const Start& start)
-      : kind_(kind), plates_(kind == Kind::BALANCE ? 2 : 3), t_(t),
-        face_(std::clamp(start.face, 0, plates_ - 1)), height_phase_(start.height_phase),
+      : kind_(kind),
+        plates_(kind == Kind::BALANCE ? 2 : 3),
+        t_(t),
+        face_(std::clamp(start.face, 0, plates_ - 1)),
+        height_phase_(start.height_phase),
         height_phase_valid_(start.height_phase_valid)
   {
     const double r = kind == Kind::BALANCE   ? 0.2
@@ -386,16 +393,16 @@ class FallbackTarget
   const Vec11& State() const { return x_; }
 
   Vec3 Centre() const { return {x_(0), x_(2), x_(4)}; }
-  Vec3 Velocity() const
-  {
-    return {x_(1), x_(3), kind_ == Kind::OUTPOST ? 0.0 : x_(5)};
-  }
+  Vec3 Velocity() const { return {x_(1), x_(3), kind_ == Kind::OUTPOST ? 0.0 : x_(5)}; }
   /// 输出朝向：前哨站转半圈 / Output heading; the outpost turns half a circle.
   double OutputYaw() const
   {
     return kind_ == Kind::OUTPOST ? LimitRad(x_(6) + PI) : LimitRad(x_(6));
   }
-  double OutputDz() const { return kind_ == Kind::OUTPOST ? OUTPOST_HEIGHT_STEP : x_(10); }
+  double OutputDz() const
+  {
+    return kind_ == Kind::OUTPOST ? OUTPOST_HEIGHT_STEP : x_(10);
+  }
 
  private:
   bool OutpostHeightModel() const { return kind_ == Kind::OUTPOST; }
@@ -424,7 +431,10 @@ class FallbackTarget
     }
     std::sort(plates.begin(), plates.end(),
               [](const auto& a, const auto& b)
-              { return XyzToYpd(a.first.template head<3>())[2] < XyzToYpd(b.first.template head<3>())[2]; });
+              {
+                return XyzToYpd(a.first.template head<3>())[2] <
+                       XyzToYpd(b.first.template head<3>())[2];
+              });
     int best = 0;
     double best_error = std::numeric_limits<double>::infinity();
     const int candidates = std::min(3, static_cast<int>(plates.size()));
@@ -433,7 +443,8 @@ class FallbackTarget
       const Vec4& p = plates[i].first;
       const Vec3 ypd = XyzToYpd(p.head<3>());
       const double yaw = OutpostHeightModel() ? OutpostObservedYaw(obs.yaw) : obs.yaw;
-      double error = std::abs(LimitRad(yaw - p(3))) + std::abs(LimitRad(obs.ypd(0) - ypd(0)));
+      double error =
+          std::abs(LimitRad(yaw - p(3))) + std::abs(LimitRad(obs.ypd(0) - ypd(0)));
       if (OutpostHeightModel() && height_phase_valid_)
       {
         error += 2.0 * std::abs(obs.xyz.z() - p(2));
@@ -475,7 +486,8 @@ class FallbackTarget
         const int sign = delta > 0.0 ? 1 : -1;
         for (int phase = 0; phase < 3; ++phase)
         {
-          const double candidate = OutpostHeightOffset(id, phase) - OutpostHeightOffset(face_, phase);
+          const double candidate =
+              OutpostHeightOffset(id, phase) - OutpostHeightOffset(face_, phase);
           const bool candidate_two_step =
               std::abs(std::abs(candidate) - 2.0 * OUTPOST_HEIGHT_STEP) <= 1e-6;
           if (candidate_two_step && (candidate > 0.0 ? 1 : -1) == sign)
@@ -543,7 +555,8 @@ class FallbackTarget
   void UpdateEkf(const PlateObservation& obs, int id)
   {
     const Vec3 centre_before = Centre();
-    const double observed_yaw = OutpostHeightModel() ? OutpostObservedYaw(obs.yaw) : obs.yaw;
+    const double observed_yaw =
+        OutpostHeightModel() ? OutpostObservedYaw(obs.yaw) : obs.yaw;
     const double side_view = std::abs(LimitRad(observed_yaw - BearingYaw(obs.xyz)));
     Vec4 r_diag;
     if (kind_ == Kind::OUTPOST)
@@ -561,13 +574,15 @@ class FallbackTarget
     const Eigen::Matrix<double, 4, 11> h = Jacobian(x_, id);
     const Vec4 z(obs.ypd(0), obs.ypd(1), obs.ypd(2), observed_yaw);
 
-    const Eigen::Matrix<double, 11, 4> k = P_ * h.transpose() * (h * P_ * h.transpose() + r).inverse();
+    const Eigen::Matrix<double, 11, 4> k =
+        P_ * h.transpose() * (h * P_ * h.transpose() + r).inverse();
     const Mat11 ikh = Mat11::Identity() - k * h;
     P_ = ikh * P_ * ikh.transpose() + k * r * k.transpose();
     x_ = x_ + k * Residual(z, Measure(x_, id));
     x_(6) = LimitRad(x_(6));
     const Vec4 residual = Residual(z, Measure(x_, id));
-    const double nis = residual.transpose() * (h * P_ * h.transpose() + r).inverse() * residual;
+    const double nis =
+        residual.transpose() * (h * P_ * h.transpose() + r).inverse() * residual;
     nis_failures_[nis_index_] = nis > 0.711;
     nis_index_ = (nis_index_ + 1) % nis_failures_.size();
 

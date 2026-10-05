@@ -87,7 +87,8 @@ class VehicleFilter
   }
 
  private:
-  Output BootFrame(double t, const Mat3& r_bw, const std::vector<Detection>& dets, double h)
+  Output BootFrame(double t, const Mat3& r_bw, const std::vector<Detection>& dets,
+                   double h)
   {
     if (!boot_.Frame(ekf_, cam_, t, r_bw, dets, ll_frame))
     {
@@ -132,10 +133,12 @@ struct VehicleTarget
 class VehicleEstimator
 {
  public:
-  explicit VehicleEstimator(const Camera& cam, RateMode mode = RateMode::AUTO)
+  explicit VehicleEstimator(const Camera& cam, RateMode mode = RateMode::AUTO,
+                            const PlateShape& shape = PROTOTYPE_SHAPE)
   {
     FilterParams base;
     base.mode = mode;
+    base.shape = shape;
     FilterParams vary = base;
     vary.q_al = 300.0;
     vary.tau_al = 0.25;
@@ -159,8 +162,8 @@ class VehicleEstimator
    * @param dets 本目标这一帧的检测 / This target's detections in the frame
    * @param h 输出速率的平均时域，秒 / Horizon of the reported rates in s
    */
-  VehicleTarget Step(double t, const std::array<double, 4>& q, const std::vector<Detection>& dets,
-                     double h)
+  VehicleTarget Step(double t, const std::array<double, 4>& q,
+                     const std::vector<Detection>& dets, double h)
   {
     const Mat3 r_bw = RotationFromQuaternion(q[0], q[1], q[2], q[3]);
     std::vector<VehicleFilter::Output> outputs;

@@ -82,7 +82,8 @@ class ModelSelector
     std::vector<double> score(filters.size());
     for (std::size_t i = 0; i < filters.size(); ++i)
     {
-      score[i] = sums_[i] + (filters[i].kind == ModelKind::HARM ? params.harm_bonus : 0.0) +
+      score[i] = sums_[i] +
+                 (filters[i].kind == ModelKind::HARM ? params.harm_bonus : 0.0) +
                  (i == 0 ? params.steady_bonus : 0.0);
     }
     int best = allowed[0];

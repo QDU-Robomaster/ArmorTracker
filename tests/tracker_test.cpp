@@ -25,8 +25,8 @@ void Expect(bool condition, const char* message)
   }
 }
 
-const CameraTypes::CameraCalibration CALIBRATION{1440, 1080, 2328.0, 2328.0, 720.0, 540.0,
-                                                 {0.0, 0.0, 0.0, 0.0, 0.0}};
+const CameraTypes::CameraCalibration CALIBRATION{
+    1440, 1080, 2328.0, 2328.0, 720.0, 540.0, {0.0, 0.0, 0.0, 0.0, 0.0}};
 
 Vehicle::Camera MakeCamera()
 {
@@ -45,6 +45,7 @@ struct Truth
   double omega;
   double r_even = 0.25, r_odd = 0.22, dz = 0.05;
   bool large = false;
+  Vehicle::PlateShape shape = LIGHTBAR4_SHAPE;
 
   Vehicle::Vec StateAt(double t) const
   {
@@ -78,8 +79,9 @@ struct Truth
       {
         continue;
       }
-      const Vehicle::Pix p = Vehicle::PlateCorners(cam, Vehicle::Mat3::Identity(), x, k,
-                                                   Vehicle::ObjectPoints(large ? 1 : 0));
+      const Vehicle::Pix p =
+          Vehicle::PlateCorners(cam, Vehicle::Mat3::Identity(), x, k,
+                                Vehicle::ObjectPoints(large ? 1 : 0, shape));
       std::array<Vehicle::Vec2, 4> corners;
       for (int i = 0; i < 4; ++i)
       {
@@ -92,14 +94,16 @@ struct Truth
 };
 
 /// 估计器顺序（左上、右上、右下、左下）转为 AutoAim 顺序（左上、左下、右下、右上）。
-AutoAim::Armor MakeArmor(ArmorNumber number, bool large, const std::array<Vehicle::Vec2, 4>& c)
+AutoAim::Armor MakeArmor(ArmorNumber number, bool large,
+                         const std::array<Vehicle::Vec2, 4>& c)
 {
-  AutoAim::Armor a{ArmorColor::RED, number, large ? ArmorType::LARGE : ArmorType::SMALL, 0.9F,
-                   {}};
+  AutoAim::Armor a{
+      ArmorColor::RED, number, large ? ArmorType::LARGE : ArmorType::SMALL, 0.9F, {}};
   const int order[4] = {0, 3, 2, 1};
   for (int k = 0; k < 4; ++k)
   {
-    a.corners[k] = {static_cast<float>(c[order[k]].x()), static_cast<float>(c[order[k]].y())};
+    a.corners[k] = {static_cast<float>(c[order[k]].x()),
+                    static_cast<float>(c[order[k]].y())};
   }
   return a;
 }
@@ -112,7 +116,7 @@ TrackerSettings Settings(const char* camera)
 void TestVehicleEstimatorConverges()
 {
   const Truth truth{{0.3, 4.0, 0.1}, 0.4, 4.0};
-  Vehicle::VehicleEstimator est(MakeCamera());
+  Vehicle::VehicleEstimator est(MakeCamera(), Vehicle::RateMode::AUTO, LIGHTBAR4_SHAPE);
   std::mt19937 rng(1);
   Vehicle::VehicleTarget out;
   for (int i = 0; i <= 200; ++i)
@@ -126,9 +130,11 @@ void TestVehicleEstimatorConverges()
     out = est.Step(t, {1, 0, 0, 0}, dets, 0.2);
   }
   std::printf("vehicle: centre err %.4f m, v_yaw %.3f rad/s, r1 %.3f r2 %.3f\n",
-              (out.position - truth.centre).norm(), out.v_yaw, out.radius_1, out.radius_2);
+              (out.position - truth.centre).norm(), out.v_yaw, out.radius_1,
+              out.radius_2);
   Expect(out.tracking, "tracking after 2 s");
-  Expect((out.position.head<2>() - truth.centre.head<2>()).norm() < 0.02, "centre within 2 cm");
+  Expect((out.position.head<2>() - truth.centre.head<2>()).norm() < 0.02,
+         "centre within 2 cm");
   Expect(std::abs(out.v_yaw - truth.omega) < 0.3, "spin within 0.3 rad/s");
 }
 
@@ -184,8 +190,8 @@ void TestBalanceFallback()
     }
     out = set.Step(10000ULL * i, {1, 0, 0, 0}, CALIBRATION, armors);
   }
-  std::printf("balance: armors_num %d centre (%.3f, %.3f)\n", out.armors_num, out.position.x(),
-              out.position.y());
+  std::printf("balance: armors_num %d centre (%.3f, %.3f)\n", out.armors_num,
+              out.position.x(), out.position.y());
   Expect(out.tracking && out.armors_num == 2, "large THREE is a two-plate balance robot");
   Expect(std::abs(out.position.y() - balance.centre.y()) < 0.1, "balance centre");
 }
@@ -209,7 +215,8 @@ void TestModule()
         r->targets.push_back(f->target);
       },
       received);
-  AutoAim::RequireTopic<const AutoAim::TrackedFrame*>("mod_tracked").RegisterCallback(callback);
+  AutoAim::RequireTopic<const AutoAim::TrackedFrame*>("mod_tracked")
+      .RegisterCallback(callback);
 
   ImagePool pool(4);
   const Truth truth{{0.0, 4.0, 0.1}, 0.3, 2.0};
@@ -243,7 +250,8 @@ void TestModule()
   }
   std::lock_guard<std::mutex> lock(received->mutex);
   Expect(received->targets.size() == 50, "one tracked frame per detected frame");
-  Expect(received->targets.back().tracking && received->targets.back().id == ArmorNumber::TWO,
+  Expect(received->targets.back().tracking &&
+             received->targets.back().id == ArmorNumber::TWO,
          "tracking number two");
   Expect(received->targets.back().image_timestamp_us == 500000, "IMU timestamp");
   delete tracker;

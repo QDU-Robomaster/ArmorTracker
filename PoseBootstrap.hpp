@@ -79,9 +79,9 @@ class PoseBootstrap
       }
       h.ll += ll_frame;
     }
-    const Hypothesis& best =
-        *std::max_element(hypotheses_.begin(), hypotheses_.end(),
-                          [](const Hypothesis& a, const Hypothesis& b) { return a.ll < b.ll; });
+    const Hypothesis& best = *std::max_element(
+        hypotheses_.begin(), hypotheses_.end(),
+        [](const Hypothesis& a, const Hypothesis& b) { return a.ll < b.ll; });
     ekf.x = best.x;
     ekf.P = best.P;
     return true;
@@ -127,7 +127,7 @@ class PoseBootstrap
   static bool InitialState(const Detection& d, const Camera& cam, const Mat3& r_bw,
                            const FilterParams& p, Vec& x, Mat& cov)
   {
-    const auto object = ObjectPoints(d.type);
+    const auto object = ObjectPoints(d.type, p.shape);
     std::vector<cv::Point3d> obj;
     std::vector<cv::Point2d> img;
     for (int k = 0; k < 4; ++k)
@@ -135,13 +135,15 @@ class PoseBootstrap
       obj.emplace_back(object[k].x(), object[k].y(), object[k].z());
       img.emplace_back(d.corners[k].x(), d.corners[k].y());
     }
-    const cv::Mat k_mat = (cv::Mat_<double>(3, 3) << cam.fx, 0, cam.cx, 0, cam.fy, cam.cy, 0, 0, 1);
-    const cv::Mat d_mat = (cv::Mat_<double>(1, 5) << cam.dist[0], cam.dist[1], cam.dist[2],
-                           cam.dist[3], cam.dist[4]);
+    const cv::Mat k_mat =
+        (cv::Mat_<double>(3, 3) << cam.fx, 0, cam.cx, 0, cam.fy, cam.cy, 0, 0, 1);
+    const cv::Mat d_mat = (cv::Mat_<double>(1, 5) << cam.dist[0], cam.dist[1],
+                           cam.dist[2], cam.dist[3], cam.dist[4]);
     std::vector<cv::Mat> rv, tv;
     cv::Mat err;
-    const int n = cv::solvePnPGeneric(obj, img, k_mat, d_mat, rv, tv, false, cv::SOLVEPNP_IPPE,
-                                      cv::noArray(), cv::noArray(), err);
+    const int n =
+        cv::solvePnPGeneric(obj, img, k_mat, d_mat, rv, tv, false, cv::SOLVEPNP_IPPE,
+                            cv::noArray(), cv::noArray(), err);
     if (n < 1)
     {
       return false;
