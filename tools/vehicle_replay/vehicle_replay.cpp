@@ -1,7 +1,7 @@
 // Replay recorded detections and gimbal IMU through Vehicle::VehicleEstimator and print the target per frame.
 //
 //   vehicle_replay --det detector.tsv --imu imu.csv --number N --cam fx,fy,cx,cy[,k1,k2,p1,p2,k3]
-//                [--h 0.3] [--mode auto|cv|acc|kb] [--type T] [--float 1]
+//                [--h 0.3] [--mode auto|cv|acc|kb] [--type T] [--float 1] [--trackset 1]
 //
 // detector.tsv: the recording format of the replay data package (header with image_timestamp_us, number, type,
 // p0_x .. p3_y). imu.csv: timestamp_us,qw,qx,qy,qz,... with or without a header; the attitude used for a frame is
@@ -16,6 +16,7 @@
 #include <string>
 #include <vector>
 
+#include "TrackSet.hpp"
 #include "VehicleEstimator.hpp"
 
 using namespace Vehicle;
@@ -97,6 +98,42 @@ int main(int argc, char** argv) {
       d.corners[k] = Vec2(u, v);
     }
     frames[std::atoll(c[col["image_timestamp_us"]].c_str())].push_back(d);
+  }
+
+  // --trackset 1：经 TrackSet（模块的路径：AutoAim 角点顺序、相对时间、按距离的时域）回放，
+  // 只输出位置与正对板。/ Replay through TrackSet, the Module's path; prints position
+  // and face only.
+  if (arg.count("--trackset") && arg["--trackset"] == "1")
+  {
+    const CameraTypes::CameraCalibration calibration{
+        1440, 1080, cam.fx, cam.fy, cam.cx, cam.cy, cam.dist};
+    TrackSet set({"replay", {1, 0, 0, 0}, {0, 0, 0}, number, 2, 15, 75, 0.07, 23.0, SelectWeights{}});
+    std::printf("ts_us\ttracking\tx\ty\tz\tface\n");
+    for (const auto& fr : frames)
+    {
+      const long long ts = fr.first;
+      size_t i = std::upper_bound(imu.ts.begin(), imu.ts.end(), ts) - imu.ts.begin();
+      i = i == 0 ? 0 : i - 1;
+      std::vector<AutoAim::Armor> armors;
+      for (const Detection& d : fr.second)
+      {
+        AutoAim::Armor a{ArmorColor::RED, static_cast<ArmorNumber>(number),
+                         d.type == 1 ? ArmorType::LARGE : ArmorType::SMALL, 1.0F, {}};
+        const int order[4] = {0, 3, 2, 1};  // 估计器顺序转 AutoAim 顺序 / to AutoAim order
+        for (int k = 0; k < 4; ++k)
+        {
+          a.corners[k] = {static_cast<float>(d.corners[order[k]].x()),
+                          static_cast<float>(d.corners[order[k]].y())};
+        }
+        armors.push_back(a);
+      }
+      const std::array<float, 4> q{static_cast<float>(imu.q[i][0]), static_cast<float>(imu.q[i][1]),
+                                   static_cast<float>(imu.q[i][2]), static_cast<float>(imu.q[i][3])};
+      const ArmorTrackerTarget o = set.Step(static_cast<uint64_t>(ts), q, calibration, armors);
+      std::printf("%lld\t%d\t%.9f\t%.9f\t%.9f\t%d\n", ts, o.tracking ? 1 : 0, o.position.x(),
+                  o.position.y(), o.position.z(), o.tracked_face_index);
+    }
+    return 0;
   }
 
   VehicleEstimator est(cam, mode);
