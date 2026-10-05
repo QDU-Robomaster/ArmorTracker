@@ -62,11 +62,11 @@ struct TrackerSettings
 };
 
 /**
- * @brief 多目标管理：每个编号一个槽，四块板的整车用 VehicleEstimator，前哨站、基地、
- *        平衡步兵用兜底 EKF；槽按状态机推进，按得分选出要打的目标。
+ * @brief 多目标管理：每个编号一个槽，四块板的整车用 VehicleEstimator，前哨站与基地用
+ *        兜底 EKF；槽按状态机推进，按得分选出要打的目标。
  *        Multi-target management: one slot per number; four-plate vehicles use the
- *        VehicleEstimator, outpost, base and balance infantry the fallback EKF. Slots
- *        follow a state machine and the best-scoring one is the target.
+ *        VehicleEstimator, the outpost and the base the fallback EKF. Slots follow a
+ *        state machine and the best-scoring one is the target.
  */
 class TrackSet
 {
@@ -156,7 +156,6 @@ class TrackSet
   struct Slot
   {
     TrackState state = TrackState::LOST;
-    bool large = false;
     std::optional<Vehicle::VehicleEstimator> vehicle;
     Vehicle::VehicleTarget vehicle_target;
     std::optional<Fallback::FallbackTarget> fallback;
@@ -215,16 +214,17 @@ class TrackSet
     slot.score = -std::numeric_limits<double>::infinity();
   }
 
-  /// 1 号与基地只有大板 / Number one and the base carry only large plates.
-  static bool Large(const AutoAim::Armor& a)
+  /// 板的大小由编号决定：1 号与基地为大板，其余为小板，不看检测器的大小输出。
+  /// The plate size follows the number: number one and the base are large, the rest
+  /// small, regardless of the detector's size output.
+  static bool Large(ArmorNumber n)
   {
-    return a.type == ArmorType::LARGE || a.number == ArmorNumber::ONE ||
-           a.number == ArmorNumber::BASE;
+    return n == ArmorNumber::ONE || n == ArmorNumber::BASE;
   }
 
-  /// 兜底目标的种类；整车估计器能处理的返回空 / Fallback kind, or none for the vehicle
-  /// estimator.
-  static std::optional<Fallback::Kind> FallbackKind(ArmorNumber n, bool large)
+  /// 兜底目标的种类；四块板的整车（含平衡步兵）返回空 / Fallback kind, or none for
+  /// four-plate vehicles (balance infantry included).
+  static std::optional<Fallback::Kind> FallbackKind(ArmorNumber n)
   {
     if (n == ArmorNumber::OUTPOST)
     {
@@ -233,11 +233,6 @@ class TrackSet
     if (n == ArmorNumber::BASE)
     {
       return Fallback::Kind::BASE;
-    }
-    if (large &&
-        (n == ArmorNumber::THREE || n == ArmorNumber::FOUR || n == ArmorNumber::FIVE))
-    {
-      return Fallback::Kind::BALANCE;  // 两块大板的平衡步兵 / Two-plate balance robot
     }
     return std::nullopt;
   }
@@ -280,23 +275,12 @@ class TrackSet
       slot.state = TrackState::LOST;  // 太久没处理 / Too long since the last frame
     }
     slot.last_t = t;
-    if (!slot.Initialized() && !dets.empty())
-    {
-      slot.large = Large(*dets.front());
-    }
-    std::vector<const AutoAim::Armor*> same_size;
-    for (const AutoAim::Armor* a : dets)
-    {
-      if (Large(*a) == slot.large)
-      {
-        same_size.push_back(a);
-      }
-    }
-    const auto kind = FallbackKind(n, slot.large);
-    const bool found = kind ? UpdateFallback(slot, *kind, same_size, t)
-                            : UpdateVehicle(slot, same_size, t);
+    const auto kind = FallbackKind(n);
+    const bool found = kind ? UpdateFallback(slot, *kind, Large(n), dets, t)
+                            : UpdateVehicle(slot, Large(n), dets, t);
     Advance(slot, found);
-    // 状态机只决定能否被选为目标；整车估计器连续 2 s 没看到才丢弃，丢失后由它自己重新起步。
+    // 状态机只决定能否被选为目标；整车估计器连续 2 s
+    // 没看到才丢弃，丢失后由它自己重新起步。
     //
     // The state machine only decides selectability; a vehicle estimator is dropped after
     // 2 s unseen and otherwise reboots itself after a loss.
@@ -313,7 +297,8 @@ class TrackSet
     slot.score = Score(slot);
   }
 
-  bool UpdateVehicle(Slot& slot, const std::vector<const AutoAim::Armor*>& dets, double t)
+  bool UpdateVehicle(Slot& slot, bool large,
+                     const std::vector<const AutoAim::Armor*>& dets, double t)
   {
     if (!slot.vehicle)
     {
@@ -332,7 +317,7 @@ class TrackSet
       {
         d.corners[k] = {c[k].x, c[k].y};
       }
-      d.type = slot.large ? 1 : 0;
+      d.type = large ? 1 : 0;
       input.push_back(d);
     }
     // 速率取帧到命中的平均 / Rates averaged over frame-to-impact.
@@ -348,7 +333,7 @@ class TrackSet
     return !dets.empty() && slot.vehicle_target.tracking;
   }
 
-  bool UpdateFallback(Slot& slot, Fallback::Kind kind,
+  bool UpdateFallback(Slot& slot, Fallback::Kind kind, bool large,
                       const std::vector<const AutoAim::Armor*>& dets, double t)
   {
     if (slot.fallback && slot.fallback->HealthFailed())
@@ -358,7 +343,7 @@ class TrackSet
     bool found = false;
     if (!slot.fallback)
     {
-      found = StartFallback(slot, kind, dets, t);
+      found = StartFallback(slot, kind, large, dets, t);
     }
     else if (!dets.empty())
     {
@@ -366,7 +351,7 @@ class TrackSet
       for (const AutoAim::Armor* a : dets)
       {
         Fallback::PlateObservation obs;
-        if (solver_->Solve(EstimatorCorners(*a), slot.large, kind, obs))
+        if (solver_->Solve(EstimatorCorners(*a), large, kind, obs))
         {
           slot.fallback->Update(obs);
           found = true;
@@ -380,13 +365,13 @@ class TrackSet
     if (slot.fallback && slot.fallback->HealthFailed())
     {
       slot.fallback.reset();
-      found = StartFallback(slot, kind, dets, t);
+      found = StartFallback(slot, kind, large, dets, t);
     }
     return found;
   }
 
   /// 用最靠近主点的检测起始 / Start from the detection nearest the principal point.
-  bool StartFallback(Slot& slot, Fallback::Kind kind,
+  bool StartFallback(Slot& slot, Fallback::Kind kind, bool large,
                      const std::vector<const AutoAim::Armor*>& dets, double t)
   {
     const AutoAim::Armor* nearest = nullptr;
@@ -404,7 +389,7 @@ class TrackSet
     }
     Fallback::PlateObservation obs;
     if (nearest == nullptr ||
-        !solver_->Solve(EstimatorCorners(*nearest), slot.large, kind, obs))
+        !solver_->Solve(EstimatorCorners(*nearest), large, kind, obs))
     {
       return false;
     }

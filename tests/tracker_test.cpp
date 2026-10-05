@@ -1,7 +1,7 @@
-// 合成场景测试：整车估计器收敛、多目标选择与换目标、平衡步兵兜底、模块接线。
+// 合成场景测试：整车估计器收敛、多目标选择与换目标、按编号定大小板、基地兜底、模块接线。
 //
-// Synthetic tests: vehicle estimator convergence, target selection and switching, the
-// balance-infantry fallback, and the Module wiring.
+// Synthetic tests: vehicle estimator convergence, target selection and switching, plate
+// size by number, the base fallback, and the Module wiring.
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -45,6 +45,7 @@ struct Truth
   double omega;
   double r_even = 0.25, r_odd = 0.22, dz = 0.05;
   bool large = false;
+  int plates = 4;  ///< 基地为 3 / 3 for the base
   Vehicle::PlateShape shape = LIGHTBAR4_SHAPE;
 
   Vehicle::Vec StateAt(double t) const
@@ -68,20 +69,27 @@ struct Truth
     std::normal_distribution<double> noise(0.0, 0.3);
     const Vehicle::Vec x = StateAt(t);
     const Vehicle::Camera cam = MakeCamera();
+    const auto object = Vehicle::ObjectPoints(large ? 1 : 0, shape);
     std::vector<std::array<Vehicle::Vec2, 4>> out;
-    for (int k = 0; k < 4; ++k)
+    for (int k = 0; k < plates; ++k)
     {
-      const double a = x(Vehicle::YAW) + k * Vehicle::HALF_PI;
-      const double r = k % 2 ? r_odd : r_even;
-      const Vehicle::Vec2 c(centre.x() + r * std::sin(a), centre.y() - r * std::cos(a));
+      const double a = x(Vehicle::YAW) + k * 2.0 * M_PI / plates;
+      const bool odd = plates == 4 && k % 2 == 1;
+      const double r = odd ? r_odd : r_even;
+      const Vehicle::Vec3 c(centre.x() + r * std::sin(a), centre.y() - r * std::cos(a),
+                            centre.z() + (odd ? dz : 0.0));
       const Vehicle::Vec2 n(std::sin(a), -std::cos(a));
-      if (n.dot(-c / c.norm()) < 0.3)
+      if (n.dot(-c.head<2>() / c.head<2>().norm()) < 0.3)
       {
         continue;
       }
-      const Vehicle::Pix p =
-          Vehicle::PlateCorners(cam, Vehicle::Mat3::Identity(), x, k,
-                                Vehicle::ObjectPoints(large ? 1 : 0, shape));
+      const Vehicle::Mat3 rot = Vehicle::ArmorRotation(a);
+      std::array<Vehicle::Vec3, 4> points;
+      for (int i = 0; i < 4; ++i)
+      {
+        points[i] = c + rot * object[i];
+      }
+      const Vehicle::Pix p = Vehicle::Project(cam, Vehicle::Mat3::Identity(), points);
       std::array<Vehicle::Vec2, 4> corners;
       for (int i = 0; i < 4; ++i)
       {
@@ -172,28 +180,54 @@ void TestSelectionAndSwitching()
   Expect(std::abs(out.position.y() - far.centre.y()) < 0.1, "far target position");
 }
 
-void TestBalanceFallback()
+void TestSizeByNumber()
 {
-  TrackSet set(Settings("bal"));
-  Truth balance{{0.0, 3.0, 0.15}, 0.0, 0.0};
-  balance.r_even = balance.r_odd = 0.2;
-  balance.dz = 0.0;
-  balance.large = true;
+  // 检测器把 3 号报成大板：仍按四块小板的整车跟踪 / The detector reports number three as
+  // large: it is still tracked as a four-plate vehicle with small plates.
+  TrackSet set(Settings("size"));
+  const Truth infantry{{0.0, 3.0, 0.15}, 0.2, 3.0};
   std::mt19937 rng(3);
   ArmorTrackerTarget out;
   for (int i = 0; i < 100; ++i)
   {
     std::vector<AutoAim::Armor> armors;
-    for (const auto& c : balance.Visible(0.01 * i, rng))
+    for (const auto& c : infantry.Visible(0.01 * i, rng))
     {
       armors.push_back(MakeArmor(ArmorNumber::THREE, true, c));
     }
     out = set.Step(10000ULL * i, {1, 0, 0, 0}, CALIBRATION, armors);
   }
-  std::printf("balance: armors_num %d centre (%.3f, %.3f)\n", out.armors_num,
+  std::printf("size: armors_num %d centre err %.4f m\n", out.armors_num,
+              (out.position.head<2>() - infantry.centre.head<2>()).norm());
+  Expect(out.tracking && out.armors_num == 4, "number three is a four-plate vehicle");
+  Expect((out.position.head<2>() - infantry.centre.head<2>()).norm() < 0.02,
+         "small-plate geometry despite the size output");
+}
+
+void TestBaseFallback()
+{
+  Truth base{{0.2, 5.0, 0.3}, 0.0, 0.0};
+  base.plates = 3;
+  base.r_even = base.r_odd = 0.3205;
+  base.dz = 0.0;
+  base.large = true;
+  TrackSet set(Settings("base"));
+  std::mt19937 rng(5);
+  ArmorTrackerTarget out;
+  for (int i = 0; i < 100; ++i)
+  {
+    std::vector<AutoAim::Armor> armors;
+    for (const auto& c : base.Visible(0.01 * i, rng))
+    {
+      armors.push_back(MakeArmor(ArmorNumber::BASE, false, c));
+    }
+    out = set.Step(10000ULL * i, {1, 0, 0, 0}, CALIBRATION, armors);
+  }
+  std::printf("base: armors_num %d centre (%.3f, %.3f)\n", out.armors_num,
               out.position.x(), out.position.y());
-  Expect(out.tracking && out.armors_num == 2, "large THREE is a two-plate balance robot");
-  Expect(std::abs(out.position.y() - balance.centre.y()) < 0.1, "balance centre");
+  Expect(out.tracking && out.armors_num == 3,
+         "the base is a three-plate fallback target");
+  Expect((out.position.head<2>() - base.centre.head<2>()).norm() < 0.1, "base centre");
 }
 
 void TestModule()
@@ -263,7 +297,8 @@ int main()
   LibXR::PlatformInit();
   TestVehicleEstimatorConverges();
   TestSelectionAndSwitching();
-  TestBalanceFallback();
+  TestSizeByNumber();
+  TestBaseFallback();
   TestModule();
   std::puts("armor_tracker_test passed");
   return 0;

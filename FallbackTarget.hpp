@@ -12,14 +12,13 @@
 #include "VehicleGeometry.hpp"
 
 /**
- * @brief 整车估计器不覆盖的目标的兜底跟踪：前哨站（三块板，高度相位）、基地（三块板）、
- *        平衡步兵（两块大板）。逐块板 PnP 后用 11 维 EKF 跟踪中心、朝向与半径。算法沿用
- *        原 ArmorTracker（移植自 sp_vision），只做了清理。
- *        Fallback tracking of targets the vehicle estimator does not model: outpost
- *        (three plates with a height phase), base (three plates) and balance infantry
- *        (two large plates). Per-plate PnP feeds an 11-state EKF of centre, heading and
- *        radius. The algorithm is the former ArmorTracker's (ported from sp_vision),
- *        only cleaned up.
+ * @brief 整车估计器不覆盖的目标的兜底跟踪：前哨站（三块板，高度相位）与基地（三块板）。
+ *        逐块板 PnP 后用 11 维 EKF 跟踪中心、朝向与半径。算法沿用原 ArmorTracker（移植自
+ *        sp_vision），只做了清理。
+ *        Fallback tracking of targets the vehicle estimator does not model: the outpost
+ *        (three plates with a height phase) and the base (three plates). Per-plate PnP
+ *        feeds an 11-state EKF of centre, heading and radius. The algorithm is the former
+ *        ArmorTracker's (ported from sp_vision), only cleaned up.
  */
 namespace Fallback
 {
@@ -67,7 +66,6 @@ inline Mat3 XyzToYpdJacobian(const Vec3& p)
 /// 兜底目标的种类 / Kinds of fallback targets.
 enum class Kind : uint8_t
 {
-  BALANCE,  ///< 两块大板，半径 0.2 m / Two large plates, radius 0.2 m
   OUTPOST,  ///< 三块板，半径 0.2765 m，三档高度 / Three plates at three heights
   BASE,     ///< 三块板，半径 0.3205 m / Three plates
 };
@@ -108,11 +106,9 @@ struct PlateObservation
 };
 
 /**
- * @brief 单块板 PnP（IPPE），朝向在机体前向 ±70° 内按 1° 搜索重投影误差最小者（平衡步兵
- *        直接用 PnP 朝向）。
+ * @brief 单块板 PnP（IPPE），朝向在机体前向 ±70° 内按 1° 搜索重投影误差最小者。
  *        Single-plate PnP (IPPE); the heading is searched in 1° steps within ±70° of
- *        the body forward for the smallest reprojection error (balance infantry use the
- *        PnP heading).
+ *        the body forward for the smallest reprojection error.
  */
 class PlateSolver
 {
@@ -161,10 +157,7 @@ class PlateSolver
     }
     out.yaw = BearingYaw(r_bw_ * cam_.R_cb * r_armor_camera.col(0));
     out.ypd = XyzToYpd(out.xyz);
-    if (kind != Kind::BALANCE)
-    {
-      out.yaw = SearchYaw(corners, large, kind, out.xyz, out.yaw);
-    }
+    out.yaw = SearchYaw(corners, large, kind, out.xyz, out.yaw);
     return true;
   }
 
@@ -262,15 +255,13 @@ class FallbackTarget
 
   FallbackTarget(Kind kind, const PlateObservation& obs, double t, const Start& start)
       : kind_(kind),
-        plates_(kind == Kind::BALANCE ? 2 : 3),
+        plates_(3),
         t_(t),
         face_(std::clamp(start.face, 0, plates_ - 1)),
         height_phase_(start.height_phase),
         height_phase_valid_(start.height_phase_valid)
   {
-    const double r = kind == Kind::BALANCE   ? 0.2
-                     : kind == Kind::OUTPOST ? OUTPOST_RADIUS
-                                             : 0.3205;
+    const double r = kind == Kind::OUTPOST ? OUTPOST_RADIUS : 0.3205;
     const double yaw = kind == Kind::OUTPOST ? OutpostObservedYaw(obs.yaw) : obs.yaw;
     double cx = obs.xyz.x() - r * std::sin(yaw);
     double cy = obs.xyz.y() + r * std::cos(yaw);
@@ -289,11 +280,7 @@ class FallbackTarget
     }
     x_ << cx, 0.0, cy, 0.0, cz, 0.0, yaw, 0.0, r, 0.0, 0.0;
     Vec11 p0;
-    if (kind == Kind::BALANCE)
-    {
-      p0 << 1, 64, 1, 64, 1, 64, 0.4, 100, 1, 1, 1;
-    }
-    else if (kind == Kind::OUTPOST)
+    if (kind == Kind::OUTPOST)
     {
       p0 << 1, 64, 1, 64, 1, 81, 0.4, 100, 1e-4, 0, 0;
     }

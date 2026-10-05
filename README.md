@@ -10,9 +10,9 @@ ArmorTracker subscribes to `<camera>_detected`, assigns armors to one track slot
 
 ## 2. 整车估计器 / Vehicle Estimator
 
-四块板的车（步兵、英雄、哨兵、工程）由 `Vehicle::VehicleEstimator` 估计。它按 aasim `docs/glr_estimator.md` 重新实现了原型 aaest：
+四块板的车（步兵与平衡步兵、英雄、哨兵、工程）由 `Vehicle::VehicleEstimator` 估计。它按 aasim `docs/glr_estimator.md` 重新实现了原型 aaest：
 
-Four-plate vehicles (infantry, hero, sentry, engineer) are estimated by `Vehicle::VehicleEstimator`, a re-implementation of the prototype aaest following aasim `docs/glr_estimator.md`:
+Four-plate vehicles (infantry including balance infantry, hero, sentry, engineer) are estimated by `Vehicle::VehicleEstimator`, a re-implementation of the prototype aaest following aasim `docs/glr_estimator.md`:
 
 | 文件 / File | 内容 / Content |
 | --- | --- |
@@ -33,15 +33,15 @@ The reported velocity and spin are means over the next h seconds, h = `latency_s
 
 ## 3. 兜底 EKF / Fallback EKF
 
-前哨站（三块板，三档高度）、基地（三块板）和平衡步兵（3、4、5 号的大板，两块板）不是四块板的车，由 `FallbackTarget.hpp` 跟踪：逐块板 IPPE 求位姿，朝向在机体前向 ±70° 内按 1° 搜索重投影误差最小者，再用 11 维 EKF 跟踪中心、速度、朝向、转速和半径。前哨站按换面时的高度跳变确定高度相位，丢失后用上一次的中心重新起始。
+前哨站（三块板，三档高度）和基地（三块板）不是四块板的车，由 `FallbackTarget.hpp` 跟踪：逐块板 IPPE 求位姿，朝向在机体前向 ±70° 内按 1° 搜索重投影误差最小者，再用 11 维 EKF 跟踪中心、速度、朝向、转速和半径。前哨站按换面时的高度跳变确定高度相位，丢失后用上一次的中心重新起始。
 
-The outpost (three plates at three heights), the base (three plates) and balance infantry (large plates on numbers 3, 4, 5; two plates) are not four-plate vehicles and are tracked by `FallbackTarget.hpp`: IPPE per plate, the heading searched in 1° steps within ±70° of the body forward for the smallest reprojection error, then an 11-state EKF of centre, velocity, heading, spin and radius. The outpost's height phase comes from the height jump at a face change, and after a loss it restarts from the previous centre.
+The outpost (three plates at three heights) and the base (three plates) are not four-plate vehicles and are tracked by `FallbackTarget.hpp`: IPPE per plate, the heading searched in 1° steps within ±70° of the body forward for the smallest reprojection error, then an 11-state EKF of centre, velocity, heading, spin and radius. The outpost's height phase comes from the height jump at a face change, and after a loss it restarts from the previous centre.
 
 ## 4. 目标管理 / Target Management
 
-`TrackSet.hpp` 为编号 1–5、前哨站、哨兵、基地各维护一个槽。1 号和基地一律按大板处理；槽的大小板在起始时确定，之后大小不同的检测不进入该槽。
+`TrackSet.hpp` 为编号 1–5、前哨站、哨兵、基地各维护一个槽。板的大小由编号决定：1 号和基地为大板，其余为小板，不看检测器的大小输出。
 
-`TrackSet.hpp` keeps one slot each for numbers 1–5, the outpost, the sentry and the base. Number 1 and the base always count as large; a slot's plate size is fixed when it starts and detections of the other size are not fed to it.
+`TrackSet.hpp` keeps one slot each for numbers 1–5, the outpost, the sentry and the base. The plate size follows the number: number 1 and the base are large, the rest small, regardless of the detector's size output.
 
 槽的状态：`LOST` → 看到即 `DETECTING` → 连续看到 `min_detect_count` 帧为 `TRACKING` → 没看到为 `TEMP_LOST` → 连续 `max_temp_lost` 帧（前哨站 `outpost_max_temp_lost`）没看到回到 `LOST`。状态只决定能否被选中；整车估计器连续 2 s 没看到才丢弃，兜底目标在发散或 NIS 连续超限时重置。
 
@@ -92,9 +92,9 @@ modules:
 
 ## 7. 测试 / Tests
 
-`tests/tracker_test.cpp` 用合成的车辆检测检查：整车估计器在转动目标上收敛（中心 < 2 cm、转速 < 0.3 rad/s）、两个目标中选近的并在其消失后换到另一个、大板 3 号按平衡步兵兜底、模块每收一帧发一帧。
+`tests/tracker_test.cpp` 用合成的车辆检测检查：整车估计器在转动目标上收敛（中心 < 2 cm、转速 < 0.3 rad/s）、两个目标中选近的并在其消失后换到另一个、检测器把 3 号报成大板时仍按小板整车跟踪、基地按三块板兜底、模块每收一帧发一帧。
 
-`tests/tracker_test.cpp` checks with synthetic vehicle detections that the vehicle estimator converges on a spinning target (centre < 2 cm, spin < 0.3 rad/s), the nearer of two targets is chosen and the other takes over when it disappears, a large number 3 falls back to balance infantry, and the Module publishes one frame per frame.
+`tests/tracker_test.cpp` checks with synthetic vehicle detections that the vehicle estimator converges on a spinning target (centre < 2 cm, spin < 0.3 rad/s), the nearer of two targets is chosen and the other takes over when it disappears, number 3 reported as large is still tracked as a small-plate vehicle, the base falls back to a three-plate target, and the Module publishes one frame per frame.
 
 ## 8. 依赖 / Dependencies
 
