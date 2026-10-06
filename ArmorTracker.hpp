@@ -2,7 +2,7 @@
 
 // clang-format off
 /* === MODULE MANIFEST V2 ===
-module_description: 装甲板跟踪：四块板的整车用整车估计器，其余用兜底 EKF，多目标中选出要打的一个，发布跟踪帧 / Armor tracking: the vehicle estimator for four-plate vehicles and a fallback EKF for the rest; picks one of several targets and publishes tracked frames
+module_description: 装甲板跟踪：四块板的整车用整车估计器，其余用兜底 EKF，多目标中选出要打的一个，发布跟踪帧 / Armor tracking with the vehicle estimator for four-plate vehicles and a fallback EKF for the rest; picks one of several targets and publishes tracked frames
 depends:
 - id: QDU-Robomaster/CameraBase
   ref: same-or-dev
