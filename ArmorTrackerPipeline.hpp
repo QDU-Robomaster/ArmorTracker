@@ -13,6 +13,8 @@
 #include <string>
 #include <vector>
 
+#include "ramfs.hpp"
+
 template <CameraTypes::FrameLayout FrameLayoutV>
 armor_tracker_detail::Config ArmorTracker<FrameLayoutV>::BuildTrackerConfig() const
 {
@@ -56,9 +58,10 @@ armor_tracker_detail::Config ArmorTracker<FrameLayoutV>::BuildTrackerConfig() co
 }
 
 template <CameraTypes::FrameLayout FrameLayoutV>
-ArmorTracker<FrameLayoutV>::ArmorTracker(LibXR::HardwareContainer& hw,
-                                         LibXR::ApplicationManager&, Config cfg,
-                                         FrameSync* sync)
+ArmorTracker<FrameLayoutV>::ArmorTracker(
+      LibXR::RamFS& ramfs,
+      FrameSync& sync,
+      Config cfg)
     : cfg_(std::move(cfg)), calibration_(CopyCalibration(sync))
 {
   armor_detector_domain_.emplace("armor_detector");
@@ -88,17 +91,9 @@ ArmorTracker<FrameLayoutV>::ArmorTracker(LibXR::HardwareContainer& hw,
   }
   tracker_.Configure(BuildTrackerConfig());
   preview_.Start(cfg_.preview);
-  hw.template FindOrExit<LibXR::RamFS>({"ramfs"})->Add(*cmd_file_);
+  ramfs.Add(*cmd_file_);
   std::thread(TrackerWorkerThreadFun, this).detach();
   SubscribeDetectorTopic();
-}
-
-template <CameraTypes::FrameLayout FrameLayoutV>
-ArmorTracker<FrameLayoutV>::ArmorTracker(LibXR::HardwareContainer& hw,
-                                         LibXR::ApplicationManager& app, Config cfg,
-                                         FrameSync& sync)
-    : ArmorTracker(hw, app, std::move(cfg), &sync)
-{
 }
 
 template <CameraTypes::FrameLayout FrameLayoutV>
@@ -255,6 +250,11 @@ int ArmorTracker<FrameLayoutV>::CommandFun(ArmorTracker<FrameLayoutV>* self, int
                          self->cfg_.tracker.target_select.temp_lost_scale);
     TRACKER_STDIO_PRINTF("      switch_margin: %f\r\n",
                          self->cfg_.tracker.target_select.switch_margin);
+    TRACKER_STDIO_PRINTF("    use_aaest: %d\r\n",
+                         static_cast<int>(self->cfg_.tracker.use_aaest));
+    TRACKER_STDIO_PRINTF("    aaest_latency_s: %f\r\n", self->cfg_.tracker.aaest_latency_s);
+    TRACKER_STDIO_PRINTF("    aaest_bullet_speed_m_s: %f\r\n",
+                         self->cfg_.tracker.aaest_bullet_speed_m_s);
     TRACKER_STDIO_PRINT("  extrinsic:\r\n");
     TRACKER_STDIO_PRINT("    camera_mount_to_body:\r\n");
     TRACKER_STDIO_PRINT("      rotation:\r\n");

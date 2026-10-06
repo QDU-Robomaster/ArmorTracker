@@ -320,9 +320,8 @@ inline Eigen::Matrix3d CameraToBodyRotationFromMountExtrinsic(
  * @brief Convert the published gimbal IMU attitude into tracker inertial axes.
  *
  * The `gimbal_quat` ABI is already expressed as the public body frame B
- * attitude (`x` right, `y` forward, `z` up). Board-specific IMU mounting
- * corrections belong before AHRS, e.g. in the BMI088 rotation config, so the
- * tracker must not add another fixed basis rotation here.
+ * attitude (`x` right, `y` forward, `z` up), so the quaternion is normalized and
+ * converted to a matrix directly.
  */
 inline Eigen::Matrix3d BodyToWorldRotationFromImu(const Eigen::Quaterniond& q)
 {
@@ -393,8 +392,10 @@ class Solver
                                         config.camera_mount_to_body_translation[2]);
   }
 
-  /** Return whether this solver can consume the configured distortion model
-   * directly. */
+  /**
+   * @brief Return whether this solver can consume the configured distortion model
+   *        directly.
+   */
   [[nodiscard]] bool CameraModelSupported() const noexcept
   {
     return camera_model_supported_;
@@ -524,7 +525,7 @@ class Solver
   {
     if (name == ArmorName::OUTPOST)
     {
-      // preview 使用 Webots 可见贴纸几何，而不是 PnP 灯条面。
+      // preview 使用 Webots 可见贴纸几何。
       const double preview_yaw = LimitRad(yaw + kPi);
       return ReprojectArmorObjectPoints(xyz_in_world, preview_yaw, -kOutpostArmorTilt,
                                         OutpostVisibleFacePointsMirroredX());
