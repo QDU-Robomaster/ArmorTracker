@@ -123,9 +123,10 @@ class ArmorTracker
     AutoAim::TrackedFrame tracked;
     tracked.detected = std::move(detected);
     const AutoAim::SyncedFrame& synced = tracked.detected.synced;
-    tracked.target = tracks_.Step(static_cast<uint64_t>(synced.imu.timestamp_us),
-                                  synced.imu.rotation_wxyz, *synced.image->calibration,
-                                  tracked.detected.armors);
+    tracked.target =
+        tracks_.Step(static_cast<uint64_t>(synced.imu.timestamp_us),
+                     synced.imu.rotation_wxyz, synced.imu.angular_velocity_xyz,
+                     *synced.image->calibration, tracked.detected.armors);
     tracks_.WorldToCamera(tracked.output_to_camera_rotation,
                           tracked.output_to_camera_translation);
     const AutoAim::TrackedFrame* payload = &tracked;

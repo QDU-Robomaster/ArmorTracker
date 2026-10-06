@@ -16,7 +16,7 @@
  */
 namespace Vehicle
 {
-/// 15 维状态的下标 / Indices of the 15-dimensional state.
+/// 16 维状态的下标 / Indices of the 16-dimensional state.
 enum State : int
 {
   CX = 0,  ///< 中心 x / Centre x
@@ -34,7 +34,8 @@ enum State : int
   DZ = 12,       ///< 奇数板高度差 / Odd-plate height offset
   SCALE_W = 13,  ///< 关键点横向尺度 / Keypoint lateral scale
   SCALE_H = 14,  ///< 关键点纵向尺度 / Keypoint vertical scale
-  NX = 15,
+  DELAY = 15,    ///< 图像相对姿态采样的时间偏差，秒 / Image delay against the attitude, s
+  NX = 16,
 };
 
 using Vec = Eigen::Matrix<double, NX, 1>;

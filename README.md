@@ -16,7 +16,7 @@ Four-plate vehicles (infantry including balance infantry, hero, sentry, engineer
 
 | 文件 / File | 内容 / Content |
 | --- | --- |
-| `VehicleGeometry.hpp` | 15 维状态、相机投影、装甲板几何 / 15-state layout, projection, plate geometry |
+| `VehicleGeometry.hpp` | 16 维状态（含图像时间偏差）、相机投影、装甲板几何 / 16-state layout (with the image delay), projection, plate geometry |
 | `CornerEkf.hpp` | 以四个角点为观测的 EKF，精确离散化，谐振子自旋，预测速率 / Corner-level EKF with exact discretisation, harmonic spin and predicted rates |
 | `ManeuverDetector.hpp` | GLR 换档检测：中心加速度与角加速度的阶跃 / GLR step detection of the centre and spin accelerations |
 | `PoseBootstrap.hpp` | IPPE 位姿加 7 个转速假设的起步 / IPPE pose with seven spin-rate hypotheses |
@@ -27,9 +27,13 @@ Four-plate vehicles (infantry including balance infantry, hero, sentry, engineer
 
 The reported velocity and spin are means over the next h seconds, h = `latency_s` + distance / `bullet_speed`, the expected frame-to-impact time. The keypoints use the lightbar4 sizes from AutoAimTypes, matching the v4 detector's corners.
 
-`tools/vehicle_replay` 读回放数据包的检测 TSV 与 IMU CSV，命令行与输出格式与 aasim 的 `aaest_replay` 相同。用原型的关键点尺寸并以相同编译参数构建时，new_v7_0507（2、6 号）与 5p9_0509（1、2 号）上每帧每个字段都与 `aaest_replay` 相同；`--trackset 1` 走模块的路径（角点顺序转换、相对时间、按距离的时域）。
+相机曝光与 IMU 采样不严格同步时，图像内容比配对的姿态早 δ，云台转动会被读成目标的横向运动，并与 Aimer 的超前形成约 7.5 Hz 的振荡。估计器把 δ 作为第 16 个状态（规格 §13）：模块把同步帧 IMU 的本体系角速度 `angular_velocity_xyz` 传入，投影改用 t − δ 时刻的姿态。δ 是传感器的量，目标丢失后沿用上次的估计；角速度为零时与不估计 δ 逐位相同。
 
-`tools/vehicle_replay` reads the replay package's detection TSV and IMU CSV with the same command line and output as aasim's `aaest_replay`. With the prototype's keypoint sizes and the same build flags, every field of every frame matches `aaest_replay` on new_v7_0507 (numbers 2 and 6) and 5p9_0509 (1 and 2); `--trackset 1` replays the Module's path (corner order, relative time, distance-based horizon).
+When camera exposure and IMU sampling are not exactly synchronised, the image content is δ older than its attitude; gimbal rotation then reads as lateral target motion and closes a ~7.5 Hz oscillation with the Aimer lead. The estimator carries δ as state 16 (spec §13): the Module passes the body rate `angular_velocity_xyz` of the synced IMU sample, and the projection uses the attitude at t − δ. δ is a sensor property and is kept over target loss; a zero rate is bit-identical to no δ state.
+
+`tools/vehicle_replay` 读回放数据包的检测 TSV 与 IMU CSV，命令行与输出格式与 aasim 的 `aaest_replay` 相同，角速度按零处理；`--trackset 1` 走模块的路径（角点顺序转换、相对时间、按距离的时域）。与 aasim `e7abbf6` 的 aaest 对照：同一编译参数下，含角速度与图像时间偏差的合成场景逐位相同；回放工具用模块的编译参数构建，在 new_v7_0507（2、6 号）与 5p9_0509（1、2 号）上跟踪标志、输出滤波器与正对板逐帧相同，位置与速度相差不超过 4e-9。
+
+`tools/vehicle_replay` reads the replay package's detection TSV and IMU CSV with the same command line and output as aasim's `aaest_replay`, with a zero body rate; `--trackset 1` replays the Module's path (corner order, relative time, distance-based horizon). Against aaest at aasim `e7abbf6`: with the same build flags, synthetic scenes with a body rate and an image delay match bit for bit; the replay tool, built with the Module's flags, matches the tracking flag, reporting filter and facing plate of every frame on new_v7_0507 (numbers 2 and 6) and 5p9_0509 (1 and 2), with position and velocity within 4e-9.
 
 ## 3. 兜底 EKF / Fallback EKF
 
@@ -92,9 +96,9 @@ modules:
 
 ## 7. 测试 / Tests
 
-`tests/tracker_test.cpp` 用合成的车辆检测检查：整车估计器在转动目标上收敛（中心 < 2 cm、转速 < 0.3 rad/s）、两个目标中选近的并在其消失后换到另一个、检测器把 3 号报成大板时仍按小板整车跟踪、基地按三块板兜底、板朝外的前哨站中心落在转轴上（< 5 cm）、模块每收一帧发一帧。
+`tests/tracker_test.cpp` 用合成的车辆检测检查：整车估计器在转动目标上收敛（中心 < 2 cm、转速 < 0.3 rad/s）、图像比姿态旧 2 ms 且云台 7.5 Hz 摆动时给角速度后偏差估计误差 < 0.5 ms、速度误差减半以上、两个目标中选近的并在其消失后换到另一个、检测器把 3 号报成大板时仍按小板整车跟踪、基地按三块板兜底、板朝外的前哨站中心落在转轴上（< 5 cm）、模块每收一帧发一帧。
 
-`tests/tracker_test.cpp` checks with synthetic vehicle detections that the vehicle estimator converges on a spinning target (centre < 2 cm, spin < 0.3 rad/s), the nearer of two targets is chosen and the other takes over when it disappears, number 3 reported as large is still tracked as a small-plate vehicle, the base falls back to a three-plate target, an outward-facing outpost keeps its centre on the spin axis (< 5 cm), and the Module publishes one frame per frame.
+`tests/tracker_test.cpp` checks with synthetic vehicle detections that the vehicle estimator converges on a spinning target (centre < 2 cm, spin < 0.3 rad/s), with the image 2 ms older than its attitude under a 7.5 Hz gimbal sway the body rate brings the delay estimate within 0.5 ms and at least halves the velocity error, the nearer of two targets is chosen and the other takes over when it disappears, number 3 reported as large is still tracked as a small-plate vehicle, the base falls back to a three-plate target, an outward-facing outpost keeps its centre on the spin axis (< 5 cm), and the Module publishes one frame per frame.
 
 ## 8. 依赖 / Dependencies
 

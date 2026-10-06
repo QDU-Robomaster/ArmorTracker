@@ -83,10 +83,14 @@ class TrackSet
   /**
    * @param t_us 帧的 IMU 时间戳 / IMU timestamp of the frame
    * @param q_wxyz 云台本体系到世界系 / Gimbal body-to-world attitude
+   * @param rate_xyz 与姿态同时采样的本体系角速度，rad/s；整车估计器用它估计图像相对
+   *                 IMU 的时间偏差 / Body rate sampled with the attitude; the vehicle
+   *                 estimator uses it for the image-to-IMU time offset
    * @param armors 检测（角点为原生像素，左上、左下、右下、右上）/ Detections in native
    *               pixels, ordered top-left, bottom-left, bottom-right, top-right
    */
   ArmorTrackerTarget Step(uint64_t t_us, const std::array<float, 4>& q_wxyz,
+                          const std::array<float, 3>& rate_xyz,
                           const CameraTypes::CameraCalibration& calibration,
                           const std::vector<AutoAim::Armor>& armors)
   {
@@ -106,6 +110,7 @@ class TrackSet
     last_t_us_ = t_us;
     const double t = static_cast<double>(t_us - base_t_us_) * 1e-6;
     q_ = {q_wxyz[0], q_wxyz[1], q_wxyz[2], q_wxyz[3]};
+    rate_ = Vehicle::Vec3(rate_xyz[0], rate_xyz[1], rate_xyz[2]);
     r_bw_ = Vehicle::RotationFromQuaternion(q_[0], q_[1], q_[2], q_[3]);
     solver_->SetAttitude(r_bw_);
 
@@ -325,7 +330,7 @@ class TrackSet
                                 ? slot.vehicle_target.position.head<2>().norm()
                                 : 5.0;
     const double horizon = s_.latency_s + distance / std::max(s_.bullet_speed, 1.0);
-    slot.vehicle_target = slot.vehicle->Step(t, q_, input, horizon);
+    slot.vehicle_target = slot.vehicle->Step(t, q_, rate_, input, horizon);
     if (!dets.empty())
     {
       slot.last_seen = t;
@@ -595,5 +600,6 @@ class TrackSet
   uint64_t base_t_us_ = 0;
   uint64_t last_t_us_ = 0;
   std::array<double, 4> q_{1, 0, 0, 0};
+  Vehicle::Vec3 rate_ = Vehicle::Vec3::Zero();
   Vehicle::Mat3 r_bw_ = Vehicle::Mat3::Identity();
 };

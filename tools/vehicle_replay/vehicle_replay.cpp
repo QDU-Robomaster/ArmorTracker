@@ -180,7 +180,7 @@ int main(int argc, char** argv)
           static_cast<float>(imu.q[i][0]), static_cast<float>(imu.q[i][1]),
           static_cast<float>(imu.q[i][2]), static_cast<float>(imu.q[i][3])};
       const ArmorTrackerTarget o =
-          set.Step(static_cast<uint64_t>(ts), q, calibration, armors);
+          set.Step(static_cast<uint64_t>(ts), q, {0, 0, 0}, calibration, armors);
       std::printf("%lld\t%d\t%.9f\t%.9f\t%.9f\t%d\n", ts, o.tracking ? 1 : 0,
                   o.position.x(), o.position.y(), o.position.z(), o.tracked_face_index);
     }
@@ -194,7 +194,7 @@ int main(int argc, char** argv)
     const long long ts = fr.first;
     size_t i = std::upper_bound(imu.ts.begin(), imu.ts.end(), ts) - imu.ts.begin();
     i = i == 0 ? 0 : i - 1;
-    const VehicleTarget o = est.Step(ts / 1e6, imu.q[i], fr.second, h);
+    const VehicleTarget o = est.Step(ts / 1e6, imu.q[i], Vec3::Zero(), fr.second, h);
     std::printf(
         "%lld\t%d\t%d\t%.9f\t%.9f\t%.9f\t%.9f\t%.9f\t%.9f\t%.9f\t%.6f\t%.6f\t%.6f\t%d\n",
         ts, o.tracking ? 1 : 0, o.model, o.position.x(), o.position.y(), o.position.z(),

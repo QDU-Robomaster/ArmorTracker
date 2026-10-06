@@ -14,10 +14,11 @@
 
 /**
  * @brief 角点级 EKF：以每个检测的四个角点为观测，状态见 VehicleGeometry.hpp。规格见
- *        aasim `docs/glr_estimator.md` §3–4、§7（谐振子自旋）、§8（预测速率）。
+ *        aasim `docs/glr_estimator.md` §3–4、§7（谐振子自旋）、§8（预测速率）、§13（图像
+ *        时间偏差）。
  *        Corner-level EKF with the four corners of each detection as the observation.
- *        Specification: aasim `docs/glr_estimator.md` §3–4, §7 (harmonic spin) and §8
- *        (predicted rates).
+ *        Specification: aasim `docs/glr_estimator.md` §3–4, §7 (harmonic spin), §8
+ *        (predicted rates) and §13 (image delay).
  */
 namespace Vehicle
 {
@@ -59,6 +60,10 @@ struct FilterParams
          period_tol = 0.15;
   double hist_dt = 0.02;
   double period_min = 0.8, period_max = 3.0, period_step = 0.1;
+  // 图像时间偏差（§13）：先验均值与标准差（s）、随机游走谱密度（s²/s）、限幅（s）；
+  // 没有角速度时不起作用 / Image delay (§13): prior mean and sd, random-walk density and
+  // clamp; inert without a body rate.
+  double delay0 = 0.0, sig_delay = 0.002, q_delay = 1e-9, delay_max = 0.01;
   ChassisResponse chassis;
   PlateShape shape =
       PROTOTYPE_SHAPE;  ///< 检测器角点对应的关键点 / Keypoints of the corners
@@ -126,6 +131,7 @@ class CornerEkf
       qc(i) = p_.q_geom;
     }
     qc(SCALE_W) = qc(SCALE_H) = 1e-8;
+    qc(DELAY) = p_.q_delay;
     Eigen::Matrix<double, 2 * NX, 2 * NX> m =
         Eigen::Matrix<double, 2 * NX, 2 * NX>::Zero();
     const Mat a = Dynamics(plain);
@@ -187,8 +193,7 @@ class CornerEkf
     double best = std::numeric_limits<double>::infinity();
     for (int p = 0; p < 4; ++p)
     {
-      const double e =
-          (PlateCorners(cam_, r_bw, state, p, object) - measured).cwiseAbs().mean();
+      const double e = (Corners(state, p, object, r_bw) - measured).cwiseAbs().mean();
       if (e < best)
       {
         best = e;
@@ -200,13 +205,13 @@ class CornerEkf
       return false;
     }
     static constexpr double EPS[NX] = {1e-4, 1e-4, 1e-3, 1e-3, 1e-3, 1e-3, 1e-4, 1e-3,
-                                       1e-3, 1e-4, 1e-4, 1e-4, 1e-4, 1e-4, 1e-4};
-    const Pix h0 = PlateCorners(cam_, r_bw, state, plate, object);
+                                       1e-3, 1e-4, 1e-4, 1e-4, 1e-4, 1e-4, 1e-4, 1e-4};
+    const Pix h0 = Corners(state, plate, object, r_bw);
     for (int i = 0; i < NX; ++i)
     {
       Vec shifted = state;
       shifted(i) += EPS[i];
-      u.H.col(i) = (PlateCorners(cam_, r_bw, shifted, plate, object) - h0) / EPS[i];
+      u.H.col(i) = (Corners(shifted, plate, object, r_bw) - h0) / EPS[i];
     }
     u.r = measured - h0;
     Pix noise;
@@ -223,6 +228,7 @@ class CornerEkf
     u.ll = -0.5 * (u.r.dot(s_r) + std::log(std::abs(lu.determinant())));
     u.K = (ldlt.solve(u.H * cov)).transpose();
     state += u.K * u.r;
+    state(DELAY) = std::clamp(state(DELAY), -p_.delay_max, p_.delay_max);
     cov = (Mat::Identity() - u.K * u.H) * cov;
     cov = 0.5 * (cov + cov.transpose()).eval();
     return true;
@@ -302,7 +308,41 @@ class CornerEkf
   /// 非谐振子滤波器恒为 true / Always true for non-harmonic filters.
   bool Periodic() const { return !p_.harmonic || periodic_; }
 
+  /**
+   * @brief 本帧云台本体系角速度（rad/s），与姿态同时采样；为零时时间偏差不进入观测。
+   *        Gimbal body rate of this frame, sampled with the attitude; zero leaves the
+   *        image delay out of the observation.
+   */
+  void SetBodyRate(const Vec3& w_b) { w_b_ = w_b; }
+
+  /// 图像内容时刻的姿态 R(t − d) = R(t)·Exp(−[ω_b]ₓ d) / Attitude at the image time.
+  Mat3 Delayed(const Mat3& r_bw, double d) const
+  {
+    const double wn = w_b_.norm();
+    if (wn <= 0.0 || d == 0.0)
+    {
+      return r_bw;
+    }
+    return r_bw * Eigen::AngleAxisd(-wn * d, w_b_ / wn).toRotationMatrix();
+  }
+
+  /// 时间偏差是传感器的量，跨丢失与重新起步沿用 / The delay is a sensor property and is
+  /// carried over loss and reboot.
+  double CarriedDelay() const { return delay_; }
+  double CarriedDelayVariance() const { return delay_var_; }
+  void KeepDelay()
+  {
+    delay_ = x(DELAY);
+    delay_var_ = P(DELAY, DELAY);
+  }
+
  private:
+  Pix Corners(const Vec& state, int plate, const std::array<Vec3, 4>& object,
+              const Mat3& r_bw) const
+  {
+    return PlateCorners(cam_, Delayed(r_bw, state(DELAY)), state, plate, object);
+  }
+
   Mat Dynamics(bool plain) const
   {
     Mat a = Mat::Zero();
@@ -489,5 +529,9 @@ class CornerEkf
   bool periodic_ = false;
   std::deque<std::pair<double, double>> history_;
   std::vector<double> periods_;
+  // 时间偏差 / Image delay
+  Vec3 w_b_ = Vec3::Zero();
+  double delay_ = p_.delay0;
+  double delay_var_ = p_.sig_delay * p_.sig_delay;
 };
 }  // namespace Vehicle

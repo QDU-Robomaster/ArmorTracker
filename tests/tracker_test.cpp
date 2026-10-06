@@ -1,7 +1,7 @@
-// 合成场景测试：整车估计器收敛、多目标选择与换目标、按编号定大小板、基地兜底、模块接线。
+// 合成场景测试：整车估计器收敛、图像时间偏差、多目标选择与换目标、按编号定大小板、基地兜底、模块接线。
 //
-// Synthetic tests: vehicle estimator convergence, target selection and switching, plate
-// size by number, the base fallback, and the Module wiring.
+// Synthetic tests: vehicle estimator convergence, the image delay, target selection and
+// switching, plate size by number, the base fallback, and the Module wiring.
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -65,8 +65,11 @@ struct Truth
     return x;
   }
 
-  /// 正对相机的板的角点（估计器顺序），加像素噪声 / Corners of the facing plates.
-  std::vector<std::array<Vehicle::Vec2, 4>> Visible(double t, std::mt19937& rng) const
+  /// 正对相机的板的角点（估计器顺序），加像素噪声；r_bw 为拍摄时的云台姿态。
+  /// Corners of the facing plates with pixel noise; r_bw is the gimbal attitude.
+  std::vector<std::array<Vehicle::Vec2, 4>> Visible(
+      double t, std::mt19937& rng,
+      const Vehicle::Mat3& r_bw = Vehicle::Mat3::Identity()) const
   {
     std::normal_distribution<double> noise(0.0, 0.3);
     const Vehicle::Vec x = StateAt(t);
@@ -92,7 +95,7 @@ struct Truth
       {
         points[i] = c + rot * object[i];
       }
-      const Vehicle::Pix p = Vehicle::Project(cam, Vehicle::Mat3::Identity(), points);
+      const Vehicle::Pix p = Vehicle::Project(cam, r_bw, points);
       std::array<Vehicle::Vec2, 4> corners;
       for (int i = 0; i < 4; ++i)
       {
@@ -138,7 +141,7 @@ void TestVehicleEstimatorConverges()
     {
       dets.push_back({c, 0});
     }
-    out = est.Step(t, {1, 0, 0, 0}, dets, 0.2);
+    out = est.Step(t, {1, 0, 0, 0}, Vehicle::Vec3::Zero(), dets, 0.2);
   }
   std::printf("vehicle: centre err %.4f m, v_yaw %.3f rad/s, r1 %.3f r2 %.3f\n",
               (out.position - truth.centre).norm(), out.v_yaw, out.radius_1,
@@ -147,6 +150,54 @@ void TestVehicleEstimatorConverges()
   Expect((out.position.head<2>() - truth.centre.head<2>()).norm() < 0.02,
          "centre within 2 cm");
   Expect(std::abs(out.v_yaw - truth.omega) < 0.3, "spin within 0.3 rad/s");
+}
+
+/// 图像比姿态旧 2 ms、云台 7.5 Hz 摆动 1°：给角速度时估计出偏差，速度误差减半以上。
+/// The image is 2 ms older than its attitude under a 7.5 Hz, 1° gimbal sway: with the
+/// body rate the delay is estimated and the velocity error at least halves.
+void TestImageDelay()
+{
+  const Truth truth{{0.0, 3.0, 0.1}, 0.0, 2.0};
+  const double delay = 0.002, amp = M_PI / 180.0, f = 7.5;
+  const auto gimbal = [&](double t) { return amp * std::sin(2 * M_PI * f * t); };
+  const auto yaw = [](double a) -> Vehicle::Mat3
+  { return Eigen::AngleAxisd(a, Vehicle::Vec3::UnitZ()).toRotationMatrix(); };
+  const auto run = [&](bool use_rate, Vehicle::VehicleTarget& last)
+  {
+    Vehicle::VehicleEstimator est(MakeCamera(), Vehicle::RateMode::AUTO, LIGHTBAR4_SHAPE);
+    std::mt19937 rng(2);
+    double sum = 0.0;
+    int n = 0;
+    for (int i = 0; i < 400; ++i)
+    {
+      const double t = 0.02 * i;
+      std::vector<Vehicle::Detection> dets;
+      for (const auto& c : truth.Visible(t - delay, rng, yaw(gimbal(t - delay))))
+      {
+        dets.push_back({c, 0});
+      }
+      const double a = gimbal(t);
+      const double rate =
+          use_rate ? amp * 2 * M_PI * f * std::cos(2 * M_PI * f * t) : 0.0;
+      last = est.Step(t, {std::cos(a / 2), 0, 0, std::sin(a / 2)},
+                      Vehicle::Vec3(0, 0, rate), dets, 0.2);
+      if (t >= 4.0 && last.tracking)
+      {
+        sum += last.velocity.x() * last.velocity.x();
+        ++n;
+      }
+    }
+    return std::sqrt(sum / std::max(n, 1));
+  };
+  Vehicle::VehicleTarget plain;
+  Vehicle::VehicleTarget with_rate;
+  const double vx_plain = run(false, plain);
+  const double vx_rate = run(true, with_rate);
+  std::printf("delay 2 ms: vx rms %.3f -> %.3f m/s, delay %.2f +- %.2f ms\n", vx_plain,
+              vx_rate, with_rate.delay * 1e3, with_rate.delay_sd * 1e3);
+  Expect(with_rate.tracking, "tracking with the body rate");
+  Expect(vx_rate < 0.5 * vx_plain, "velocity error at least halved with the body rate");
+  Expect(std::abs(with_rate.delay - delay) < 0.0005, "delay within 0.5 ms");
 }
 
 void TestSelectionAndSwitching()
@@ -171,7 +222,7 @@ void TestSelectionAndSwitching()
     {
       armors.push_back(MakeArmor(ArmorNumber::FOUR, false, c));
     }
-    out = set.Step(1000000 + 10000ULL * i, {1, 0, 0, 0}, CALIBRATION, armors);
+    out = set.Step(1000000 + 10000ULL * i, {1, 0, 0, 0}, {0, 0, 0}, CALIBRATION, armors);
     if (i == 29)
     {
       Expect(out.tracking && out.id == ArmorNumber::THREE, "the nearer target is chosen");
@@ -198,7 +249,7 @@ void TestSizeByNumber()
     {
       armors.push_back(MakeArmor(ArmorNumber::THREE, true, c));
     }
-    out = set.Step(10000ULL * i, {1, 0, 0, 0}, CALIBRATION, armors);
+    out = set.Step(10000ULL * i, {1, 0, 0, 0}, {0, 0, 0}, CALIBRATION, armors);
   }
   std::printf("size: armors_num %d centre err %.4f m\n", out.armors_num,
               (out.position.head<2>() - infantry.centre.head<2>()).norm());
@@ -224,7 +275,7 @@ void TestBaseFallback()
     {
       armors.push_back(MakeArmor(ArmorNumber::BASE, false, c));
     }
-    out = set.Step(10000ULL * i, {1, 0, 0, 0}, CALIBRATION, armors);
+    out = set.Step(10000ULL * i, {1, 0, 0, 0}, {0, 0, 0}, CALIBRATION, armors);
   }
   std::printf("base: armors_num %d centre (%.3f, %.3f)\n", out.armors_num,
               out.position.x(), out.position.y());
@@ -253,7 +304,7 @@ void TestOutpostFallback()
     {
       armors.push_back(MakeArmor(ArmorNumber::OUTPOST, false, c));
     }
-    out = set.Step(10000ULL * i, {1, 0, 0, 0}, CALIBRATION, armors);
+    out = set.Step(10000ULL * i, {1, 0, 0, 0}, {0, 0, 0}, CALIBRATION, armors);
     if (i >= 200 && out.tracking)
     {
       worst = std::max(worst, (out.position.head<2>() - outpost.centre.head<2>()).norm());
@@ -331,6 +382,7 @@ int main()
 {
   LibXR::PlatformInit();
   TestVehicleEstimatorConverges();
+  TestImageDelay();
   TestSelectionAndSwitching();
   TestSizeByNumber();
   TestBaseFallback();

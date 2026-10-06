@@ -48,7 +48,8 @@ class PoseBootstrap
       }
       Vec x0;
       Mat p0;
-      if (!InitialState(Widest(dets), cam, r_bw, ekf.Params(), x0, p0))
+      if (!InitialState(Widest(dets), cam, ekf.Delayed(r_bw, ekf.CarriedDelay()), ekf, x0,
+                        p0))
       {
         return false;
       }
@@ -123,10 +124,12 @@ class PoseBootstrap
     return *widest;
   }
 
-  /// IPPE 两个解中重投影误差小的一个给出板位姿 / The better IPPE solution's pose.
+  /// IPPE 两个解中重投影误差小的一个给出板位姿；r_bw 为图像内容时刻的姿态。
+  /// The better IPPE solution's pose; r_bw is the attitude at the image time.
   static bool InitialState(const Detection& d, const Camera& cam, const Mat3& r_bw,
-                           const FilterParams& p, Vec& x, Mat& cov)
+                           const CornerEkf& ekf, Vec& x, Mat& cov)
   {
+    const FilterParams& p = ekf.Params();
     const auto object = ObjectPoints(d.type, p.shape);
     std::vector<cv::Point3d> obj;
     std::vector<cv::Point2d> img;
@@ -179,9 +182,10 @@ class PoseBootstrap
     x(CZ) = plate.z();
     x(R_EVEN) = x(R_ODD) = p.r0;
     x(SCALE_W) = x(SCALE_H) = 1.0;
+    x(DELAY) = ekf.CarriedDelay();
     Vec diag;
     diag << 0.01, 0.01, 1, 1, 4, 4, 0.05 * 0.05, 9, 100, 1e-4, 0.0025, 0.0025, 0.0009,
-        p.sig_scale * p.sig_scale, p.sig_scale * p.sig_scale;
+        p.sig_scale * p.sig_scale, p.sig_scale * p.sig_scale, ekf.CarriedDelayVariance();
     cov = diag.asDiagonal();
     return true;
   }
