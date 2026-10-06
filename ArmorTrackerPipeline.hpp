@@ -402,7 +402,17 @@ void ArmorTracker<FrameLayoutV>::ProcessPendingDetectionFrame(
   }
   q_body_to_world.normalize();
 
-  const auto output = tracker_.Step(frame_timestamp_us, q_body_to_world, inputs);
+  // Synced gyro (zero when the frame sync has no gyro source): lets aaest estimate the
+  // image-to-IMU time offset instead of reading gimbal motion as target motion.
+  Eigen::Vector3d angular_velocity_body(target_frame.imu.angular_velocity_xyz[0],
+                                        target_frame.imu.angular_velocity_xyz[1],
+                                        target_frame.imu.angular_velocity_xyz[2]);
+  if (!angular_velocity_body.allFinite())
+  {
+    angular_velocity_body.setZero();
+  }
+  const auto output =
+      tracker_.Step(frame_timestamp_us, q_body_to_world, inputs, angular_velocity_body);
 
   ArmorTrackerTarget target_msg{};
   target_msg.image_timestamp_us = frame_timestamp_us;

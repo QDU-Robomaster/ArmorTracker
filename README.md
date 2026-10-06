@@ -86,6 +86,10 @@ aaest 是角点级的平稳 EKF，加上对操作手换档（平移和自旋加�
   `aaest_latency_s + 目标水平距离 / aaest_bullet_speed_m_s`（默认 0.07 s 与 23 m/s）。
 - `tracked_face_index` 是当前最正对射手的板。
 
+同步帧的 IMU 带陀螺仪角速度时（CameraFrameSync 的 TRIGGER 模式），aaest 同时估计图像相对 IMU 的
+时间偏差，投影改用图像内容时刻的姿态；否则相机与 IMU 1–2 ms 的同步误差会把云台转动读成目标横向
+速度，和 Aimer 的超前、云台一起形成约 7.5 Hz 的极限环。角速度为零（LATEST_IMU 模式）时行为不变。
+
 相机标定按 OpenCV 五参数畸变使用；第 6 项以后有非零系数时 aaest 不启用，输出保持原样。
 相机安装外参与 PnP 使用同一份 `cfg.extrinsic.camera_mount_to_body`。
 

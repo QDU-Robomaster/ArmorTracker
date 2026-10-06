@@ -234,10 +234,14 @@ class TrackerCore
    * @param timestamp_us Sensor timestamp of the detector frame.
    * @param q_body_to_world Body-to-world IMU orientation in public B axes.
    * @param inputs Detector armors from the same image frame.
+   * @param angular_velocity_body Body angular rate (rad/s, public B axes) sampled with the
+   *        attitude. Nonzero enables aaest's image-to-IMU time offset estimate; zero keeps
+   *        the attitude-only behaviour.
    * @return Tracker output in the public right-handed inertial B-axis frame.
    */
   Output Step(uint64_t timestamp_us, const Eigen::Quaterniond& q_body_to_world,
-              const std::vector<InputArmor>& inputs)
+              const std::vector<InputArmor>& inputs,
+              const Eigen::Vector3d& angular_velocity_body = Eigen::Vector3d::Zero())
   {
     if (has_time_base_ && timestamp_us < last_timestamp_us_)
     {
@@ -280,7 +284,7 @@ class TrackerCore
     (void)tracker_->Track(armors, tp);
     if (config_.use_aaest && aaest_supported_)
     {
-      StepAaest(timestamp_us, q, inputs);
+      StepAaest(timestamp_us, q, angular_velocity_body, inputs);
     }
 
     Output out;
@@ -446,6 +450,7 @@ class TrackerCore
    * Estimators without detections for two seconds are dropped.
    */
   void StepAaest(uint64_t timestamp_us, const Eigen::Quaterniond& q,
+                 const Eigen::Vector3d& angular_velocity_body,
                  const std::vector<InputArmor>& inputs)
   {
     std::map<int, std::vector<aaest::Detection>> by_tag;
@@ -491,7 +496,8 @@ class TrackerCore
           it->second.last.tracking ? it->second.last.position.head<2>().norm() : 5.0;
       const double horizon =
           config_.aaest_latency_s + distance / std::max(config_.aaest_bullet_speed_m_s, 1.0);
-      it->second.last = it->second.estimator.step(t, wxyz, dets, horizon);
+      it->second.last =
+          it->second.estimator.step(t, wxyz, angular_velocity_body, dets, horizon);
       ++it;
     }
   }

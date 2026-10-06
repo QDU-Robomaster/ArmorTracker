@@ -1,4 +1,4 @@
-// Vendored from Jiu-xiao/aasim cpp/aaest/aaest.hpp (based on c03a841, plus the camera mounting extrinsic).
+// Vendored from Jiu-xiao/aasim cpp/aaest/aaest.hpp (e7abbf6: camera mounting extrinsic, image delay state).
 // Edit it there and copy it here: aasim checks this estimator frame by frame against its Python reference
 // (tools/parity_aaest.py, tools/parity_real.py). Algorithm: aasim docs/glr_estimator.md.
 
@@ -8,6 +8,8 @@
 // of the translation / spin accelerations (operator key changes), a harmonic spin model with an online
 // period fit (periodic variable-speed tops), and a multi-model selection by corner likelihood. Boot: the
 // first detection's IPPE pose starts one filter per spin-rate hypothesis; the most likely one continues.
+// With the gimbal angular rate given (step overload), state 15 is the image-to-attitude time offset: the
+// image content is taken that long before its attitude sample (docs/glr_estimator.md section 13).
 // Specification: docs/glr_estimator.md. Header-only; needs Eigen 3 (with unsupported/MatrixFunctions) and
 // OpenCV (calib3d, for the IPPE boot).
 #pragma once
@@ -28,7 +30,8 @@
 
 namespace aaest {
 
-constexpr int NX = 15;
+constexpr int NX = 16;
+constexpr int IDT = 15;                               // image delay state (s)
 using Vec = Eigen::Matrix<double, NX, 1>;
 using Mat = Eigen::Matrix<double, NX, NX>;
 using Mat3 = Eigen::Matrix3d;
@@ -129,6 +132,8 @@ struct FilterParams {
   double tau_mean = 1.5, fit_window = 6.0, fit_every = 0.2, min_r2 = 0.8, min_amp = 1.0, period_tol = 0.15;
   double hist_dt = 0.02;                                // rate history kept every 20 ms for the period fit
   double period_min = 0.8, period_max = 3.0, period_step = 0.1;
+  // image delay (state 15): prior mean / sd (s), random-walk density (s^2/s), clamp (s); inert without a body rate
+  double delay0 = 0.0, sig_delay = 0.002, q_delay = 1e-9, delay_max = 0.01;
   Dyn dyn;
 };
 
@@ -178,6 +183,8 @@ class Filter {
   bool periodic() const { return !p_.harmonic || periodic_; }
   int n_jumps() const { return n_jumps_; }
   double period() const { return period_fit_; }
+  double delay() const { return active_ ? x_(IDT) : delay_; }   // image delay estimate (s)
+  double delay_sd() const { return std::sqrt(active_ ? P_(IDT, IDT) : delay_var_); }
 
   struct Out {
     bool tracking = false;
@@ -188,7 +195,9 @@ class Filter {
   // One frame (LagEKFEstimator.step and its subclasses): PnP boot while inactive, else predict / update /
   // step test. ``h`` is the horizon of the reported rates. The output is taken where the Python version
   // builds its message: after the step test, before the cruise and harmonic bookkeeping.
-  Out frame(double t, const Mat3& Rbw, const std::vector<Detection>& dets, double h) {
+  // ``w_b`` is the gimbal angular rate in body axes at the attitude sample (zero: delay state unused).
+  Out frame(double t, const Mat3& Rbw, const std::vector<Detection>& dets, double h, const Vec3& w_b = Vec3::Zero()) {
+    w_b_ = w_b;
     Out out;
     if (!active_) {
       if (!boot_step(t, Rbw, dets, h, out) || !active_) {
@@ -222,6 +231,8 @@ class Filter {
     glr_test();
     out = {true, x_, rates_for(h)};
     after_frame(t, t_prev);
+    delay_ = x_(IDT);
+    delay_var_ = P_(IDT, IDT);
     return out;
   }
 
@@ -339,6 +350,8 @@ class Filter {
       wbar_ = x_(7);
       out = {true, x_, rates_for(h)};
       after_frame(t, t_prev);
+      delay_ = x_(IDT);
+      delay_var_ = P_(IDT, IDT);
       return true;
     }
     out = {true, x_, rates_for(h)};
@@ -371,8 +384,9 @@ class Filter {
       tc(r) = tv[j].at<double>(r);
       for (int c = 0; c < 3; ++c) R_co(r, c) = Rc.at<double>(r, c);
     }
-    const Mat3 M = Rbw * cam_.R_cb;                     // optical -> world (rotation)
-    const Vec3 pw = Rbw * (cam_.R_cb * tc + cam_.t_cb);  // plate centre
+    const Mat3 Rd = delayed(Rbw, delay_);
+    const Mat3 M = Rd * cam_.R_cb;                      // optical -> world (rotation)
+    const Vec3 pw = Rd * (cam_.R_cb * tc + cam_.t_cb);   // plate centre
     const Vec3 xa = M * R_co.col(0);                    // armor x axis (inward normal)
     const double a = std::atan2(-xa.x(), xa.y()), r0 = p_.r0;
     x = Vec::Zero();
@@ -382,9 +396,10 @@ class Filter {
     x(9) = pw.z();
     x(10) = x(11) = r0;
     x(13) = x(14) = 1.0;
+    x(IDT) = delay_;                                    // the delay is a sensor property: kept over reboots
     Vec d0;
     d0 << 0.01, 0.01, 1, 1, 4, 4, 0.05 * 0.05, 9, 100, 1e-4, 0.0025, 0.0025, 0.0009, p_.sig_scale * p_.sig_scale,
-        p_.sig_scale * p_.sig_scale;
+        p_.sig_scale * p_.sig_scale, delay_var_;
     P = d0.asDiagonal();
     return true;
   }
@@ -418,6 +433,7 @@ class Filter {
     qc(8) = p_.q_al;
     for (int i = 9; i < 13; ++i) qc(i) = p_.q_geom;
     qc(13) = qc(14) = 1e-8;
+    qc(IDT) = p_.q_delay;
     Eigen::Matrix<double, 2 * NX, 2 * NX> M = Eigen::Matrix<double, 2 * NX, 2 * NX>::Zero();
     const Mat Am = A(plain);
     M.topLeftCorner<NX, NX>() = -Am;
@@ -469,7 +485,14 @@ class Filter {
       o.z() *= x(14);
       P[k] = ctr + R * o;
     }
-    return project(cam_, Rbw, P);
+    return project(cam_, delayed(Rbw, x(IDT)), P);
+  }
+
+  // Attitude at the image content time: R(t - d) = R(t) Exp(-[w_b] d) for the body rate w_b (R' = R [w_b]x).
+  Mat3 delayed(const Mat3& Rbw, double d) const {
+    const double wn = w_b_.norm();
+    if (wn <= 0.0 || d == 0.0) return Rbw;
+    return Rbw * Eigen::AngleAxisd(-wn * d, w_b_ / wn).toRotationMatrix();
   }
 
   // Association, numerical Jacobian, Huber-inflated update (LagEKFEstimator._update).
@@ -485,7 +508,7 @@ class Filter {
     }
     if (best > p_.gate_px) return false;
     static const double eps[NX] = {1e-4, 1e-4, 1e-3, 1e-3, 1e-3, 1e-3, 1e-4, 1e-3, 1e-3, 1e-4, 1e-4, 1e-4, 1e-4,
-                                   1e-4, 1e-4};
+                                   1e-4, 1e-4, 1e-4};
     const Pix h0 = corners(x, plate, obj, Rbw);
     for (int i = 0; i < NX; ++i) {
       Vec xs = x;
@@ -503,6 +526,7 @@ class Filter {
     u.ll = -0.5 * (u.r.dot(Sr) + std::log(std::abs(lu.determinant())));
     u.K = (ldlt.solve(u.H * P)).transpose();
     x += u.K * u.r;
+    x(IDT) = std::clamp(x(IDT), -p_.delay_max, p_.delay_max);
     P = (Mat::Identity() - u.K * u.H) * P;
     P = 0.5 * (P + P.transpose()).eval();
     return true;
@@ -680,6 +704,9 @@ class Filter {
   std::vector<Hyp> hyps_;
   std::vector<double> acq_omegas_{0, -8, 8, -16, 16, -24, 24};  // ties (first frames) go to the slowest
   double boot_t0_ = 0, boot_time_ = 0.3;
+  // image delay: body rate of the current frame; estimate and variance carried over reboots
+  Vec3 w_b_ = Vec3::Zero();
+  double delay_ = p_.delay0, delay_var_ = p_.sig_delay * p_.sig_delay;
 };
 
 // ---- multi-model estimator ------------------------------------------------------------------------------
@@ -711,6 +738,7 @@ struct Target {
   Vec3 position = Vec3::Zero();                         // centre x, y and plate height cz
   Vec2 velocity = Vec2::Zero();                          // mean over the requested horizon
   double yaw = 0, v_yaw = 0, radius_1 = 0, radius_2 = 0, dz = 0;
+  double delay = 0, delay_sd = 0;                       // image delay estimate and sd (s; prior without a rate)
   int face = 0, model = 0;
 };
 
@@ -728,11 +756,20 @@ class Estimator {
   // One frame: image timestamp (s), gimbal attitude (w, x, y, z), this target's detections, and the
   // horizon h (s) over which the reported rates are averaged (expected frame-to-impact time).
   Target step(double t, const std::array<double, 4>& q, const std::vector<Detection>& dets, double h) {
+    return step(t, q, Vec3::Zero(), dets, h);
+  }
+
+  // Same, with the gimbal angular rate w_body (rad/s, body axes, sampled with the attitude). A nonzero rate
+  // enables the image delay state: the image is projected with the attitude at t - delay, so a camera / IMU
+  // time skew does not turn gimbal motion into target motion.
+  Target step(double t, const std::array<double, 4>& q, const Vec3& w_body, const std::vector<Detection>& dets,
+              double h) {
     const Mat3 Rbw = quat_to_rot(q[0], q[1], q[2], q[3]);
+    const Vec3 w = w_body.allFinite() ? w_body : Vec3::Zero();
     std::vector<Filter::Out> outs;
     for (auto& f : f_) {
       f.ll_frame = 0.0;
-      outs.push_back(f.frame(t, Rbw, dets, h));
+      outs.push_back(f.frame(t, Rbw, dets, h, w));
     }
     const double dt = first_ ? 0.0 : t - t_prev_;
     first_ = false;
@@ -740,10 +777,11 @@ class Estimator {
     for (size_t i = 0; i < f_.size(); ++i) sums_[i] = f_[i].active() ? g * sums_[i] + f_[i].ll_frame : 0.0;
     t_prev_ = t;
     select();
-    const Filter::Out* o = &outs[use_];
-    if (!o->tracking)
-      for (const auto& e : outs)
-        if (e.tracking) { o = &e; break; }
+    int src = use_;
+    if (!outs[src].tracking)
+      for (size_t i = 0; i < outs.size(); ++i)
+        if (outs[i].tracking) { src = static_cast<int>(i); break; }
+    const Filter::Out* o = &outs[src];
     Target out;
     if (!o->tracking) return out;
     const Vec& x = o->state;
@@ -757,6 +795,8 @@ class Estimator {
     out.dz = x(12);
     out.face = face(x);
     out.model = use_;
+    out.delay = x(IDT);
+    out.delay_sd = std::sqrt(std::max(0.0, f_[src].P()(IDT, IDT)));
     return out;
   }
 
