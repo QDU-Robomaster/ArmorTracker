@@ -8,5 +8,11 @@ jobs:
     uses: xrobot-org/XRobot/.github/workflows/module-ci.yml@v1
     with:
       template-args: '[]'
+      # same-or-dev 依赖跟随本分支（PR 用源分支）/ same-or-dev dependencies follow this
+      # branch (a PR uses its head branch)
+      dependency-ref: ${{ github.head_ref && format('refs/heads/{0}', github.head_ref) || github.ref }}
+      # 共享对象池只在 LibXR dev，LibXR 发版后去掉 / The shared object pool is only on LibXR
+      # dev; drop this after the LibXR release
+      libxr-ref: dev
       apt-packages: 'libopencv-dev libeigen3-dev'
       ctest-regex: '^armor_tracker_test$'
