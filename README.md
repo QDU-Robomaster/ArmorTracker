@@ -63,6 +63,12 @@ A hit flashes the light bars off (about 100 ms each time) and a destroyed robot 
 
 Each selectable slot is scored from the observation count, distance, hittable area (native pixels), spin and angle off the optical axis, normalised and weighted, with `TEMP_LOST` discounted. The best score is the target, and switching needs a lead of `switch_margin`. With `target_number` set only that number is engaged.
 
+### 远距离 NARROW 跟随 / NARROW Following at Long Range
+
+构造参数 `sync` 是相机的 CameraFrameSync。给了 `sync` 且 `view.enabled` 时，每帧跟踪后由 `ViewPolicy` 决定视角：选中的目标处于 `TRACKING` 且距离不小于 `enter_m` 时请求 NARROW，窗口居中于目标中心的投影；目标偏离窗口中心超过窗口宽高的 `recenter_frac` 时请求移窗，两次移窗至少间隔 `min_move_s`；目标近于 `exit_m`、没看到超过 `lost_s`、没有选中目标，或窗口已顶到传感器边缘而目标中心离窗口边缘不足 `edge_margin` 时回到 WIDE。判断按自己请求过的视角与窗口进行，请求生效前不会重复请求。NARROW 下检测器的角点误差折成原生像素是 WIDE 的一半，远距离转速估计更稳。回放传 `nullptr`。
+
+The constructor argument `sync` is the camera's CameraFrameSync. With `sync` given and `view.enabled` set, `ViewPolicy` chooses the view after each tracked frame: it requests NARROW, with the window centred on the projection of the target centre, when the selected target is `TRACKING` at `enter_m` or farther; it requests a window move when the target drifts from the window centre by more than `recenter_frac` of the window size, at most once per `min_move_s`; and it goes back to WIDE when the target comes closer than `exit_m`, stays unseen for `lost_s`, is no longer selected, or keeps less than `edge_margin` from the window edge with the window already against the sensor edge. Decisions use the view and window it requested, so nothing is requested twice while a request takes effect. In NARROW the detector's corner error in native pixels is half that of WIDE, which steadies the spin estimate at long range. Replay passes `nullptr`.
+
 ## 5. 线程与 Topic / Threads and Topics
 
 检测帧进一个容量为 2 的队列，满了在检测器的发布线程里等待，所以每一帧都被跟踪；工作线程按顺序处理并发布，每收一帧发一帧。
@@ -99,6 +105,15 @@ modules:
           latency_s: 0.07
           bullet_speed: 23.0
           select: {}
+          view:
+            enabled: true
+            enter_m: 6.0
+            exit_m: 5.0
+            lost_s: 0.1
+            recenter_frac: 0.25
+            edge_margin: 0.1
+            min_move_s: 0.1
+      - sync: '&camera_frame_sync'
 ```
 
 `mount_rotation_wxyz`、`mount_translation` 是相机安装到云台本体的旋转与平移（本体系 x 右、y 前、z 上）。相机内参与畸变取自图像帧携带的标定。
@@ -107,12 +122,12 @@ modules:
 
 ## 7. 测试 / Tests
 
-`tests/tracker_test.cpp` 用合成的车辆检测检查：整车估计器在转动目标上收敛（中心 < 2 cm、转速 < 0.3 rad/s）、图像比姿态旧 2 ms 且云台 7.5 Hz 摆动时给角速度后偏差估计误差 < 0.5 ms、速度误差减半以上、两个目标中选近的并在其消失后换到另一个、检测器把 3 号报成大板时仍按小板整车跟踪、基地按三块板兜底、板朝外的前哨站中心落在转轴上（< 5 cm）、只跟踪对方颜色的亮板、180 ms 受击灭灯不丢目标而远处的灭灯板不算、灭灯 1.2 s 判阵亡、只亮一帧不恢复而亮 0.1 s 恢复、跟踪中的目标漏检的同一帧里编号误判出的单帧目标不被选中、模块每收一帧发一帧。
+`tests/tracker_test.cpp` 用合成的车辆检测检查：整车估计器在转动目标上收敛（中心 < 2 cm、转速 < 0.3 rad/s）、图像比姿态旧 2 ms 且云台 7.5 Hz 摆动时给角速度后偏差估计误差 < 0.5 ms、速度误差减半以上、两个目标中选近的并在其消失后换到另一个、检测器把 3 号报成大板时仍按小板整车跟踪、基地按三块板兜底、板朝外的前哨站中心落在转轴上（< 5 cm）、只跟踪对方颜色的亮板、180 ms 受击灭灯不丢目标而远处的灭灯板不算、灭灯 1.2 s 判阵亡、只亮一帧不恢复而亮 0.1 s 恢复、跟踪中的目标漏检的同一帧里编号误判出的单帧目标不被选中、`ViewPolicy` 的进出 NARROW、移窗与边缘退出、模块每收一帧发一帧。
 
-`tests/tracker_test.cpp` checks with synthetic vehicle detections that the vehicle estimator converges on a spinning target (centre < 2 cm, spin < 0.3 rad/s), with the image 2 ms older than its attitude under a 7.5 Hz gimbal sway the body rate brings the delay estimate within 0.5 ms and at least halves the velocity error, the nearer of two targets is chosen and the other takes over when it disappears, number 3 reported as large is still tracked as a small-plate vehicle, the base falls back to a three-plate target, an outward-facing outpost keeps its centre on the spin axis (< 5 cm), only lit plates of the opponent colour are tracked, a 180 ms hit flash keeps the target while off plates far from it do not, 1.2 s off means destroyed, one lit frame does not revive it while 0.1 s of lit sightings do, a single frame with a misread number is not selected while the tracked target is missed, and the Module publishes one frame per frame.
+`tests/tracker_test.cpp` checks with synthetic vehicle detections that the vehicle estimator converges on a spinning target (centre < 2 cm, spin < 0.3 rad/s), with the image 2 ms older than its attitude under a 7.5 Hz gimbal sway the body rate brings the delay estimate within 0.5 ms and at least halves the velocity error, the nearer of two targets is chosen and the other takes over when it disappears, number 3 reported as large is still tracked as a small-plate vehicle, the base falls back to a three-plate target, an outward-facing outpost keeps its centre on the spin axis (< 5 cm), only lit plates of the opponent colour are tracked, a 180 ms hit flash keeps the target while off plates far from it do not, 1.2 s off means destroyed, one lit frame does not revive it while 0.1 s of lit sightings do, a single frame with a misread number is not selected while the tracked target is missed, `ViewPolicy` enters and leaves NARROW, moves the window and leaves at the sensor edge, and the Module publishes one frame per frame.
 
 ## 8. 依赖 / Dependencies
 
-CameraBase、AutoAimTypes、LibXR、Eigen 3（含 `unsupported/Eigen/MatrixFunctions`）、OpenCV（core、calib3d、imgproc）。
+CameraBase、CameraFrameSync、AutoAimTypes、LibXR、Eigen 3（含 `unsupported/Eigen/MatrixFunctions`）、OpenCV（core、calib3d、imgproc）。
 
-CameraBase, AutoAimTypes, LibXR, Eigen 3 (with `unsupported/Eigen/MatrixFunctions`), OpenCV (core, calib3d, imgproc).
+CameraBase, CameraFrameSync, AutoAimTypes, LibXR, Eigen 3 (with `unsupported/Eigen/MatrixFunctions`), OpenCV (core, calib3d, imgproc).
