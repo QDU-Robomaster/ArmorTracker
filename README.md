@@ -1,207 +1,133 @@
 # ArmorTracker
 
-装甲板目标级跟踪：由检测结果和同帧 IMU 姿态维护整车 EKF 并发布同帧目标 / Armor target tracking Module that maintains per-vehicle EKF states from detections and same-frame IMU attitude and publishes the same-frame target
+装甲板跟踪：四块板的整车用整车估计器，其余用兜底 EKF，多目标中选出要打的一个，发布跟踪帧 / Armor tracking with the vehicle estimator for four-plate vehicles and a fallback EKF for the rest; picks one of several targets and publishes tracked frames
 
 ## 1. 模块作用 / Purpose
 
-ArmorTracker 订阅 `ArmorDetector` 发布的 `armors_frame`（携带 `CameraFrameSync` 同步帧的图像、IMU 与检测结果），按装甲板编号为每辆车维护整车 EKF 状态，选出一个当前目标，在 `tracker` 域发布 `target_frame`。Topic 时间戳为 `SyncedFrame::imu.timestamp_us`。构造时等待 `armors_frame` 出现，因此 ArmorDetector 实例在 `modules:` 中位于本实例之前。
+ArmorTracker 订阅 `<相机名>_detected`，取对方颜色的装甲板按编号分配到各自的跟踪槽，估计每辆车的中心、速度、朝向、转速和半径，从中选出要打的目标，发布 `TrackedFrame{detected, target, 世界到相机的变换}` 到 `<相机名>_tracked`。目标的字段与语义沿用 `ArmorTrackerTarget`，Aimer 直接读取。
 
-Topic 回调校验帧几何后，把共享图像所有权、IMU 和检测结果复制到 16 槽固定队列，图像字节保持共享。队列已满时回调等待空槽。单个 worker 线程依次取出一帧，把图像所有权移动到栈上的 `TrackedFrame`，运行 tracker 后同步发布 `const TrackedFrame*`，指针在发布回调期间有效。几何非法的帧在回调中被拒绝，逐帧 `FrameGeometry` 取自 `SharedFrame` 内的 `geometry`。
+ArmorTracker subscribes to `<camera>_detected`, assigns the opponent's armors to one track slot per number, estimates each vehicle's centre, velocity, heading, spin and radii, picks the target to engage and publishes `TrackedFrame{detected, target, world-to-camera transform}` on `<camera>_tracked`. The target keeps the fields and meaning of `ArmorTrackerTarget`, which Aimer reads directly.
 
-`TrackedFrame` 包含 `sequence`、`image`、`imu`、`target`（`ArmorTrackerTarget`）、`output_to_camera_rotation`（row-major 3x3）与 `output_to_camera_translation`（单位 m），后两者为输出系 `O` 到 OpenCV 相机系的变换。`ArmorTrackerTarget` 包含 `tracking`、目标编号 `id`、装甲面数量 `armors_num`、整车中心位置与速度（m、m/s）、`yaw` 与 `v_yaw`（rad、rad/s）、偶数面与奇数面的装甲半径、奇偶面高度差 `dz`（m）、当前绑定的装甲面索引、前哨站高度相位和换面标志。
+## 2. 整车估计器 / Vehicle Estimator
 
-同一帧出现多个编号时，各编号的 EKF 状态独立更新，`target_frame` 携带其中一个当前目标。选择分数由近期可见装甲数量、距离、可打击面积、自旋速度和目标相对当前视轴的角度差加权得到，并按状态（`detecting`、`temp_lost`）缩放。当前目标只在其他目标的分数高出 `switch_margin` 时被替换。`require_target_tag` 为 `true` 时只选择 `target_tag_id` 对应的编号。输入时间戳回退时，tracker 清除目标与滤波状态并重新建立时间基线，配置与标定保持不变。
+四块板的车（步兵与平衡步兵、英雄、哨兵、工程）由 `Vehicle::VehicleEstimator` 估计。它按 aasim `docs/glr_estimator.md` 重新实现了原型 aaest：
 
-`cfg.preview.enabled` 为 `true` 时启动内置预览，把 detector 四边形、整车中心、各装甲面中心与相邻面连线、装甲板物理框绘制到当前帧图像，并为所有 active 车辆标注编号和选择分数，当前目标以更醒目的方式显示。预览通过 `VisionPreview` 输出。
+Four-plate vehicles (infantry including balance infantry, hero, sentry, engineer) are estimated by `Vehicle::VehicleEstimator`, a re-implementation of the prototype aaest following aasim `docs/glr_estimator.md`:
 
-模块在 RamFS 中创建命令文件 `armor_tracker`：
+| 文件 / File | 内容 / Content |
+| --- | --- |
+| `VehicleGeometry.hpp` | 16 维状态（含图像时间偏差）、相机投影、装甲板几何 / 16-state layout (with the image delay), projection, plate geometry |
+| `CornerEkf.hpp` | 以四个角点为观测的 EKF，精确离散化，谐振子自旋，预测速率 / Corner-level EKF with exact discretisation, harmonic spin and predicted rates |
+| `ManeuverDetector.hpp` | GLR 换档检测：中心加速度与角加速度的阶跃 / GLR step detection of the centre and spin accelerations |
+| `PoseBootstrap.hpp` | IPPE 位姿加 7 个转速假设的起步 / IPPE pose with seven spin-rate hypotheses |
+| `ModelSelector.hpp` | 四个滤波器（STEADY、VARY、AGILE、HARM）按角点似然选择 / Choice among four filters by corner likelihood |
+| `VehicleEstimator.hpp` | 组合以上部件 / Combines the parts |
 
-```text
-armor_tracker show                       # 打印 tracker 与外参配置
-armor_tracker target_tag_id <value>      # 设置 target_tag_id
-armor_tracker require_target_tag <0|1>   # 设置 require_target_tag
-```
+输出的速度与转速是未来 h 秒内的平均值，h = `latency_s` + 距离 / `bullet_speed`，即从这一帧到弹丸命中的预期时间。关键点取 AutoAimTypes 的 lightbar4 尺寸，与 v4 检测器的角点定义一致。
 
-修改在 worker 处理下一帧之前生效，生效时重新配置 tracker 并重启预览。`OnMonitor()` 输出自上次调用以来的入队帧数和处理帧数、队列就绪数、占用数与高水位、队列满等待次数、平均生产者等待时间（ms），以及 worker 单帧服务耗时的计数、平均、最小与最大值（us）。
+The reported velocity and spin are means over the next h seconds, h = `latency_s` + distance / `bullet_speed`, the expected frame-to-impact time. The keypoints use the lightbar4 sizes from AutoAimTypes, matching the v4 detector's corners.
 
-ArmorTracker subscribes to `armors_frame` published by `ArmorDetector` (carrying the image, IMU and detections of a `CameraFrameSync` synchronized frame), maintains an EKF state per vehicle by armor number, selects one current target and publishes `target_frame` in the `tracker` domain. The Topic timestamp is `SyncedFrame::imu.timestamp_us`. The constructor waits for `armors_frame` to appear, so the ArmorDetector instance is listed before this instance in `modules:`.
+相机曝光与 IMU 采样不严格同步时，图像内容比配对的姿态早 δ，云台转动会被读成目标的横向运动，并与 Aimer 的超前形成约 7.5 Hz 的振荡。估计器把 δ 作为第 16 个状态（规格 §13）：模块把同步帧 IMU 的本体系角速度 `angular_velocity_xyz` 传入，投影改用 t − δ 时刻的姿态。δ 是传感器的量，目标丢失后沿用上次的估计；角速度为零时与不估计 δ 逐位相同。
 
-After validating the frame geometry, the Topic callback copies the shared image ownership, the IMU and the detections into a fixed 16-slot queue; the image bytes stay shared. When the queue is full the callback waits for a free slot. A single worker thread takes one frame at a time, moves the image ownership into a `TrackedFrame` on its stack, runs the tracker and publishes `const TrackedFrame*` synchronously; the pointer is valid during the publish callback. Frames with invalid geometry are rejected in the callback, and the per-frame `FrameGeometry` is read from the `geometry` inside `SharedFrame`.
+When camera exposure and IMU sampling are not exactly synchronised, the image content is δ older than its attitude; gimbal rotation then reads as lateral target motion and closes a ~7.5 Hz oscillation with the Aimer lead. The estimator carries δ as state 16 (spec §13): the Module passes the body rate `angular_velocity_xyz` of the synced IMU sample, and the projection uses the attitude at t − δ. δ is a sensor property and is kept over target loss; a zero rate is bit-identical to no δ state.
 
-`TrackedFrame` contains `sequence`, `image`, `imu`, `target` (`ArmorTrackerTarget`), `output_to_camera_rotation` (row-major 3x3) and `output_to_camera_translation` (m); the last two are the transform from the output frame `O` to the OpenCV camera frame. `ArmorTrackerTarget` contains `tracking`, the target number `id`, the armor face count `armors_num`, the vehicle center position and velocity (m, m/s), `yaw` and `v_yaw` (rad, rad/s), the armor radii of the even and odd faces, the height difference `dz` between even and odd faces (m), the currently bound armor face index, the outpost height phase and a face-switch flag.
+`tools/vehicle_replay` 读回放数据包的检测 TSV 与 IMU CSV，命令行与输出格式与 aasim 的 `aaest_replay` 相同，角速度按零处理；`--trackset 1` 走模块的路径（角点顺序转换、相对时间、按距离的时域）。与 aasim `e7abbf6` 的 aaest 对照：同一编译参数下，含角速度与图像时间偏差的合成场景逐位相同；回放工具用模块的编译参数构建，在 new_v7_0507（2、6 号）与 5p9_0509（1、2 号）上跟踪标志、输出滤波器与正对板逐帧相同，位置与速度相差不超过 4e-9。
 
-When one frame contains several armor numbers, the EKF state of each number is updated independently and `target_frame` carries one current target. The selection score is a weighted sum of the recent visible armor count, distance, hittable area, spin speed and the angle between the target and the current optical axis, scaled by state (`detecting`, `temp_lost`). The current target is replaced only when another target scores higher by more than `switch_margin`. With `require_target_tag` set to `true`, only the number given by `target_tag_id` is selected. When the input timestamp goes backward, the tracker clears the target and filter state and re-establishes the time base; the configuration and calibration are kept.
+`tools/vehicle_replay` reads the replay package's detection TSV and IMU CSV with the same command line and output as aasim's `aaest_replay`, with a zero body rate; `--trackset 1` replays the Module's path (corner order, relative time, distance-based horizon). Against aaest at aasim `e7abbf6`: with the same build flags, synthetic scenes with a body rate and an image delay match bit for bit; the replay tool, built with the Module's flags, matches the tracking flag, reporting filter and facing plate of every frame on new_v7_0507 (numbers 2 and 6) and 5p9_0509 (1 and 2), with position and velocity within 4e-9.
 
-With `cfg.preview.enabled` set to `true`, the built-in preview starts. It draws the detector quadrilateral, the vehicle center, the armor face centers with the lines between adjacent faces, and the physical armor frames onto the current frame image, and labels every active vehicle with its number and selection score; the current target is drawn more prominently. The preview is output through `VisionPreview`.
+## 3. 兜底 EKF / Fallback EKF
 
-The Module creates the RamFS command file `armor_tracker`:
+前哨站（三块板，三档高度）和基地（三块板）不是四块板的车，由 `FallbackTarget.hpp` 跟踪：逐块板 IPPE 求位姿，朝向在机体前向 ±70° 内按 1° 搜索重投影误差最小者，再用 11 维 EKF 跟踪中心、速度、朝向、转速和半径。前哨站按物理约定建模：板朝外，朝向与车辆同一约定，中心是转轴并由 EKF 逐帧修正；高度相位由换面时的高度跳变确定，丢失后用上一次的中心重新起始。
 
-```text
-armor_tracker show                       # print the tracker and extrinsic configuration
-armor_tracker target_tag_id <value>      # set target_tag_id
-armor_tracker require_target_tag <0|1>   # set require_target_tag
-```
+The outpost (three plates at three heights) and the base (three plates) are not four-plate vehicles and are tracked by `FallbackTarget.hpp`: IPPE per plate, the heading searched in 1° steps within ±70° of the body forward for the smallest reprojection error, then an 11-state EKF of centre, velocity, heading, spin and radius. The outpost follows the physical convention: plates face outward, the heading convention is the vehicles', and the centre is the spin axis, corrected by the EKF every frame; the height phase comes from the height jump at a face change, and after a loss it restarts from the previous centre.
 
-A change takes effect before the worker processes the next frame, at which point the tracker is reconfigured and the preview restarted. `OnMonitor()` prints the enqueued and processed frame counts since the previous call, the queue ready count, occupancy and high-water mark, the queue-full wait count, the average producer wait time (ms), and the count, average, minimum and maximum of the worker per-frame service time (us).
+## 4. 目标管理 / Target Management
 
-## 2. 坐标与 PnP / Coordinates and PnP
+`TrackSet.hpp` 为编号 1–5、前哨站、哨兵、基地各维护一个槽。板的大小由编号决定：1 号和基地为大板，其余为小板，不看检测器的大小输出。
 
-`cfg.extrinsic.camera_mount_to_body` 是手眼外参，表示相机安装坐标系 `M` 到公开本体系 `B` 的安装偏差。`M` 与 OpenCV 相机系 `C`（`x` 向右、`y` 向下、`z` 向前）同原点，并与 `B` 使用同一轴约定：右手系，`x` 向右，`y` 向前，`z` 向上。`C` 到 `M` 的固定轴变换在模块内部完成。`rotation` 为 `wxyz` 四元数，`translation` 单位为 m。
+`TrackSet.hpp` keeps one slot each for numbers 1–5, the outpost, the sentry and the base. The plate size follows the number: number 1 and the base are large, the rest small, regardless of the detector's size output.
 
-构造时，tracker 从 `CameraFrameSync::Calibration()` 复制原生相机标定。detector 发布的四角点为原生传感器坐标，tracker 按装甲板类型使用 230 mm（大）或 135 mm（小）宽、56 mm 灯条长的模型和原生相机 K/D 独立执行 PnP 与重投影。标定支持无畸变、5 项和 8 项畸变系数。标定无效或畸变模型需要预先去畸变时，模块记录错误并禁用观测。PnP 失败或结果非有限的观测不进入跟踪更新。
+槽的状态：`LOST` → 看到即 `DETECTING` → 连续看到 `min_detect_s` 秒为 `TRACKING` → 没看到为 `TEMP_LOST` → 超过 `max_temp_lost_s` 秒（前哨站 `outpost_max_temp_lost_s`）没看到回到 `LOST`。状态按时间推进，换帧率不改变行为。只有 `TRACKING` 与 `TEMP_LOST` 的槽可选，刚看到的不选，编号误判出的单帧目标因此不会被打。状态只决定能否被选中；整车估计器连续 2 s 没看到才丢弃，兜底目标在发散或 NIS 连续超限时重置。
 
-同步帧 IMU 四元数（与 `host` 域 `gimbal_quat` 相同，已是公开本体系 `B` 的姿态）作为本体到世界的旋转，归一化后直接转为矩阵。
+Slot states: `LOST` → `DETECTING` when seen → `TRACKING` after `min_detect_s` seconds of sightings → `TEMP_LOST` when unseen → back to `LOST` after `max_temp_lost_s` seconds unseen (`outpost_max_temp_lost_s` for the outpost). The states run on time, so the frame rate does not change the behaviour. Only `TRACKING` and `TEMP_LOST` slots are selectable; a slot just seen is not, so a single frame with a misread number is not engaged. The state only decides whether a slot can be chosen; a vehicle estimator is dropped after 2 s unseen, and a fallback target is reset when it diverges or keeps failing NIS.
 
-输出使用与公开本体系 `B` 同向的惯性解算轴 `O`：右手系，`x` 向右，`y` 向前，`z` 向上，yaw 以前向为 0、左转为正。`O` 的轴向不随当前云台 yaw 转动，后级 Aimer 由此解出的 yaw 是下位机可直接使用的绝对云台目标角。预览通过 `output_to_camera` 把 `O` 中的目标几何投回同帧相机图像。
+检测器发布所有颜色的检测，这里只用对方颜色的亮板。`target_color` 为 `RED`、`BLUE` 或 `FROM_REFEREE`：`FROM_REFEREE` 订阅 `host` 域的裁判系统摘要包 `robot_game_ref`，按首字节的本机 robot_id 取对方颜色（1–99 为红方，101–199 为蓝方），收到第一包之前不跟踪。紫色与本方颜色的板不用。
 
-`cfg.extrinsic.camera_mount_to_body` is the hand-eye extrinsic, the mounting offset from the camera mount frame `M` to the public body frame `B`. `M` shares its origin with the OpenCV camera frame `C` (`x` right, `y` down, `z` forward) and uses the same axis convention as `B`: right-handed, `x` right, `y` forward, `z` up. The fixed axis conversion from `C` to `M` is done inside the Module. `rotation` is a `wxyz` quaternion and `translation` is in m.
+The detector publishes every colour; only lit plates of the opponent colour are used here. `target_color` is `RED`, `BLUE` or `FROM_REFEREE`: `FROM_REFEREE` subscribes to the referee summary `robot_game_ref` in the `host` domain and takes the opponent of the robot_id in its first byte (1–99 red, 101–199 blue); nothing is tracked before the first packet. Purple and own-colour plates are not used.
 
-At construction, the tracker copies the native camera calibration from `CameraFrameSync::Calibration()`. The four corner points published by the detector are in native sensor coordinates. The tracker runs PnP and reprojection independently with the native camera K/D and a model of 230 mm (large) or 135 mm (small) armor width and 56 mm light bar length, selected by armor type. The calibration supports no distortion, 5 coefficients and 8 coefficients. When the calibration is invalid or the distortion model requires undistortion first, the Module logs an error and disables observations. Observations whose PnP fails or yields non-finite results do not enter the tracking update.
+装甲板受击时灯条闪灭（每次约 100 ms），阵亡后一直灭，检测器把这类板报为灭灯（`ArmorColor::OFF`）。灭灯板只用于已有目标：中心落在该编号目标中心 0.5 m 以内（按中心深度换算成像素）才算。一段灭灯（两次相隔不超过 `off_hold_s`）持续不超过 `off_hold_s` 时该帧算作看到，目标只做预测，角点不进滤波（v7 不训练灭灯板的角点）；持续达到 `off_dead_s` 判为阵亡，该编号不可选，直到连续 `min_detect_s` 秒再看到亮板。
 
-The IMU quaternion of the synchronized frame (the same as `gimbal_quat` in the `host` domain, already the attitude of the public body frame `B`) is the body-to-world rotation, normalized and converted to a matrix directly.
+A hit flashes the light bars off (about 100 ms each time) and a destroyed robot stays off; the detector reports such plates as off (`ArmorColor::OFF`). Off plates only serve existing targets and count when their centre lies within 0.5 m of that number's target centre, converted to pixels at the centre's depth. While an off spell (gaps no longer than `off_hold_s`) has lasted at most `off_hold_s`, the frame counts as seen and the target is only predicted, without a corner update (v7 does not train corners on off plates); after `off_dead_s` the robot is judged destroyed and the number is not selectable until lit plates are seen again for `min_detect_s`.
 
-The output uses the inertial solution axes `O`, oriented like the public body frame `B`: right-handed, `x` right, `y` forward, `z` up, with yaw 0 forward and positive to the left. The axes of `O` do not rotate with the current gimbal yaw, so the yaw solved from it by the downstream Aimer is an absolute gimbal target angle that the lower controller can use directly. The preview projects the target geometry in `O` back onto the same-frame camera image through `output_to_camera`.
+每个可选的槽打分：观测数、距离、可打面积（原生像素）、转速、偏离光轴的角度，各项归一化后加权，`TEMP_LOST` 打折扣。得分最高者为目标，换目标要领先 `switch_margin`。设置 `target_number` 后只打该编号。
 
-## 3. 构造接口 / Constructor
+Each selectable slot is scored from the observation count, distance, hittable area (native pixels), spin and angle off the optical axis, normalised and weighted, with `TEMP_LOST` discounted. The best score is the target, and switching needs a lead of `switch_margin`. With `target_number` set only that number is engaged.
 
-```cpp
-template <CameraTypes::FrameLayout FrameLayoutV>
-class ArmorTracker;
+### 远距离 NARROW 跟随 / NARROW Following at Long Range
 
-explicit ArmorTracker(LibXR::RamFS& ramfs, FrameSync& sync, Config cfg = DefaultConfig());
-```
+构造参数 `sync` 是相机的 CameraFrameSync。给了 `sync` 且 `view.enabled` 时，每帧跟踪后由 `ViewPolicy` 决定视角：选中的目标处于 `TRACKING` 且距离不小于 `enter_m` 时请求 NARROW，窗口居中于目标中心的投影；目标偏离窗口中心超过窗口宽高的 `recenter_frac` 时请求移窗，两次移窗至少间隔 `min_move_s`；目标近于 `exit_m`、没看到超过 `lost_s`、没有选中目标，或窗口已顶到传感器边缘而目标中心离窗口边缘不足 `edge_margin` 时回到 WIDE。判断按自己请求过的视角与窗口进行，请求生效前不会重复请求。NARROW 下检测器的角点误差折成原生像素是 WIDE 的一半，远距离转速估计更稳。回放传 `nullptr`。
 
-模板参数：
+The constructor argument `sync` is the camera's CameraFrameSync. With `sync` given and `view.enabled` set, `ViewPolicy` chooses the view after each tracked frame: it requests NARROW, with the window centred on the projection of the target centre, when the selected target is `TRACKING` at `enter_m` or farther; it requests a window move when the target drifts from the window centre by more than `recenter_frac` of the window size, at most once per `min_move_s`; and it goes back to WIDE when the target comes closer than `exit_m`, stays unseen for `lost_s`, is no longer selected, or keeps less than `edge_margin` from the window edge with the window already against the sensor edge. Decisions use the view and window it requested, so nothing is requested twice while a request takes effect. In NARROW the detector's corner error in native pixels is half that of WIDE, which steadies the spin estimate at long range. Replay passes `nullptr`.
 
-- `FrameLayoutV`：帧布局，与上游相机、CameraFrameSync 和 ArmorDetector 使用的帧布局相同。
+## 5. 线程与 Topic / Threads and Topics
 
-依赖：
+检测帧进一个容量为 2 的队列，满了在检测器的发布线程里等待，所以每一帧都被跟踪；工作线程按顺序处理并发布，每收一帧发一帧。
 
-- `ramfs`：`LibXR::RamFS`，用于注册命令文件 `armor_tracker`。
-- `sync`：`CameraFrameSync<FrameLayoutV>&`，构造时从中复制原生相机标定。
+Detected frames enter a queue of two; when it is full the detector's publishing thread waits, so every frame is tracked. The worker thread processes and publishes in order, one frame out per frame in.
 
-配置参数（`Config`，`DefaultConfig()` 为全部默认值）：
+| Topic | 载荷 / Payload | 方向 / Direction |
+| --- | --- | --- |
+| `<相机名>_detected` | `const AutoAim::DetectedFrame*` | 订阅 / Subscribed |
+| `<相机名>_tracked` | `const AutoAim::TrackedFrame*` | 发布 / Published |
 
-- `tracker.require_target_tag`：只选择 `target_tag_id` 对应的编号，默认 `false`。
-- `tracker.target_tag_id`：指定的目标编号，默认 `-1`。
-- `tracker.min_detect_count`：由检测态进入跟踪态所需的检测次数，默认 `2`。
-- `tracker.max_temp_lost_count`：暂时丢失的帧数上限，默认 `15`。
-- `tracker.outpost_max_temp_lost_count`：前哨站暂时丢失的帧数上限，默认 `75`。
-- `tracker.target_select.observed_count_weight`：近期可见装甲数量评分的权重，默认 `1.6`。
-- `tracker.target_select.distance_weight`：距离评分的权重，默认 `2.0`。
-- `tracker.target_select.area_weight`：可打击面积评分的权重，默认 `1.2`。
-- `tracker.target_select.spin_weight`：自旋评分的权重，默认 `0.8`。
-- `tracker.target_select.angle_weight`：视轴角差评分的权重，默认 `2.0`。
-- `tracker.target_select.max_distance_m`：距离评分取满分对应的距离，单位 m，默认 `8.0`。
-- `tracker.target_select.distance_span_m`：距离评分由满分降到 0 的距离跨度，单位 m，默认 `7.5`。
-- `tracker.target_select.area_norm_px`：面积评分的归一化面积，单位 px，默认 `6000.0`。
-- `tracker.target_select.observed_count_norm`：数量评分的归一化数量，默认 `4.0`。
-- `tracker.target_select.max_spin_rad_s`：自旋评分的归一化角速度，单位 rad/s，默认 `8.0`。
-- `tracker.target_select.max_angle_norm`：视轴角差评分的归一化角差，默认 `0.5`。
-- `tracker.target_select.detecting_scale`：`detecting` 状态的分数倍率，默认 `0.55`。
-- `tracker.target_select.temp_lost_scale`：`temp_lost` 状态的分数倍率，默认 `0.35`。
-- `tracker.target_select.switch_margin`：替换当前目标所需的最小分差，默认 `0.25`。
-- `extrinsic.camera_mount_to_body.rotation`：`wxyz` 四元数，默认 `[1, 0, 0, 0]`。
-- `extrinsic.camera_mount_to_body.translation`：平移，单位 m，默认 `[0, 0, 0]`。
-- `preview`：`VisionPreview::RuntimeParam`，默认关闭，`preview_window_name` 为 `"armor_tracker_preview"`，`preview_scale` 为 `0.5`，`web_stream_name` 为 `"armor_tracker"`，其余字段取 VisionPreview 的默认值，字段见 VisionPreview。
+`TrackedFrame` 的 `output_to_camera_rotation/translation` 是这一帧世界系到相机光学系的变换，预览用它把目标画回图像。
 
-Template parameter:
+`TrackedFrame`'s `output_to_camera_rotation/translation` is this frame's world-to-optical transform, which the preview uses to draw the target on the image.
 
-- `FrameLayoutV`: the frame layout, identical to that of the upstream camera, CameraFrameSync and ArmorDetector.
-
-Dependencies:
-
-- `ramfs`: `LibXR::RamFS`, used to register the command file `armor_tracker`.
-- `sync`: `CameraFrameSync<FrameLayoutV>&`, from which the native camera calibration is copied at construction.
-
-Configuration parameters (`Config`; `DefaultConfig()` holds all defaults):
-
-- `tracker.require_target_tag`: select only the number given by `target_tag_id`, default `false`.
-- `tracker.target_tag_id`: the designated target number, default `-1`.
-- `tracker.min_detect_count`: detections required to move from the detecting state to the tracking state, default `2`.
-- `tracker.max_temp_lost_count`: upper limit of temporarily lost frames, default `15`.
-- `tracker.outpost_max_temp_lost_count`: upper limit of temporarily lost frames for the outpost, default `75`.
-- `tracker.target_select.observed_count_weight`: weight of the recent visible armor count score, default `1.6`.
-- `tracker.target_select.distance_weight`: weight of the distance score, default `2.0`.
-- `tracker.target_select.area_weight`: weight of the hittable area score, default `1.2`.
-- `tracker.target_select.spin_weight`: weight of the spin score, default `0.8`.
-- `tracker.target_select.angle_weight`: weight of the optical-axis angle score, default `2.0`.
-- `tracker.target_select.max_distance_m`: distance at which the distance score is full, in m, default `8.0`.
-- `tracker.target_select.distance_span_m`: distance span over which the distance score falls from full to 0, in m, default `7.5`.
-- `tracker.target_select.area_norm_px`: normalization area of the area score, in px, default `6000.0`.
-- `tracker.target_select.observed_count_norm`: normalization count of the count score, default `4.0`.
-- `tracker.target_select.max_spin_rad_s`: normalization angular velocity of the spin score, in rad/s, default `8.0`.
-- `tracker.target_select.max_angle_norm`: normalization angle of the optical-axis angle score, default `0.5`.
-- `tracker.target_select.detecting_scale`: score scale in the `detecting` state, default `0.55`.
-- `tracker.target_select.temp_lost_scale`: score scale in the `temp_lost` state, default `0.35`.
-- `tracker.target_select.switch_margin`: minimum score difference required to replace the current target, default `0.25`.
-- `extrinsic.camera_mount_to_body.rotation`: `wxyz` quaternion, default `[1, 0, 0, 0]`.
-- `extrinsic.camera_mount_to_body.translation`: translation in m, default `[0, 0, 0]`.
-- `preview`: `VisionPreview::RuntimeParam`, disabled by default, `preview_window_name` is `"armor_tracker_preview"`, `preview_scale` is `0.5` and `web_stream_name` is `"armor_tracker"`, the other fields take the defaults of VisionPreview; see VisionPreview for the fields.
-
-## 4. Topic
-
-| Topic | 方向 | 类型 | 说明 |
-| --- | --- | --- | --- |
-| `armor_detector` 域的 `armors_frame` | 订阅 | `const DetectedFrame<FrameLayoutV>*` | ArmorDetector 发布的检测结果，携带图像、IMU 与检测结果 |
-| `tracker` 域的 `target_frame` | 发布 | `const TrackedFrame<FrameLayoutV>*` | 同帧目标包，时间戳为 `SyncedFrame::imu.timestamp_us`，指针在同步回调期间有效 |
-
-| Topic | Direction | Type | Meaning |
-| --- | --- | --- | --- |
-| `armors_frame` in the `armor_detector` domain | Subscribe | `const DetectedFrame<FrameLayoutV>*` | Detection result published by ArmorDetector, carrying the image, IMU and detections |
-| `target_frame` in the `tracker` domain | Publish | `const TrackedFrame<FrameLayoutV>*` | Same-frame target packet, timestamp `SyncedFrame::imu.timestamp_us`, the pointer is valid during the synchronous callback |
-
-## 5. 配置示例 / Configuration Example
-
-`xrobot instance add QDU-Robomaster/ArmorTracker --template-arg <FrameLayout>` 写入的实例：模板实参为帧布局 constexpr，依赖填为 RamFS 的硬件注册名和 CameraFrameSync 实例的 id，`cfg` 为 `DefaultConfig()` 表达式，`Config` 的默认值见第 3 节；`cfg` 也可以展开为 `Config` 字段 `tracker`、`extrinsic`、`preview` 的 YAML 映射。帧布局 `AutoAimRunConfig::MainFrameLayout` 在配置的 `constexprs:` 中定义，须与相机输出一致。RamFS 对象 `ramfs` 由 BSP 的 `XR_REGISTER`（硬件注册）提供。
-
-An instance written by `xrobot instance add QDU-Robomaster/ArmorTracker --template-arg <FrameLayout>`: the template argument is the frame layout constexpr, the dependencies are set to the Registration name of the RamFS and the id of the CameraFrameSync instance, and `cfg` is the `DefaultConfig()` expression, with the defaults of `Config` listed in section 3; `cfg` can also be expanded into a YAML mapping of the `Config` fields `tracker`, `extrinsic` and `preview`. The frame layout `AutoAimRunConfig::MainFrameLayout` is defined under `constexprs:` of the Configuration and matches the camera output. The RamFS object `ramfs` is provided by the BSP's `XR_REGISTER` (Registration).
+## 6. 配置示例 / Configuration Example
 
 ```yaml
-constexpr_namespace: AutoAimRunConfig
-constexpr_includes:
-  - CameraBase.hpp
-constexprs:
-  MainFrameLayout:
-    type: CameraTypes::FrameLayout
-    value: '{.width = 800, .height = 600, .step = 2400, .encoding = CameraTypes::Encoding::BGR8}'
 modules:
   - module: QDU-Robomaster/ArmorTracker
-    id: ArmorTracker_0
-    template_args:
-      - AutoAimRunConfig::MainFrameLayout
+    id: tracker
     args:
-      - ramfs: ramfs
-      - sync: CameraFrameSync_0
-      - cfg: ArmorTracker<AutoAimRunConfig::MainFrameLayout>::DefaultConfig()
+      - settings:
+          camera_name: "gimbal"
+          mount_rotation_wxyz: [1.0, 0.0, 0.0, 0.0]
+          mount_translation: [0.0, 0.0, 0.0]
+          target_number: -1
+          target_color: TargetColor::FROM_REFEREE
+          min_detect_s: 0.02
+          max_temp_lost_s: 0.15
+          outpost_max_temp_lost_s: 0.75
+          off_hold_s: 0.2
+          off_dead_s: 1.0
+          latency_s: 0.07
+          bullet_speed: 23.0
+          select: {}
+          view:
+            enabled: true
+            enter_m: 6.0
+            exit_m: 5.0
+            lost_s: 0.1
+            recenter_frac: 0.25
+            edge_margin: 0.1
+            min_move_s: 0.1
+      - sync: '&camera_frame_sync'
 ```
 
-`CameraFrameSync_0` 与 ArmorDetector 实例在 `modules:` 中位于本实例之前，并使用相同的 `template_args`。Aimer 订阅本模块的 `target_frame`。
+`mount_rotation_wxyz`、`mount_translation` 是相机安装到云台本体的旋转与平移（本体系 x 右、y 前、z 上）。相机内参与畸变取自图像帧携带的标定。
 
-`CameraFrameSync_0` and the ArmorDetector instance are listed before this instance in `modules:` and use the same `template_args`. Aimer subscribes to the `target_frame` of this Module.
+`mount_rotation_wxyz` and `mount_translation` are the camera mounting on the gimbal body (body x right, y forward, z up). The intrinsics and distortion come from the calibration carried by the image frame.
 
-## 6. 依赖与硬件 / Dependencies and Hardware
+## 7. 测试 / Tests
 
-依赖：
+`tests/tracker_test.cpp` 用合成的车辆检测检查：整车估计器在转动目标上收敛（中心 < 2 cm、转速 < 0.3 rad/s）、图像比姿态旧 2 ms 且云台 7.5 Hz 摆动时给角速度后偏差估计误差 < 0.5 ms、速度误差减半以上、两个目标中选近的并在其消失后换到另一个、检测器把 3 号报成大板时仍按小板整车跟踪、基地按三块板兜底、板朝外的前哨站中心落在转轴上（< 5 cm）、只跟踪对方颜色的亮板、180 ms 受击灭灯不丢目标而远处的灭灯板不算、灭灯 1.2 s 判阵亡、只亮一帧不恢复而亮 0.1 s 恢复、跟踪中的目标漏检的同一帧里编号误判出的单帧目标不被选中、`ViewPolicy` 的进出 NARROW、移窗与边缘退出、模块每收一帧发一帧。
 
-- `QDU-Robomaster/ArmorDetector`：检测结果类型与 `armors_frame` 输入。
-- `QDU-Robomaster/CameraFrameSync`：原生标定来源与同步帧类型。
-- `QDU-Robomaster/CameraBase`：帧布局、几何与共享图像类型。
-- `QDU-Robomaster/VisionPreview`：跟踪结果预览。
-- `xrobot-org/DurationStatistics`：worker 耗时统计。
-- LibXR。
-- OpenCV 4（`core`、`calib3d`、`imgproc`）与 Eigen。
+`tests/tracker_test.cpp` checks with synthetic vehicle detections that the vehicle estimator converges on a spinning target (centre < 2 cm, spin < 0.3 rad/s), with the image 2 ms older than its attitude under a 7.5 Hz gimbal sway the body rate brings the delay estimate within 0.5 ms and at least halves the velocity error, the nearer of two targets is chosen and the other takes over when it disappears, number 3 reported as large is still tracked as a small-plate vehicle, the base falls back to a three-plate target, an outward-facing outpost keeps its centre on the spin axis (< 5 cm), only lit plates of the opponent colour are tracked, a 180 ms hit flash keeps the target while off plates far from it do not, 1.2 s off means destroyed, one lit frame does not revive it while 0.1 s of lit sightings do, a single frame with a misread number is not selected while the tracked target is missed, `ViewPolicy` enters and leaves NARROW, moves the window and leaves at the sensor edge, and the Module publishes one frame per frame.
 
-硬件：由 CameraFrameSync 提供同步帧的相机与带姿态输出的 IMU，标定与帧布局须与相机输出一致。
+## 8. 依赖 / Dependencies
 
-Dependencies:
+CameraBase、CameraFrameSync、AutoAimTypes、LibXR、Eigen 3（含 `unsupported/Eigen/MatrixFunctions`）、OpenCV（core、calib3d、imgproc）。
 
-- `QDU-Robomaster/ArmorDetector`: detection result type and the `armors_frame` input.
-- `QDU-Robomaster/CameraFrameSync`: source of the native calibration and the synchronized frame type.
-- `QDU-Robomaster/CameraBase`: frame layout, geometry and shared image types.
-- `QDU-Robomaster/VisionPreview`: preview of the tracking result.
-- `xrobot-org/DurationStatistics`: worker service time statistics.
-- LibXR.
-- OpenCV 4 (`core`, `calib3d`, `imgproc`) and Eigen.
-
-Hardware: a camera and an IMU with attitude output whose synchronized frames are provided by CameraFrameSync; the calibration and the frame layout match the camera output.
+CameraBase, CameraFrameSync, AutoAimTypes, LibXR, Eigen 3 (with `unsupported/Eigen/MatrixFunctions`), OpenCV (core, calib3d, imgproc).

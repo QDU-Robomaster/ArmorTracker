@@ -1,0 +1,586 @@
+// 合成场景测试：整车估计器收敛、图像时间偏差、多目标选择与换目标、按编号定大小板、基地兜底、模块接线。
+//
+// Synthetic tests: vehicle estimator convergence, the image delay, target selection and
+// switching, plate size by number, the base fallback, and the Module wiring.
+#include <chrono>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <mutex>
+#include <random>
+#include <thread>
+#include <vector>
+
+#include "ArmorTracker.hpp"
+#include "libxr.hpp"
+
+namespace
+{
+void Expect(bool condition, const char* message)
+{
+  if (!condition)
+  {
+    std::fprintf(stderr, "FAIL: %s\n", message);
+    std::exit(1);
+  }
+}
+
+const CameraTypes::CameraCalibration CALIBRATION{
+    1440, 1080, 2328.0, 2328.0, 720.0, 540.0, {0.0, 0.0, 0.0, 0.0, 0.0}};
+
+Vehicle::Camera MakeCamera()
+{
+  Vehicle::Camera cam;
+  cam.fx = cam.fy = 2328.0;
+  cam.cx = 720.0;
+  cam.cy = 540.0;
+  return cam;
+}
+
+/// 真值整车：中心、转速、两个半径、高度差 / A ground-truth vehicle.
+struct Truth
+{
+  Vehicle::Vec3 centre;
+  double yaw0;
+  double omega;
+  double r_even = 0.25, r_odd = 0.22, dz = 0.05;
+  bool large = false;
+  int plates = 4;  ///< 基地与前哨站为 3 / 3 for the base and the outpost
+  std::array<double, 3> plate_z{0.0, 0.0,
+                                0.0};  ///< 三块板时各板高度 / Heights of 3 plates
+  Vehicle::PlateShape shape = LIGHTBAR4_SHAPE;
+
+  Vehicle::Vec StateAt(double t) const
+  {
+    Vehicle::Vec x = Vehicle::Vec::Zero();
+    x(Vehicle::CX) = centre.x();
+    x(Vehicle::CY) = centre.y();
+    x(Vehicle::CZ) = centre.z();
+    x(Vehicle::YAW) = yaw0 + omega * t;
+    x(Vehicle::OMEGA) = omega;
+    x(Vehicle::R_EVEN) = r_even;
+    x(Vehicle::R_ODD) = r_odd;
+    x(Vehicle::DZ) = dz;
+    x(Vehicle::SCALE_W) = x(Vehicle::SCALE_H) = 1.0;
+    return x;
+  }
+
+  /// 正对相机的板的角点（估计器顺序），加像素噪声；r_bw 为拍摄时的云台姿态。
+  /// Corners of the facing plates with pixel noise; r_bw is the gimbal attitude.
+  std::vector<std::array<Vehicle::Vec2, 4>> Visible(
+      double t, std::mt19937& rng,
+      const Vehicle::Mat3& r_bw = Vehicle::Mat3::Identity()) const
+  {
+    std::normal_distribution<double> noise(0.0, 0.3);
+    const Vehicle::Vec x = StateAt(t);
+    const Vehicle::Camera cam = MakeCamera();
+    const auto object = Vehicle::ObjectPoints(large ? 1 : 0, shape);
+    std::vector<std::array<Vehicle::Vec2, 4>> out;
+    for (int k = 0; k < plates; ++k)
+    {
+      const double a = x(Vehicle::YAW) + k * 2.0 * M_PI / plates;
+      const bool odd = plates == 4 && k % 2 == 1;
+      const double r = odd ? r_odd : r_even;
+      const double z = plates == 3 ? plate_z[k] : (odd ? dz : 0.0);
+      const Vehicle::Vec3 c(centre.x() + r * std::sin(a), centre.y() - r * std::cos(a),
+                            centre.z() + z);
+      const Vehicle::Vec2 n(std::sin(a), -std::cos(a));
+      if (n.dot(-c.head<2>() / c.head<2>().norm()) < 0.3)
+      {
+        continue;
+      }
+      const Vehicle::Mat3 rot = Vehicle::ArmorRotation(a);
+      std::array<Vehicle::Vec3, 4> points;
+      for (int i = 0; i < 4; ++i)
+      {
+        points[i] = c + rot * object[i];
+      }
+      const Vehicle::Pix p = Vehicle::Project(cam, r_bw, points);
+      std::array<Vehicle::Vec2, 4> corners;
+      for (int i = 0; i < 4; ++i)
+      {
+        corners[i] = {p(2 * i) + noise(rng), p(2 * i + 1) + noise(rng)};
+      }
+      out.push_back(corners);
+    }
+    return out;
+  }
+};
+
+/// 估计器顺序（左上、右上、右下、左下）转为 AutoAim 顺序（左上、左下、右下、右上）。
+AutoAim::Armor MakeArmor(ArmorNumber number, bool large,
+                         const std::array<Vehicle::Vec2, 4>& c)
+{
+  AutoAim::Armor a{
+      ArmorColor::RED, number, large ? ArmorType::LARGE : ArmorType::SMALL, 0.9F, {}};
+  const int order[4] = {0, 3, 2, 1};
+  for (int k = 0; k < 4; ++k)
+  {
+    a.corners[k] = {static_cast<float>(c[order[k]].x()),
+                    static_cast<float>(c[order[k]].y())};
+  }
+  return a;
+}
+
+TrackerSettings Settings(const char* camera)
+{
+  TrackerSettings s{};
+  s.camera_name = camera;
+  s.mount_rotation_wxyz = {1, 0, 0, 0};
+  s.mount_translation = {0, 0, 0};
+  s.target_number = -1;
+  s.target_color = TargetColor::RED;
+  s.min_detect_s = 0.02;
+  s.max_temp_lost_s = 0.15;
+  s.outpost_max_temp_lost_s = 0.75;
+  s.off_hold_s = 0.2;
+  s.off_dead_s = 1.0;
+  s.latency_s = 0.07;
+  s.bullet_speed = 23.0;
+  return s;
+}
+
+void TestVehicleEstimatorConverges()
+{
+  const Truth truth{{0.3, 4.0, 0.1}, 0.4, 4.0};
+  Vehicle::VehicleEstimator est(MakeCamera(), Vehicle::RateMode::AUTO, LIGHTBAR4_SHAPE);
+  std::mt19937 rng(1);
+  Vehicle::VehicleTarget out;
+  for (int i = 0; i <= 200; ++i)
+  {
+    const double t = 0.01 * i;
+    std::vector<Vehicle::Detection> dets;
+    for (const auto& c : truth.Visible(t, rng))
+    {
+      dets.push_back({c, 0});
+    }
+    out = est.Step(t, {1, 0, 0, 0}, Vehicle::Vec3::Zero(), dets, 0.2);
+  }
+  std::printf("vehicle: centre err %.4f m, v_yaw %.3f rad/s, r1 %.3f r2 %.3f\n",
+              (out.position - truth.centre).norm(), out.v_yaw, out.radius_1,
+              out.radius_2);
+  Expect(out.tracking, "tracking after 2 s");
+  Expect((out.position.head<2>() - truth.centre.head<2>()).norm() < 0.02,
+         "centre within 2 cm");
+  Expect(std::abs(out.v_yaw - truth.omega) < 0.3, "spin within 0.3 rad/s");
+}
+
+/// 图像比姿态旧 2 ms、云台 7.5 Hz 摆动 1°：给角速度时估计出偏差，速度误差减半以上。
+/// The image is 2 ms older than its attitude under a 7.5 Hz, 1° gimbal sway: with the
+/// body rate the delay is estimated and the velocity error at least halves.
+void TestImageDelay()
+{
+  const Truth truth{{0.0, 3.0, 0.1}, 0.0, 2.0};
+  const double delay = 0.002, amp = M_PI / 180.0, f = 7.5;
+  const auto gimbal = [&](double t) { return amp * std::sin(2 * M_PI * f * t); };
+  const auto yaw = [](double a) -> Vehicle::Mat3
+  { return Eigen::AngleAxisd(a, Vehicle::Vec3::UnitZ()).toRotationMatrix(); };
+  const auto run = [&](bool use_rate, Vehicle::VehicleTarget& last)
+  {
+    Vehicle::VehicleEstimator est(MakeCamera(), Vehicle::RateMode::AUTO, LIGHTBAR4_SHAPE);
+    std::mt19937 rng(2);
+    double sum = 0.0;
+    int n = 0;
+    for (int i = 0; i < 400; ++i)
+    {
+      const double t = 0.02 * i;
+      std::vector<Vehicle::Detection> dets;
+      for (const auto& c : truth.Visible(t - delay, rng, yaw(gimbal(t - delay))))
+      {
+        dets.push_back({c, 0});
+      }
+      const double a = gimbal(t);
+      const double rate =
+          use_rate ? amp * 2 * M_PI * f * std::cos(2 * M_PI * f * t) : 0.0;
+      last = est.Step(t, {std::cos(a / 2), 0, 0, std::sin(a / 2)},
+                      Vehicle::Vec3(0, 0, rate), dets, 0.2);
+      if (t >= 4.0 && last.tracking)
+      {
+        sum += last.velocity.x() * last.velocity.x();
+        ++n;
+      }
+    }
+    return std::sqrt(sum / std::max(n, 1));
+  };
+  Vehicle::VehicleTarget plain;
+  Vehicle::VehicleTarget with_rate;
+  const double vx_plain = run(false, plain);
+  const double vx_rate = run(true, with_rate);
+  std::printf("delay 2 ms: vx rms %.3f -> %.3f m/s, delay %.2f +- %.2f ms\n", vx_plain,
+              vx_rate, with_rate.delay * 1e3, with_rate.delay_sd * 1e3);
+  Expect(with_rate.tracking, "tracking with the body rate");
+  Expect(vx_rate < 0.5 * vx_plain, "velocity error at least halved with the body rate");
+  Expect(std::abs(with_rate.delay - delay) < 0.0005, "delay within 0.5 ms");
+}
+
+void TestSelectionAndSwitching()
+{
+  TrackSet set(Settings("sel"));
+  const Truth near{{0.0, 4.0, 0.1}, 0.2, 0.0};
+  const Truth far{{1.5, 7.0, 0.1}, 0.0, 0.0};
+  std::mt19937 rng(2);
+  ArmorTrackerTarget out;
+  for (int i = 0; i < 60; ++i)
+  {
+    const double t = 0.01 * i;
+    std::vector<AutoAim::Armor> armors;
+    if (i < 30)
+    {
+      for (const auto& c : near.Visible(t, rng))
+      {
+        armors.push_back(MakeArmor(ArmorNumber::THREE, false, c));
+      }
+    }
+    for (const auto& c : far.Visible(t, rng))
+    {
+      armors.push_back(MakeArmor(ArmorNumber::FOUR, false, c));
+    }
+    out = set.Step(1000000 + 10000ULL * i, {1, 0, 0, 0}, {0, 0, 0}, CALIBRATION, armors,
+                   ArmorColor::RED);
+    if (i == 29)
+    {
+      Expect(out.tracking && out.id == ArmorNumber::THREE, "the nearer target is chosen");
+      Expect(out.armors_num == 4, "four-plate vehicle");
+    }
+  }
+  // 3 号消失 15 帧后判丢失，换到 4 号 / THREE is lost after 15 frames, FOUR takes over.
+  Expect(out.tracking && out.id == ArmorNumber::FOUR, "switch to the remaining target");
+  Expect(std::abs(out.position.y() - far.centre.y()) < 0.1, "far target position");
+}
+
+void TestSizeByNumber()
+{
+  // 检测器把 3 号报成大板：仍按四块小板的整车跟踪 / The detector reports number three as
+  // large: it is still tracked as a four-plate vehicle with small plates.
+  TrackSet set(Settings("size"));
+  const Truth infantry{{0.0, 3.0, 0.15}, 0.2, 3.0};
+  std::mt19937 rng(3);
+  ArmorTrackerTarget out;
+  for (int i = 0; i < 100; ++i)
+  {
+    std::vector<AutoAim::Armor> armors;
+    for (const auto& c : infantry.Visible(0.01 * i, rng))
+    {
+      armors.push_back(MakeArmor(ArmorNumber::THREE, true, c));
+    }
+    out = set.Step(10000ULL * i, {1, 0, 0, 0}, {0, 0, 0}, CALIBRATION, armors,
+                   ArmorColor::RED);
+  }
+  std::printf("size: armors_num %d centre err %.4f m\n", out.armors_num,
+              (out.position.head<2>() - infantry.centre.head<2>()).norm());
+  Expect(out.tracking && out.armors_num == 4, "number three is a four-plate vehicle");
+  Expect((out.position.head<2>() - infantry.centre.head<2>()).norm() < 0.02,
+         "small-plate geometry despite the size output");
+}
+
+void TestBaseFallback()
+{
+  Truth base{{0.2, 5.0, 0.3}, 0.0, 0.0};
+  base.plates = 3;
+  base.r_even = base.r_odd = 0.3205;
+  base.dz = 0.0;
+  base.large = true;
+  TrackSet set(Settings("base"));
+  std::mt19937 rng(5);
+  ArmorTrackerTarget out;
+  for (int i = 0; i < 100; ++i)
+  {
+    std::vector<AutoAim::Armor> armors;
+    for (const auto& c : base.Visible(0.01 * i, rng))
+    {
+      armors.push_back(MakeArmor(ArmorNumber::BASE, false, c));
+    }
+    out = set.Step(10000ULL * i, {1, 0, 0, 0}, {0, 0, 0}, CALIBRATION, armors,
+                   ArmorColor::RED);
+  }
+  std::printf("base: armors_num %d centre (%.3f, %.3f)\n", out.armors_num,
+              out.position.x(), out.position.y());
+  Expect(out.tracking && out.armors_num == 3,
+         "the base is a three-plate fallback target");
+  Expect((out.position.head<2>() - base.centre.head<2>()).norm() < 0.1, "base centre");
+}
+
+void TestOutpostFallback()
+{
+  // 板朝外的物理前哨站：三档高度，0.8π rad/s / A physical outpost with outward plates.
+  Truth outpost{{0.3, 5.0, 0.4}, 0.0, 0.8 * M_PI};
+  outpost.plates = 3;
+  outpost.r_even = outpost.r_odd = Fallback::OUTPOST_RADIUS;
+  outpost.plate_z = {Fallback::OutpostHeightOffset(0, 0),
+                     Fallback::OutpostHeightOffset(1, 0),
+                     Fallback::OutpostHeightOffset(2, 0)};
+  TrackSet set(Settings("outpost"));
+  std::mt19937 rng(6);
+  ArmorTrackerTarget out;
+  double worst = 0.0;
+  for (int i = 0; i < 400; ++i)
+  {
+    std::vector<AutoAim::Armor> armors;
+    for (const auto& c : outpost.Visible(0.01 * i, rng))
+    {
+      armors.push_back(MakeArmor(ArmorNumber::OUTPOST, false, c));
+    }
+    out = set.Step(10000ULL * i, {1, 0, 0, 0}, {0, 0, 0}, CALIBRATION, armors,
+                   ArmorColor::RED);
+    if (i >= 200 && out.tracking)
+    {
+      worst = std::max(worst, (out.position.head<2>() - outpost.centre.head<2>()).norm());
+    }
+  }
+  std::printf("outpost: armors_num %d worst centre err after 2 s %.3f m, v_yaw %.2f\n",
+              out.armors_num, worst, out.v_yaw);
+  Expect(out.tracking && out.armors_num == 3, "three-plate outpost");
+  Expect(worst < 0.05, "centre on the physical axis");
+}
+
+/// 一帧里某辆车可见板的检测，颜色与编号按给定 / One frame of a vehicle's visible plates
+/// with the given colour and number.
+std::vector<AutoAim::Armor> Plates(const Truth& truth, double t, std::mt19937& rng,
+                                   ArmorNumber number, ArmorColor color)
+{
+  std::vector<AutoAim::Armor> armors;
+  for (const auto& c : truth.Visible(t, rng))
+  {
+    armors.push_back(MakeArmor(number, false, c));
+    armors.back().color = color;
+  }
+  return armors;
+}
+
+void TestColourSelection()
+{
+  // 只跟踪对方颜色的亮板：蓝、紫、灭灯与未知的对方颜色都不起目标 / Only lit plates of the
+  // opponent colour are tracked: blue, purple, off and an unknown opponent start nothing.
+  const Truth infantry{{0.0, 4.0, 0.1}, 0.2, 2.0};
+  const struct
+  {
+    ArmorColor plate;
+    ArmorColor enemy;
+    bool tracked;
+  } cases[] = {
+      {ArmorColor::RED, ArmorColor::RED, true},
+      {ArmorColor::BLUE, ArmorColor::RED, false},
+      {ArmorColor::PURPLE, ArmorColor::RED, false},
+      {ArmorColor::OFF, ArmorColor::RED, false},
+      {ArmorColor::RED, ArmorColor::UNKNOWN, false},
+      {ArmorColor::BLUE, ArmorColor::BLUE, true},
+  };
+  for (const auto& c : cases)
+  {
+    TrackSet set(Settings("colour"));
+    std::mt19937 rng(7);
+    ArmorTrackerTarget out;
+    for (int i = 0; i < 50; ++i)
+    {
+      out =
+          set.Step(10000ULL * i, {1, 0, 0, 0}, {0, 0, 0}, CALIBRATION,
+                   Plates(infantry, 0.01 * i, rng, ArmorNumber::THREE, c.plate), c.enemy);
+    }
+    Expect(out.tracking == c.tracked,
+           "tracked only for lit plates of the opponent colour");
+  }
+}
+
+void TestLightsOff()
+{
+  // 受击闪灭不丢目标；持续灭灯判阵亡；阵亡后连续看到亮板 min_detect_s 才恢复；离目标远的
+  // 灭灯板不算。
+  // A hit flash keeps the target; a lasting blackout means destroyed; lit sightings for
+  // min_detect_s revive it; off plates far from the target do not count.
+  const Truth infantry{{0.0, 4.0, 0.1}, 0.2, 2.0};
+  const Truth elsewhere{{2.0, 6.0, 0.1}, 0.2, 2.0};
+  const auto run = [&](const Truth& off_truth, int off_frames, int lit_after)
+  {
+    TrackSet set(Settings("off"));
+    std::mt19937 rng(8);
+    ArmorTrackerTarget out;
+    int i = 0;
+    const auto step = [&](const Truth& truth, ArmorColor color)
+    {
+      out = set.Step(10000ULL * i, {1, 0, 0, 0}, {0, 0, 0}, CALIBRATION,
+                     Plates(truth, 0.01 * i, rng, ArmorNumber::THREE, color),
+                     ArmorColor::RED);
+      ++i;
+    };
+    for (int k = 0; k < 100; ++k)
+    {
+      step(infantry, ArmorColor::RED);
+    }
+    Expect(out.tracking, "tracking before the lights go off");
+    for (int k = 0; k < off_frames; ++k)
+    {
+      step(off_truth, ArmorColor::OFF);
+    }
+    const bool after_off = out.tracking;
+    for (int k = 0; k < lit_after; ++k)
+    {
+      step(infantry, ArmorColor::RED);
+    }
+    return std::pair{after_off, out.tracking};
+  };
+  // 180 ms 灭灯：超过 max_temp_lost_s（150 ms），在 off_hold_s（200 ms）内 / 180 ms off:
+  // over max_temp_lost_s, within off_hold_s.
+  Expect(run(infantry, 18, 0).first, "a 180 ms flash keeps the target");
+  Expect(!run(elsewhere, 18, 0).first, "off plates far from the target do not hold it");
+  Expect(!run(infantry, 120, 0).first, "1.2 s off: not a target");
+  Expect(!run(infantry, 120, 1).second,
+         "one lit frame does not revive a destroyed target");
+  // 灭灯 1.2 s 后估计器重新起步，再加 min_detect_s / After 1.2 s off the estimator
+  // boots again, then min_detect_s.
+  Expect(run(infantry, 120, 10).second, "lit sightings for 0.1 s revive it");
+}
+
+void TestMisreadNumberNotSelected()
+{
+  // 跟踪中的目标这一帧没被认出（颜色读错），同一帧另一块板被误读成别的编号：误读出的
+  // 单帧目标不能被选中。
+  // The tracked target is missed in this frame (its colour misread) while another plate
+  // is misread as another number: that single-frame target must not be selected.
+  TrackSet set(Settings("misread"));
+  const Truth infantry{{0.0, 3.0, 0.1}, 0.2, 2.0};
+  const Truth ghost{{0.8, 5.0, 0.1}, 0.0, 0.0};
+  std::mt19937 rng(9);
+  ArmorTrackerTarget out;
+  int i = 0;
+  for (; i < 100; ++i)
+  {
+    out = set.Step(10000ULL * i, {1, 0, 0, 0}, {0, 0, 0}, CALIBRATION,
+                   Plates(infantry, 0.01 * i, rng, ArmorNumber::THREE, ArmorColor::RED),
+                   ArmorColor::RED);
+  }
+  Expect(out.tracking && out.id == ArmorNumber::THREE, "tracking number three");
+  auto armors = Plates(infantry, 0.01 * i, rng, ArmorNumber::THREE, ArmorColor::BLUE);
+  const auto misread = Plates(ghost, 0.01 * i, rng, ArmorNumber::FOUR, ArmorColor::RED);
+  armors.insert(armors.end(), misread.begin(), misread.end());
+  out = set.Step(10000ULL * i, {1, 0, 0, 0}, {0, 0, 0}, CALIBRATION, armors,
+                 ArmorColor::RED);
+  Expect(out.id != ArmorNumber::FOUR, "a single misread frame is not selected");
+}
+
+void TestViewPolicy()
+{
+  const ViewSettings settings{true, 6.0, 5.0, 0.1, 0.25, 0.1, 0.1};
+  ViewPolicy policy(settings);
+  // 输入：t、选中、TRACKING、距离、在前方、原生像素 / Input: t, selected, TRACKING,
+  // distance, in front, native pixel.
+  using In = ViewPolicy::Input;
+  auto r = policy.Step(CALIBRATION, In{0.0, true, true, 5.5, true, {720, 540}});
+  Expect(!r.view && !r.move, "no NARROW between exit_m and enter_m");
+  r = policy.Step(CALIBRATION, In{0.01, true, false, 7.0, true, {720, 540}});
+  Expect(!r.view, "no NARROW for a target that is not TRACKING");
+  r = policy.Step(CALIBRATION, In{0.02, true, true, 7.0, true, {720, 540}});
+  Expect(r.view && *r.view == View::NARROW && r.move &&
+             std::abs(r.move->u - 0.5) < 1e-9 && std::abs(r.move->v - 0.5) < 1e-9,
+         "NARROW centred on the target beyond enter_m");
+  r = policy.Step(CALIBRATION, In{0.03, true, true, 5.5, true, {800, 540}});
+  Expect(!r.view && !r.move, "stay in NARROW above exit_m, no move inside the band");
+  r = policy.Step(CALIBRATION, In{0.05, true, true, 7.0, true, {900, 540}});
+  Expect(!r.move, "no move before min_move_s");
+  r = policy.Step(CALIBRATION, In{0.12, true, true, 7.0, true, {900, 540}});
+  Expect(!r.view && r.move && std::abs(r.move->u - (900.0 - 320.0) / 800.0) < 1e-9,
+         "window recentred on the target");
+  // 窗口顶到右边缘仍装不下 / The window is against the right edge and cannot fit it.
+  r = policy.Step(CALIBRATION, In{0.3, true, true, 7.0, true, {1430, 540}});
+  Expect(r.view && *r.view == View::WIDE && !r.move,
+         "WIDE when the window cannot follow");
+  r = policy.Step(CALIBRATION, In{0.31, true, true, 7.0, true, {1430, 540}});
+  Expect(!r.view, "no NARROW for a target near the sensor edge");
+  r = policy.Step(CALIBRATION, In{0.4, true, true, 7.0, true, {720, 540}});
+  Expect(r.view && *r.view == View::NARROW, "NARROW again");
+  r = policy.Step(CALIBRATION, In{0.45, true, false, 7.0, true, {720, 540}});
+  Expect(!r.view, "a short TEMP_LOST keeps NARROW");
+  r = policy.Step(CALIBRATION, In{0.5, true, false, 7.0, true, {720, 540}});
+  Expect(r.view && *r.view == View::WIDE, "WIDE after lost_s unseen");
+  policy.Step(CALIBRATION, In{0.6, true, true, 7.0, true, {720, 540}});
+  r = policy.Step(CALIBRATION, In{0.61, true, true, 4.9, true, {720, 540}});
+  Expect(r.view && *r.view == View::WIDE, "WIDE below exit_m");
+  policy.Step(CALIBRATION, In{0.7, true, true, 7.0, true, {720, 540}});
+  r = policy.Step(CALIBRATION, In{0.71, false, false, 0.0, false, {0, 0}});
+  Expect(r.view && *r.view == View::WIDE, "WIDE without a selected target");
+
+  ViewSettings off = settings;
+  off.enabled = false;
+  ViewPolicy disabled(off);
+  r = disabled.Step(CALIBRATION, In{0.0, true, true, 7.0, true, {720, 540}});
+  Expect(!r.view && !r.move, "nothing when disabled");
+}
+
+void TestModule()
+{
+  LibXR::Topic detected =
+      LibXR::Topic::CreateTopic<const AutoAim::DetectedFrame*>("mod_detected");
+  auto* tracker = new ArmorTracker(Settings("mod"), nullptr);
+  struct Received
+  {
+    std::mutex mutex;
+    std::vector<ArmorTrackerTarget> targets;
+  };
+  auto* received = new Received();
+  auto callback = LibXR::Topic::Callback::Create(
+      [](bool, Received* r, const AutoAim::TrackedFrame* f)
+      {
+        Expect(f->detected.synced.image.Valid(), "tracked frame holds the image");
+        std::lock_guard<std::mutex> lock(r->mutex);
+        r->targets.push_back(f->target);
+      },
+      received);
+  AutoAim::RequireTopic<const AutoAim::TrackedFrame*>("mod_tracked")
+      .RegisterCallback(callback);
+
+  ImagePool pool(4);
+  const Truth truth{{0.0, 4.0, 0.1}, 0.3, 2.0};
+  std::mt19937 rng(4);
+  for (int i = 0; i < 50; ++i)
+  {
+    ImagePool::Handle writing;
+    Expect(pool.Acquire(writing) == LibXR::ErrorCode::OK, "image slot");
+    writing->calibration = &CALIBRATION;
+    AutoAim::DetectedFrame frame;
+    frame.synced = {static_cast<uint64_t>(i + 1), SharedFrame(std::move(writing)), {}};
+    frame.synced.imu.timestamp_us = LibXR::MicrosecondTimestamp(10000ULL * (i + 1));
+    frame.synced.imu.rotation_wxyz = {1, 0, 0, 0};
+    for (const auto& c : truth.Visible(0.01 * i, rng))
+    {
+      frame.armors.push_back(MakeArmor(ArmorNumber::TWO, false, c));
+    }
+    const AutoAim::DetectedFrame* payload = &frame;
+    detected.Publish(payload);
+  }
+  for (int t = 0; t < 2000; ++t)
+  {
+    {
+      std::lock_guard<std::mutex> lock(received->mutex);
+      if (received->targets.size() == 50)
+      {
+        break;
+      }
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  std::lock_guard<std::mutex> lock(received->mutex);
+  Expect(received->targets.size() == 50, "one tracked frame per detected frame");
+  Expect(received->targets.back().tracking &&
+             received->targets.back().id == ArmorNumber::TWO,
+         "tracking number two");
+  Expect(received->targets.back().image_timestamp_us == 500000, "IMU timestamp");
+  delete tracker;
+}
+}  // namespace
+
+int main()
+{
+  LibXR::PlatformInit();
+  TestVehicleEstimatorConverges();
+  TestImageDelay();
+  TestSelectionAndSwitching();
+  TestSizeByNumber();
+  TestBaseFallback();
+  TestOutpostFallback();
+  TestColourSelection();
+  TestLightsOff();
+  TestMisreadNumberNotSelected();
+  TestViewPolicy();
+  TestModule();
+  std::puts("armor_tracker_test passed");
+  return 0;
+}
