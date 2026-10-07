@@ -457,11 +457,59 @@ void TestMisreadNumberNotSelected()
   Expect(out.id != ArmorNumber::FOUR, "a single misread frame is not selected");
 }
 
+void TestViewPolicy()
+{
+  const ViewSettings settings{true, 6.0, 5.0, 0.1, 0.25, 0.1, 0.1};
+  ViewPolicy policy(settings);
+  // 输入：t、选中、TRACKING、距离、在前方、原生像素 / Input: t, selected, TRACKING,
+  // distance, in front, native pixel.
+  using In = ViewPolicy::Input;
+  auto r = policy.Step(CALIBRATION, In{0.0, true, true, 5.5, true, {720, 540}});
+  Expect(!r.view && !r.move, "no NARROW between exit_m and enter_m");
+  r = policy.Step(CALIBRATION, In{0.01, true, false, 7.0, true, {720, 540}});
+  Expect(!r.view, "no NARROW for a target that is not TRACKING");
+  r = policy.Step(CALIBRATION, In{0.02, true, true, 7.0, true, {720, 540}});
+  Expect(r.view && *r.view == View::NARROW && r.move &&
+             std::abs(r.move->u - 0.5) < 1e-9 && std::abs(r.move->v - 0.5) < 1e-9,
+         "NARROW centred on the target beyond enter_m");
+  r = policy.Step(CALIBRATION, In{0.03, true, true, 5.5, true, {800, 540}});
+  Expect(!r.view && !r.move, "stay in NARROW above exit_m, no move inside the band");
+  r = policy.Step(CALIBRATION, In{0.05, true, true, 7.0, true, {900, 540}});
+  Expect(!r.move, "no move before min_move_s");
+  r = policy.Step(CALIBRATION, In{0.12, true, true, 7.0, true, {900, 540}});
+  Expect(!r.view && r.move && std::abs(r.move->u - (900.0 - 320.0) / 800.0) < 1e-9,
+         "window recentred on the target");
+  // 窗口顶到右边缘仍装不下 / The window is against the right edge and cannot fit it.
+  r = policy.Step(CALIBRATION, In{0.3, true, true, 7.0, true, {1430, 540}});
+  Expect(r.view && *r.view == View::WIDE && !r.move,
+         "WIDE when the window cannot follow");
+  r = policy.Step(CALIBRATION, In{0.31, true, true, 7.0, true, {1430, 540}});
+  Expect(!r.view, "no NARROW for a target near the sensor edge");
+  r = policy.Step(CALIBRATION, In{0.4, true, true, 7.0, true, {720, 540}});
+  Expect(r.view && *r.view == View::NARROW, "NARROW again");
+  r = policy.Step(CALIBRATION, In{0.45, true, false, 7.0, true, {720, 540}});
+  Expect(!r.view, "a short TEMP_LOST keeps NARROW");
+  r = policy.Step(CALIBRATION, In{0.5, true, false, 7.0, true, {720, 540}});
+  Expect(r.view && *r.view == View::WIDE, "WIDE after lost_s unseen");
+  policy.Step(CALIBRATION, In{0.6, true, true, 7.0, true, {720, 540}});
+  r = policy.Step(CALIBRATION, In{0.61, true, true, 4.9, true, {720, 540}});
+  Expect(r.view && *r.view == View::WIDE, "WIDE below exit_m");
+  policy.Step(CALIBRATION, In{0.7, true, true, 7.0, true, {720, 540}});
+  r = policy.Step(CALIBRATION, In{0.71, false, false, 0.0, false, {0, 0}});
+  Expect(r.view && *r.view == View::WIDE, "WIDE without a selected target");
+
+  ViewSettings off = settings;
+  off.enabled = false;
+  ViewPolicy disabled(off);
+  r = disabled.Step(CALIBRATION, In{0.0, true, true, 7.0, true, {720, 540}});
+  Expect(!r.view && !r.move, "nothing when disabled");
+}
+
 void TestModule()
 {
   LibXR::Topic detected =
       LibXR::Topic::CreateTopic<const AutoAim::DetectedFrame*>("mod_detected");
-  auto* tracker = new ArmorTracker(Settings("mod"));
+  auto* tracker = new ArmorTracker(Settings("mod"), nullptr);
   struct Received
   {
     std::mutex mutex;
@@ -531,6 +579,7 @@ int main()
   TestColourSelection();
   TestLightsOff();
   TestMisreadNumberNotSelected();
+  TestViewPolicy();
   TestModule();
   std::puts("armor_tracker_test passed");
   return 0;

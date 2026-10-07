@@ -154,7 +154,8 @@ int main(int argc, char** argv)
                   1.0,
                   0.07,
                   23.0,
-                  SelectWeights{}},
+                  SelectWeights{},
+                  ViewSettings{}},
                  shape);
     std::printf("ts_us\ttracking\tx\ty\tz\tface\n");
     for (const auto& fr : frames)

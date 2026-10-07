@@ -11,6 +11,7 @@
 #include "AutoAimTypes.hpp"
 #include "FallbackTarget.hpp"
 #include "VehicleEstimator.hpp"
+#include "ViewPolicy.hpp"
 
 /// 检测器角点（灯条四端点）对应的关键点，取自 AutoAimTypes / Keypoints of the
 /// detector's corners (light-bar ends), from AutoAimTypes.
@@ -69,6 +70,7 @@ struct TrackerSettings
   double latency_s;     ///< 帧到命中的固定延迟，整车估计器的速率时域 / Fixed latency
   double bullet_speed;  ///< m/s，同上 / for the rate horizon
   SelectWeights select;
+  ViewSettings view;  ///< 远距离 NARROW 跟随 / NARROW following at long range
 };
 
 /**
@@ -169,6 +171,12 @@ class TrackSet
       Fill(slots_[selected_], static_cast<ArmorNumber>(selected_), out);
     }
     return out;
+  }
+
+  /// 选中目标的状态，没有选中为 LOST / State of the selected target; LOST if none.
+  TrackState SelectedState() const
+  {
+    return selected_ >= 0 ? slots_[selected_].state : TrackState::LOST;
   }
 
   /// 世界系到相机光学系的旋转与平移（行优先），供预览投影 / World-to-optical
