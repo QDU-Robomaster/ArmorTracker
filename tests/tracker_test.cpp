@@ -124,7 +124,20 @@ AutoAim::Armor MakeArmor(ArmorNumber number, bool large,
 
 TrackerSettings Settings(const char* camera)
 {
-  return {camera, {1, 0, 0, 0}, {0, 0, 0}, -1, 2, 15, 75, 0.07, 23.0, SelectWeights{}};
+  TrackerSettings s{};
+  s.camera_name = camera;
+  s.mount_rotation_wxyz = {1, 0, 0, 0};
+  s.mount_translation = {0, 0, 0};
+  s.target_number = -1;
+  s.target_color = TargetColor::RED;
+  s.min_detect_count = 2;
+  s.max_temp_lost = 15;
+  s.outpost_max_temp_lost = 75;
+  s.off_hold_s = 0.2;
+  s.off_dead_s = 1.0;
+  s.latency_s = 0.07;
+  s.bullet_speed = 23.0;
+  return s;
 }
 
 void TestVehicleEstimatorConverges()
@@ -222,7 +235,8 @@ void TestSelectionAndSwitching()
     {
       armors.push_back(MakeArmor(ArmorNumber::FOUR, false, c));
     }
-    out = set.Step(1000000 + 10000ULL * i, {1, 0, 0, 0}, {0, 0, 0}, CALIBRATION, armors);
+    out = set.Step(1000000 + 10000ULL * i, {1, 0, 0, 0}, {0, 0, 0}, CALIBRATION, armors,
+                   ArmorColor::RED);
     if (i == 29)
     {
       Expect(out.tracking && out.id == ArmorNumber::THREE, "the nearer target is chosen");
@@ -249,7 +263,8 @@ void TestSizeByNumber()
     {
       armors.push_back(MakeArmor(ArmorNumber::THREE, true, c));
     }
-    out = set.Step(10000ULL * i, {1, 0, 0, 0}, {0, 0, 0}, CALIBRATION, armors);
+    out = set.Step(10000ULL * i, {1, 0, 0, 0}, {0, 0, 0}, CALIBRATION, armors,
+                   ArmorColor::RED);
   }
   std::printf("size: armors_num %d centre err %.4f m\n", out.armors_num,
               (out.position.head<2>() - infantry.centre.head<2>()).norm());
@@ -275,7 +290,8 @@ void TestBaseFallback()
     {
       armors.push_back(MakeArmor(ArmorNumber::BASE, false, c));
     }
-    out = set.Step(10000ULL * i, {1, 0, 0, 0}, {0, 0, 0}, CALIBRATION, armors);
+    out = set.Step(10000ULL * i, {1, 0, 0, 0}, {0, 0, 0}, CALIBRATION, armors,
+                   ArmorColor::RED);
   }
   std::printf("base: armors_num %d centre (%.3f, %.3f)\n", out.armors_num,
               out.position.x(), out.position.y());
@@ -304,7 +320,8 @@ void TestOutpostFallback()
     {
       armors.push_back(MakeArmor(ArmorNumber::OUTPOST, false, c));
     }
-    out = set.Step(10000ULL * i, {1, 0, 0, 0}, {0, 0, 0}, CALIBRATION, armors);
+    out = set.Step(10000ULL * i, {1, 0, 0, 0}, {0, 0, 0}, CALIBRATION, armors,
+                   ArmorColor::RED);
     if (i >= 200 && out.tracking)
     {
       worst = std::max(worst, (out.position.head<2>() - outpost.centre.head<2>()).norm());
@@ -314,6 +331,100 @@ void TestOutpostFallback()
               out.armors_num, worst, out.v_yaw);
   Expect(out.tracking && out.armors_num == 3, "three-plate outpost");
   Expect(worst < 0.05, "centre on the physical axis");
+}
+
+/// 一帧里某辆车可见板的检测，颜色与编号按给定 / One frame of a vehicle's visible plates
+/// with the given colour and number.
+std::vector<AutoAim::Armor> Plates(const Truth& truth, double t, std::mt19937& rng,
+                                   ArmorNumber number, ArmorColor color)
+{
+  std::vector<AutoAim::Armor> armors;
+  for (const auto& c : truth.Visible(t, rng))
+  {
+    armors.push_back(MakeArmor(number, false, c));
+    armors.back().color = color;
+  }
+  return armors;
+}
+
+void TestColourSelection()
+{
+  // 只跟踪对方颜色的亮板：蓝、紫、灭灯与未知的对方颜色都不起目标 / Only lit plates of the
+  // opponent colour are tracked: blue, purple, off and an unknown opponent start nothing.
+  const Truth infantry{{0.0, 4.0, 0.1}, 0.2, 2.0};
+  const struct
+  {
+    ArmorColor plate;
+    ArmorColor enemy;
+    bool tracked;
+  } cases[] = {
+      {ArmorColor::RED, ArmorColor::RED, true},
+      {ArmorColor::BLUE, ArmorColor::RED, false},
+      {ArmorColor::PURPLE, ArmorColor::RED, false},
+      {ArmorColor::OFF, ArmorColor::RED, false},
+      {ArmorColor::RED, ArmorColor::UNKNOWN, false},
+      {ArmorColor::BLUE, ArmorColor::BLUE, true},
+  };
+  for (const auto& c : cases)
+  {
+    TrackSet set(Settings("colour"));
+    std::mt19937 rng(7);
+    ArmorTrackerTarget out;
+    for (int i = 0; i < 50; ++i)
+    {
+      out =
+          set.Step(10000ULL * i, {1, 0, 0, 0}, {0, 0, 0}, CALIBRATION,
+                   Plates(infantry, 0.01 * i, rng, ArmorNumber::THREE, c.plate), c.enemy);
+    }
+    Expect(out.tracking == c.tracked,
+           "tracked only for lit plates of the opponent colour");
+  }
+}
+
+void TestLightsOff()
+{
+  // 受击闪灭不丢目标；持续灭灯判阵亡；阵亡后连续两帧亮板才恢复；离目标远的灭灯板不算。
+  // A hit flash keeps the target; a lasting blackout means destroyed; two lit frames in a
+  // row revive it; off plates far from the target do not count.
+  const Truth infantry{{0.0, 4.0, 0.1}, 0.2, 2.0};
+  const Truth elsewhere{{2.0, 6.0, 0.1}, 0.2, 2.0};
+  const auto run = [&](const Truth& off_truth, int off_frames, int lit_after)
+  {
+    TrackSet set(Settings("off"));
+    std::mt19937 rng(8);
+    ArmorTrackerTarget out;
+    int i = 0;
+    const auto step = [&](const Truth& truth, ArmorColor color)
+    {
+      out = set.Step(10000ULL * i, {1, 0, 0, 0}, {0, 0, 0}, CALIBRATION,
+                     Plates(truth, 0.01 * i, rng, ArmorNumber::THREE, color),
+                     ArmorColor::RED);
+      ++i;
+    };
+    for (int k = 0; k < 100; ++k)
+    {
+      step(infantry, ArmorColor::RED);
+    }
+    Expect(out.tracking, "tracking before the lights go off");
+    for (int k = 0; k < off_frames; ++k)
+    {
+      step(off_truth, ArmorColor::OFF);
+    }
+    const bool after_off = out.tracking;
+    for (int k = 0; k < lit_after; ++k)
+    {
+      step(infantry, ArmorColor::RED);
+    }
+    return std::pair{after_off, out.tracking};
+  };
+  // 180 ms 灭灯：超过 max_temp_lost（150 ms），在 off_hold_s（200 ms）内 / 180 ms off:
+  // over max_temp_lost, within off_hold_s.
+  Expect(run(infantry, 18, 0).first, "a 180 ms flash keeps the target");
+  Expect(!run(elsewhere, 18, 0).first, "off plates far from the target do not hold it");
+  Expect(!run(infantry, 120, 0).first, "1.2 s off: not a target");
+  Expect(!run(infantry, 120, 1).second,
+         "one lit frame does not revive a destroyed target");
+  Expect(run(infantry, 120, 2).second, "two lit frames in a row revive it");
 }
 
 void TestModule()
@@ -387,6 +498,8 @@ int main()
   TestSizeByNumber();
   TestBaseFallback();
   TestOutpostFallback();
+  TestColourSelection();
+  TestLightsOff();
   TestModule();
   std::puts("armor_tracker_test passed");
   return 0;

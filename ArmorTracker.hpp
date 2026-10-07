@@ -2,7 +2,7 @@
 
 // clang-format off
 /* === MODULE MANIFEST V2 ===
-module_description: 装甲板跟踪：四块板的整车用整车估计器，其余用兜底 EKF，多目标中选出要打的一个，发布跟踪帧 / Armor tracking with the vehicle estimator for four-plate vehicles and a fallback EKF for the rest; picks one of several targets and publishes tracked frames
+module_description: 装甲板跟踪：按对方颜色选板，四块板的整车用整车估计器，其余用兜底 EKF，处理受击灭灯与阵亡，多目标中选出要打的一个，发布跟踪帧 / Armor tracking that picks plates of the opponent colour, uses the vehicle estimator for four-plate vehicles and a fallback EKF for the rest, handles hit flashes and destroyed robots, picks one of several targets and publishes tracked frames
 depends:
 - id: QDU-Robomaster/CameraBase
   ref: same-or-dev
@@ -16,6 +16,7 @@ depends:
 #include <cstdint>
 #include <deque>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 
@@ -30,16 +31,22 @@ depends:
  *        Armor tracking. Subscribes to `<camera>_detected`, publishes `<camera>_tracked`.
  *
  * 检测帧进一个有界队列，满了在检测器的发布线程里等待，所以每一帧都被跟踪；工作线程按顺序
- * 处理并发布，每收一帧发一帧。
+ * 处理并发布，每收一帧发一帧。检测器发布所有颜色，这里按 target_color 只跟踪
+ * 对方颜色的亮板。
  * Detected frames go into a bounded queue; when it is full the detector's publishing
  * thread waits, so every frame is tracked. The worker thread processes and publishes in
- * order, one frame out per frame in.
+ * order, one frame out per frame in. The detector publishes every colour; only lit
+ * plates of the opponent colour (target_color) are tracked here.
  */
 class ArmorTracker
 {
  public:
   /// 队列容量：排队的帧占着相机图像槽 / Queue capacity; queued frames hold image slots.
   static constexpr std::size_t QUEUE_CAPACITY = 2;
+  /// 裁判系统摘要包 Topic，首字节为本机 robot_id / Referee summary Topic; its first byte
+  /// is the robot_id.
+  static constexpr const char* REFEREE_TOPIC = "robot_game_ref";
+  static constexpr const char* REFEREE_DOMAIN = "host";
 
   explicit ArmorTracker(const TrackerSettings& settings)
       : camera_name_(settings.camera_name),
@@ -47,6 +54,19 @@ class ArmorTracker
         tracked_topic_(LibXR::Topic::CreateTopic<const AutoAim::TrackedFrame*>(
             StageTopicName(camera_name_, AutoAim::STAGE_TRACKED).c_str()))
   {
+    switch (settings.target_color)
+    {
+      case TargetColor::RED:
+        enemy_.store(ArmorColor::RED);
+        break;
+      case TargetColor::BLUE:
+        enemy_.store(ArmorColor::BLUE);
+        break;
+      case TargetColor::FROM_REFEREE:
+        // 收到第一包之前不跟踪 / Nothing is tracked before the first packet.
+        SubscribeReferee();
+        break;
+    }
     auto on_detected = LibXR::Topic::Callback::Create(
         [](bool, ArmorTracker* self, const AutoAim::DetectedFrame* frame)
         { self->Push(*frame); }, this);
@@ -79,6 +99,39 @@ class ArmorTracker
   }
 
  private:
+  void SubscribeReferee()
+  {
+    referee_domain_.emplace(REFEREE_DOMAIN);
+    LibXR::Topic::TopicHandle topic =
+        LibXR::Topic::Find(REFEREE_TOPIC, &*referee_domain_);
+    if (topic == nullptr)
+    {
+      XR_LOG_ERROR("target_color FROM_REFEREE needs the Topic %s/%s", REFEREE_DOMAIN,
+                   REFEREE_TOPIC);
+      REQUIRE(false);
+    }
+    auto on_referee = LibXR::Topic::Callback::Create(
+        [](bool, ArmorTracker* self, const LibXR::ConstRawData& data)
+        {
+          if (data.addr_ == nullptr || data.size_ < 1)
+          {
+            return;
+          }
+          // 1–99 为红方，101–199 为蓝方 / 1–99 red, 101–199 blue.
+          const uint8_t id = *static_cast<const uint8_t*>(data.addr_);
+          if (id >= 1 && id < 100)
+          {
+            self->enemy_.store(ArmorColor::BLUE);
+          }
+          else if (id >= 101 && id < 200)
+          {
+            self->enemy_.store(ArmorColor::RED);
+          }
+        },
+        this);
+    LibXR::Topic(topic).RegisterCallback(on_referee);
+  }
+
   void Push(const AutoAim::DetectedFrame& frame)
   {
     std::unique_lock<std::mutex> lock(mutex_);
@@ -126,7 +179,7 @@ class ArmorTracker
     tracked.target =
         tracks_.Step(static_cast<uint64_t>(synced.imu.timestamp_us),
                      synced.imu.rotation_wxyz, synced.imu.angular_velocity_xyz,
-                     *synced.image->calibration, tracked.detected.armors);
+                     *synced.image->calibration, tracked.detected.armors, enemy_.load());
     tracks_.WorldToCamera(tracked.output_to_camera_rotation,
                           tracked.output_to_camera_translation);
     const AutoAim::TrackedFrame* payload = &tracked;
@@ -141,6 +194,8 @@ class ArmorTracker
   const std::string camera_name_;
   TrackSet tracks_;
   LibXR::Topic tracked_topic_;
+  std::optional<LibXR::Topic::Domain> referee_domain_;
+  std::atomic<ArmorColor> enemy_{ArmorColor::UNKNOWN};
   std::mutex mutex_;
   std::condition_variable not_empty_;
   std::condition_variable not_full_;

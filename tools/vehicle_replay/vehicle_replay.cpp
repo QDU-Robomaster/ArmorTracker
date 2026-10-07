@@ -146,9 +146,12 @@ int main(int argc, char** argv)
                   {1, 0, 0, 0},
                   {0, 0, 0},
                   number,
+                  TargetColor::RED,
                   2,
                   15,
                   75,
+                  0.2,
+                  1.0,
                   0.07,
                   23.0,
                   SelectWeights{}},
@@ -179,8 +182,8 @@ int main(int argc, char** argv)
       const std::array<float, 4> q{
           static_cast<float>(imu.q[i][0]), static_cast<float>(imu.q[i][1]),
           static_cast<float>(imu.q[i][2]), static_cast<float>(imu.q[i][3])};
-      const ArmorTrackerTarget o =
-          set.Step(static_cast<uint64_t>(ts), q, {0, 0, 0}, calibration, armors);
+      const ArmorTrackerTarget o = set.Step(static_cast<uint64_t>(ts), q, {0, 0, 0},
+                                            calibration, armors, ArmorColor::RED);
       std::printf("%lld\t%d\t%.9f\t%.9f\t%.9f\t%d\n", ts, o.tracking ? 1 : 0,
                   o.position.x(), o.position.y(), o.position.z(), o.tracked_face_index);
     }
