@@ -130,9 +130,9 @@ TrackerSettings Settings(const char* camera)
   s.mount_translation = {0, 0, 0};
   s.target_number = -1;
   s.target_color = TargetColor::RED;
-  s.min_detect_count = 2;
-  s.max_temp_lost = 15;
-  s.outpost_max_temp_lost = 75;
+  s.min_detect_s = 0.02;
+  s.max_temp_lost_s = 0.15;
+  s.outpost_max_temp_lost_s = 0.75;
   s.off_hold_s = 0.2;
   s.off_dead_s = 1.0;
   s.latency_s = 0.07;
@@ -383,9 +383,10 @@ void TestColourSelection()
 
 void TestLightsOff()
 {
-  // 受击闪灭不丢目标；持续灭灯判阵亡；阵亡后连续两帧亮板才恢复；离目标远的灭灯板不算。
-  // A hit flash keeps the target; a lasting blackout means destroyed; two lit frames in a
-  // row revive it; off plates far from the target do not count.
+  // 受击闪灭不丢目标；持续灭灯判阵亡；阵亡后连续看到亮板 min_detect_s 才恢复；离目标远的
+  // 灭灯板不算。
+  // A hit flash keeps the target; a lasting blackout means destroyed; lit sightings for
+  // min_detect_s revive it; off plates far from the target do not count.
   const Truth infantry{{0.0, 4.0, 0.1}, 0.2, 2.0};
   const Truth elsewhere{{2.0, 6.0, 0.1}, 0.2, 2.0};
   const auto run = [&](const Truth& off_truth, int off_frames, int lit_after)
@@ -417,14 +418,43 @@ void TestLightsOff()
     }
     return std::pair{after_off, out.tracking};
   };
-  // 180 ms 灭灯：超过 max_temp_lost（150 ms），在 off_hold_s（200 ms）内 / 180 ms off:
-  // over max_temp_lost, within off_hold_s.
+  // 180 ms 灭灯：超过 max_temp_lost_s（150 ms），在 off_hold_s（200 ms）内 / 180 ms off:
+  // over max_temp_lost_s, within off_hold_s.
   Expect(run(infantry, 18, 0).first, "a 180 ms flash keeps the target");
   Expect(!run(elsewhere, 18, 0).first, "off plates far from the target do not hold it");
   Expect(!run(infantry, 120, 0).first, "1.2 s off: not a target");
   Expect(!run(infantry, 120, 1).second,
          "one lit frame does not revive a destroyed target");
-  Expect(run(infantry, 120, 2).second, "two lit frames in a row revive it");
+  // 灭灯 1.2 s 后估计器重新起步，再加 min_detect_s / After 1.2 s off the estimator
+  // boots again, then min_detect_s.
+  Expect(run(infantry, 120, 10).second, "lit sightings for 0.1 s revive it");
+}
+
+void TestMisreadNumberNotSelected()
+{
+  // 跟踪中的目标这一帧没被认出（颜色读错），同一帧另一块板被误读成别的编号：误读出的
+  // 单帧目标不能被选中。
+  // The tracked target is missed in this frame (its colour misread) while another plate
+  // is misread as another number: that single-frame target must not be selected.
+  TrackSet set(Settings("misread"));
+  const Truth infantry{{0.0, 3.0, 0.1}, 0.2, 2.0};
+  const Truth ghost{{0.8, 5.0, 0.1}, 0.0, 0.0};
+  std::mt19937 rng(9);
+  ArmorTrackerTarget out;
+  int i = 0;
+  for (; i < 100; ++i)
+  {
+    out = set.Step(10000ULL * i, {1, 0, 0, 0}, {0, 0, 0}, CALIBRATION,
+                   Plates(infantry, 0.01 * i, rng, ArmorNumber::THREE, ArmorColor::RED),
+                   ArmorColor::RED);
+  }
+  Expect(out.tracking && out.id == ArmorNumber::THREE, "tracking number three");
+  auto armors = Plates(infantry, 0.01 * i, rng, ArmorNumber::THREE, ArmorColor::BLUE);
+  const auto misread = Plates(ghost, 0.01 * i, rng, ArmorNumber::FOUR, ArmorColor::RED);
+  armors.insert(armors.end(), misread.begin(), misread.end());
+  out = set.Step(10000ULL * i, {1, 0, 0, 0}, {0, 0, 0}, CALIBRATION, armors,
+                 ArmorColor::RED);
+  Expect(out.id != ArmorNumber::FOUR, "a single misread frame is not selected");
 }
 
 void TestModule()
@@ -500,6 +530,7 @@ int main()
   TestOutpostFallback();
   TestColourSelection();
   TestLightsOff();
+  TestMisreadNumberNotSelected();
   TestModule();
   std::puts("armor_tracker_test passed");
   return 0;

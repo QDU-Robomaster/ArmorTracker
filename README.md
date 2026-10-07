@@ -47,21 +47,21 @@ The outpost (three plates at three heights) and the base (three plates) are not 
 
 `TrackSet.hpp` keeps one slot each for numbers 1–5, the outpost, the sentry and the base. The plate size follows the number: number 1 and the base are large, the rest small, regardless of the detector's size output.
 
-槽的状态：`LOST` → 看到即 `DETECTING` → 连续看到 `min_detect_count` 帧为 `TRACKING` → 没看到为 `TEMP_LOST` → 连续 `max_temp_lost` 帧（前哨站 `outpost_max_temp_lost`）没看到回到 `LOST`。状态只决定能否被选中；整车估计器连续 2 s 没看到才丢弃，兜底目标在发散或 NIS 连续超限时重置。
+槽的状态：`LOST` → 看到即 `DETECTING` → 连续看到 `min_detect_s` 秒为 `TRACKING` → 没看到为 `TEMP_LOST` → 超过 `max_temp_lost_s` 秒（前哨站 `outpost_max_temp_lost_s`）没看到回到 `LOST`。状态按时间推进，换帧率不改变行为。只有 `TRACKING` 与 `TEMP_LOST` 的槽可选，刚看到的不选，编号误判出的单帧目标因此不会被打。状态只决定能否被选中；整车估计器连续 2 s 没看到才丢弃，兜底目标在发散或 NIS 连续超限时重置。
 
-Slot states: `LOST` → `DETECTING` when seen → `TRACKING` after `min_detect_count` frames → `TEMP_LOST` when unseen → back to `LOST` after `max_temp_lost` frames (`outpost_max_temp_lost` for the outpost). The state only decides whether a slot can be chosen; a vehicle estimator is dropped after 2 s unseen, and a fallback target is reset when it diverges or keeps failing NIS.
+Slot states: `LOST` → `DETECTING` when seen → `TRACKING` after `min_detect_s` seconds of sightings → `TEMP_LOST` when unseen → back to `LOST` after `max_temp_lost_s` seconds unseen (`outpost_max_temp_lost_s` for the outpost). The states run on time, so the frame rate does not change the behaviour. Only `TRACKING` and `TEMP_LOST` slots are selectable; a slot just seen is not, so a single frame with a misread number is not engaged. The state only decides whether a slot can be chosen; a vehicle estimator is dropped after 2 s unseen, and a fallback target is reset when it diverges or keeps failing NIS.
 
 检测器发布所有颜色的检测，这里只用对方颜色的亮板。`target_color` 为 `RED`、`BLUE` 或 `FROM_REFEREE`：`FROM_REFEREE` 订阅 `host` 域的裁判系统摘要包 `robot_game_ref`，按首字节的本机 robot_id 取对方颜色（1–99 为红方，101–199 为蓝方），收到第一包之前不跟踪。紫色与本方颜色的板不用。
 
 The detector publishes every colour; only lit plates of the opponent colour are used here. `target_color` is `RED`, `BLUE` or `FROM_REFEREE`: `FROM_REFEREE` subscribes to the referee summary `robot_game_ref` in the `host` domain and takes the opponent of the robot_id in its first byte (1–99 red, 101–199 blue); nothing is tracked before the first packet. Purple and own-colour plates are not used.
 
-装甲板受击时灯条闪灭（每次约 100 ms），阵亡后一直灭，检测器把这类板报为灭灯（`ArmorColor::OFF`）。灭灯板只用于已有目标：中心落在该编号目标中心 0.5 m 以内（按中心深度换算成像素）才算。一段灭灯（两次相隔不超过 `off_hold_s`）持续不超过 `off_hold_s` 时该帧算作看到，目标只做预测，角点不进滤波（v7 不训练灭灯板的角点）；持续达到 `off_dead_s` 判为阵亡，该编号不可选，直到连续 `min_detect_count` 帧再看到亮板。
+装甲板受击时灯条闪灭（每次约 100 ms），阵亡后一直灭，检测器把这类板报为灭灯（`ArmorColor::OFF`）。灭灯板只用于已有目标：中心落在该编号目标中心 0.5 m 以内（按中心深度换算成像素）才算。一段灭灯（两次相隔不超过 `off_hold_s`）持续不超过 `off_hold_s` 时该帧算作看到，目标只做预测，角点不进滤波（v7 不训练灭灯板的角点）；持续达到 `off_dead_s` 判为阵亡，该编号不可选，直到连续 `min_detect_s` 秒再看到亮板。
 
-A hit flashes the light bars off (about 100 ms each time) and a destroyed robot stays off; the detector reports such plates as off (`ArmorColor::OFF`). Off plates only serve existing targets and count when their centre lies within 0.5 m of that number's target centre, converted to pixels at the centre's depth. While an off spell (gaps no longer than `off_hold_s`) has lasted at most `off_hold_s`, the frame counts as seen and the target is only predicted, without a corner update (v7 does not train corners on off plates); after `off_dead_s` the robot is judged destroyed and the number is not selectable until lit plates are seen again in `min_detect_count` consecutive frames.
+A hit flashes the light bars off (about 100 ms each time) and a destroyed robot stays off; the detector reports such plates as off (`ArmorColor::OFF`). Off plates only serve existing targets and count when their centre lies within 0.5 m of that number's target centre, converted to pixels at the centre's depth. While an off spell (gaps no longer than `off_hold_s`) has lasted at most `off_hold_s`, the frame counts as seen and the target is only predicted, without a corner update (v7 does not train corners on off plates); after `off_dead_s` the robot is judged destroyed and the number is not selectable until lit plates are seen again for `min_detect_s`.
 
-每个可选的槽打分：观测数、距离、可打面积（原生像素）、转速、偏离光轴的角度，各项归一化后加权，`DETECTING` 与 `TEMP_LOST` 打折扣。得分最高者为目标，换目标要领先 `switch_margin`。设置 `target_number` 后只打该编号。
+每个可选的槽打分：观测数、距离、可打面积（原生像素）、转速、偏离光轴的角度，各项归一化后加权，`TEMP_LOST` 打折扣。得分最高者为目标，换目标要领先 `switch_margin`。设置 `target_number` 后只打该编号。
 
-Each selectable slot is scored from the observation count, distance, hittable area (native pixels), spin and angle off the optical axis, normalised and weighted, with `DETECTING` and `TEMP_LOST` discounted. The best score is the target, and switching needs a lead of `switch_margin`. With `target_number` set only that number is engaged.
+Each selectable slot is scored from the observation count, distance, hittable area (native pixels), spin and angle off the optical axis, normalised and weighted, with `TEMP_LOST` discounted. The best score is the target, and switching needs a lead of `switch_margin`. With `target_number` set only that number is engaged.
 
 ## 5. 线程与 Topic / Threads and Topics
 
@@ -91,9 +91,9 @@ modules:
           mount_translation: [0.0, 0.0, 0.0]
           target_number: -1
           target_color: TargetColor::FROM_REFEREE
-          min_detect_count: 2
-          max_temp_lost: 15
-          outpost_max_temp_lost: 75
+          min_detect_s: 0.02
+          max_temp_lost_s: 0.15
+          outpost_max_temp_lost_s: 0.75
           off_hold_s: 0.2
           off_dead_s: 1.0
           latency_s: 0.07
@@ -107,9 +107,9 @@ modules:
 
 ## 7. 测试 / Tests
 
-`tests/tracker_test.cpp` 用合成的车辆检测检查：整车估计器在转动目标上收敛（中心 < 2 cm、转速 < 0.3 rad/s）、图像比姿态旧 2 ms 且云台 7.5 Hz 摆动时给角速度后偏差估计误差 < 0.5 ms、速度误差减半以上、两个目标中选近的并在其消失后换到另一个、检测器把 3 号报成大板时仍按小板整车跟踪、基地按三块板兜底、板朝外的前哨站中心落在转轴上（< 5 cm）、只跟踪对方颜色的亮板、180 ms 受击灭灯不丢目标而远处的灭灯板不算、灭灯 1.2 s 判阵亡且连续两帧亮板才恢复、模块每收一帧发一帧。
+`tests/tracker_test.cpp` 用合成的车辆检测检查：整车估计器在转动目标上收敛（中心 < 2 cm、转速 < 0.3 rad/s）、图像比姿态旧 2 ms 且云台 7.5 Hz 摆动时给角速度后偏差估计误差 < 0.5 ms、速度误差减半以上、两个目标中选近的并在其消失后换到另一个、检测器把 3 号报成大板时仍按小板整车跟踪、基地按三块板兜底、板朝外的前哨站中心落在转轴上（< 5 cm）、只跟踪对方颜色的亮板、180 ms 受击灭灯不丢目标而远处的灭灯板不算、灭灯 1.2 s 判阵亡、只亮一帧不恢复而亮 0.1 s 恢复、跟踪中的目标漏检的同一帧里编号误判出的单帧目标不被选中、模块每收一帧发一帧。
 
-`tests/tracker_test.cpp` checks with synthetic vehicle detections that the vehicle estimator converges on a spinning target (centre < 2 cm, spin < 0.3 rad/s), with the image 2 ms older than its attitude under a 7.5 Hz gimbal sway the body rate brings the delay estimate within 0.5 ms and at least halves the velocity error, the nearer of two targets is chosen and the other takes over when it disappears, number 3 reported as large is still tracked as a small-plate vehicle, the base falls back to a three-plate target, an outward-facing outpost keeps its centre on the spin axis (< 5 cm), only lit plates of the opponent colour are tracked, a 180 ms hit flash keeps the target while off plates far from it do not, 1.2 s off means destroyed and two lit frames in a row revive it, and the Module publishes one frame per frame.
+`tests/tracker_test.cpp` checks with synthetic vehicle detections that the vehicle estimator converges on a spinning target (centre < 2 cm, spin < 0.3 rad/s), with the image 2 ms older than its attitude under a 7.5 Hz gimbal sway the body rate brings the delay estimate within 0.5 ms and at least halves the velocity error, the nearer of two targets is chosen and the other takes over when it disappears, number 3 reported as large is still tracked as a small-plate vehicle, the base falls back to a three-plate target, an outward-facing outpost keeps its centre on the spin axis (< 5 cm), only lit plates of the opponent colour are tracked, a 180 ms hit flash keeps the target while off plates far from it do not, 1.2 s off means destroyed, one lit frame does not revive it while 0.1 s of lit sightings do, a single frame with a misread number is not selected while the tracked target is missed, and the Module publishes one frame per frame.
 
 ## 8. 依赖 / Dependencies
 

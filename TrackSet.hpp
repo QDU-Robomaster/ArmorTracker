@@ -41,7 +41,6 @@ struct SelectWeights
   double observed_count_norm = 4.0;
   double max_spin_rad_s = 8.0;
   double max_angle_rad = 0.3;  ///< 偏离光轴的角度 / Angle off the optical axis
-  double detecting_scale = 0.55;
   double temp_lost_scale = 0.35;
   double switch_margin = 0.25;
 };
@@ -62,9 +61,9 @@ struct TrackerSettings
   std::array<double, 3> mount_translation;    ///< m
   int target_number;                          ///< 只打该编号，-1 为不限 / -1 = any
   TargetColor target_color;                   ///< 对方颜色 / Opponent colour
-  int min_detect_count;                       ///< 2
-  int max_temp_lost;                          ///< 帧 / frames, 15
-  int outpost_max_temp_lost;                  ///< 帧 / frames, 75
+  double min_detect_s;                        ///< 看到多久可选 / Seen to select, s, 0.02
+  double max_temp_lost_s;          ///< 没看到多久丢失 / Unseen to lose, s, 0.15
+  double outpost_max_temp_lost_s;  ///< 前哨站 / Outpost, s, 0.75
   double off_hold_s;    ///< 灭灯仍算看到的时长，0.2 / Off time still counted as seen, s
   double off_dead_s;    ///< 判阵亡的灭灯时长，1.0 / Off time meaning destroyed, s
   double latency_s;     ///< 帧到命中的固定延迟，整车估计器的速率时域 / Fixed latency
@@ -86,6 +85,9 @@ class TrackSet
   /// 灭灯板与目标中心的最大距离：车半径加板半宽再留余量 / Largest distance of an off
   /// plate from the target centre: vehicle radius plus half a plate and a margin.
   static constexpr double OFF_GATE_M = 0.5;
+  /// 时间比较的容差，抵消微秒换算成秒的舍入 / Tolerance of time comparisons, absorbing
+  /// the rounding of microseconds to seconds.
+  static constexpr double TIME_EPS = 1e-6;
 
   /// shape 只在与原型对拍时改 / Change `shape` only for the parity check.
   explicit TrackSet(const TrackerSettings& s,
@@ -194,8 +196,8 @@ class TrackSet
     std::optional<Vehicle::VehicleEstimator> vehicle;
     Vehicle::VehicleTarget vehicle_target;
     std::optional<Fallback::FallbackTarget> fallback;
-    int detect_count = 0;
-    int temp_lost = 0;
+    double detect_since = -1.0;  ///< 这次连续看到的起点 / Start of this run of sightings
+    double last_found = -1.0;    ///< 最近一次看到 / Last time seen
     double count_lpf = 0.0;
     double area = 0.0;
     double view_angle = 1.0;
@@ -209,7 +211,7 @@ class TrackSet
     double off_since = -1.0;  ///< 这段灭灯开始的时刻，没有为负 / Start of the off spell
     double last_off = -1.0;   ///< 最近一次看到灭灯板 / Last time a plate was seen off
     bool destroyed = false;   ///< 判为阵亡，不可选 / Judged destroyed, not selectable
-    int revive_count = 0;     ///< 阵亡后连续看到亮板的帧数 / Lit frames since destroyed
+    double revive_since = -1.0;  ///< 阵亡后连续看到亮板的起点 / Start of lit sightings
 
     bool Initialized() const { return vehicle.has_value() || fallback.has_value(); }
   };
@@ -240,7 +242,7 @@ class TrackSet
       slot.off_since = -1.0;
       slot.last_off = -1.0;
       slot.destroyed = false;
-      slot.revive_count = 0;
+      slot.revive_since = -1.0;
     }
     has_base_ = false;
     selected_ = -1;
@@ -254,8 +256,8 @@ class TrackSet
     slot.vehicle.reset();
     slot.vehicle_target = {};
     slot.fallback.reset();
-    slot.detect_count = 0;
-    slot.temp_lost = 0;
+    slot.detect_since = -1.0;
+    slot.last_found = -1.0;
     slot.score = -std::numeric_limits<double>::infinity();
     slot.centre_valid = false;
   }
@@ -331,7 +333,7 @@ class TrackSet
       slot.centre_valid = true;
     }
     found = UpdateOff(slot, found, !dets.empty(), off, t);
-    Advance(slot, found);
+    Advance(slot, found, t);
     // 状态机只决定能否被选为目标；整车估计器连续 2 s
     // 没看到才丢弃，丢失后由它自己重新起步。
     //
@@ -499,15 +501,21 @@ class TrackSet
     return start;
   }
 
-  void Advance(Slot& slot, bool found) const
+  /// 状态机按时间推进，换帧率不改变行为 / The state machine runs on time, so the
+  /// frame rate does not change its behaviour.
+  void Advance(Slot& slot, bool found, double t) const
   {
+    if (found)
+    {
+      slot.last_found = t;
+    }
     switch (slot.state)
     {
       case TrackState::LOST:
         if (found)
         {
           slot.state = TrackState::DETECTING;
-          slot.detect_count = 1;
+          slot.detect_since = t;
         }
         break;
       case TrackState::DETECTING:
@@ -515,7 +523,7 @@ class TrackSet
         {
           slot.state = TrackState::LOST;
         }
-        else if (++slot.detect_count >= s_.min_detect_count)
+        else if (t - slot.detect_since >= s_.min_detect_s - TIME_EPS)
         {
           slot.state = TrackState::TRACKING;
         }
@@ -524,7 +532,6 @@ class TrackSet
         if (!found)
         {
           slot.state = TrackState::TEMP_LOST;
-          slot.temp_lost = 1;
         }
         break;
       case TrackState::TEMP_LOST:
@@ -536,7 +543,8 @@ class TrackSet
         }
         const bool outpost =
             slot.fallback && slot.fallback->GetKind() == Fallback::Kind::OUTPOST;
-        if (++slot.temp_lost > (outpost ? s_.outpost_max_temp_lost : s_.max_temp_lost))
+        if (t - slot.last_found >
+            (outpost ? s_.outpost_max_temp_lost_s : s_.max_temp_lost_s) + TIME_EPS)
         {
           slot.state = TrackState::LOST;
         }
@@ -566,25 +574,24 @@ class TrackSet
         clamp01(1.0 - std::abs(spin) / std::max(w.max_spin_rad_s, 1e-6));
     const double angle_score =
         clamp01(1.0 - slot.view_angle / std::max(w.max_angle_rad, 1e-6));
-    const double scale = slot.state == TrackState::DETECTING   ? w.detecting_scale
-                         : slot.state == TrackState::TEMP_LOST ? w.temp_lost_scale
-                                                               : 1.0;
+    const double scale = slot.state == TrackState::TEMP_LOST ? w.temp_lost_scale : 1.0;
     return scale * (w.observed_count_weight * count_score +
                     w.distance_weight * distance_score + w.area_weight * area_score +
                     w.spin_weight * spin_score + w.angle_weight * angle_score);
   }
 
   /**
-   * @brief 灭灯与阵亡。受击时灯条闪灭（每次约 100
-   * ms），阵亡后一直灭。已有目标附近的灭灯板 在 off_hold_s
-   * 内算作看到（只预测，角点不进滤波：v7 不训练灭灯板的角点）；连续灭灯 达到 off_dead_s
-   * 判阵亡，之后连续 min_detect_count 帧看到亮板才恢复可选。返回这一帧 是否算看到。
-   *        Lights off and destruction. A hit flashes the light bars off (about 100 ms
-   * each time); a destroyed robot stays off. Off plates near an existing target count as
-   *        seen within off_hold_s (prediction only, no corner update: v7 does not train
-   *        corners on off plates); off for off_dead_s means destroyed, and the slot is
-   *        selectable again only after min_detect_count consecutive lit frames. Returns
-   *        whether the frame counts as seen.
+   * @brief 灭灯与阵亡，返回这一帧是否算看到。
+   *        Lights off and destruction; returns whether the frame counts as seen.
+   *
+   * 受击时灯条闪灭（每次约 100 ms），阵亡后一直灭。已有目标附近的灭灯板在 off_hold_s
+   * 内算作看到（只预测，角点不进滤波：v7 不训练灭灯板的角点）；连续灭灯达到
+   * off_dead_s 判阵亡，之后连续 min_detect_s 看到亮板才恢复可选。
+   * A hit flashes the light bars off (about 100 ms each time); a destroyed robot stays
+   * off. Off plates near an existing target count as seen within off_hold_s (prediction
+   * only, no corner update: v7 does not train corners on off plates); off for off_dead_s
+   * means destroyed, and the slot is selectable again only after lit sightings for
+   * min_detect_s.
    */
   bool UpdateOff(Slot& slot, bool found, bool lit,
                  const std::vector<const AutoAim::Armor*>& off, double t) const
@@ -592,13 +599,20 @@ class TrackSet
     if (lit)
     {
       slot.off_since = -1.0;
-      if (slot.destroyed && found && ++slot.revive_count >= s_.min_detect_count)
+      if (slot.destroyed && found)
       {
-        slot.destroyed = false;
+        if (slot.revive_since < 0.0)
+        {
+          slot.revive_since = t;
+        }
+        if (t - slot.revive_since >= s_.min_detect_s - TIME_EPS)
+        {
+          slot.destroyed = false;
+        }
       }
       return found;
     }
-    slot.revive_count = 0;
+    slot.revive_since = -1.0;
     if (!OffNearTarget(slot, off))
     {
       return found;
@@ -656,9 +670,13 @@ class TrackSet
     return false;
   }
 
+  /// 确认（TRACKING）或暂时没看到（TEMP_LOST）的目标才可选；刚看到的不选，编号误判出的
+  /// 单帧目标因此不会被打 / Only confirmed (TRACKING) or briefly unseen (TEMP_LOST)
+  /// targets are selectable, so a single frame with a misread number is not engaged.
   static bool Selectable(const Slot& slot)
   {
-    return slot.Initialized() && !slot.destroyed && slot.state != TrackState::LOST &&
+    return slot.Initialized() && !slot.destroyed &&
+           (slot.state == TrackState::TRACKING || slot.state == TrackState::TEMP_LOST) &&
            std::isfinite(slot.score) && (!slot.vehicle || slot.vehicle_target.tracking);
   }
 
